@@ -50,7 +50,7 @@ import io.grpc.ExperimentalApi;
  * <p>Implementations of this class represent the 'outbound' message stream.
  *
  */
-@ExperimentalApi
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1788")
 public abstract class CallStreamObserver<V> implements StreamObserver<V> {
 
   /**
@@ -99,4 +99,11 @@ public abstract class CallStreamObserver<V> implements StreamObserver<V> {
    * @param count more messages
    */
   public abstract void request(int count);
+
+  /**
+   * Sets message compression for subsequent calls to {@link #onNext}.
+   *
+   * @param enable whether to enable compression.
+   */
+  public abstract void setMessageCompression(boolean enable);
 }

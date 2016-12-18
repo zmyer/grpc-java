@@ -31,11 +31,13 @@
 
 package io.grpc.inprocess;
 
+import com.google.census.CensusContextFactory;
 import com.google.common.base.Preconditions;
 
 import io.grpc.ExperimentalApi;
-import io.grpc.HandlerRegistry;
+import io.grpc.Internal;
 import io.grpc.internal.AbstractServerImplBuilder;
+import io.grpc.internal.NoopCensusContextFactory;
 
 import java.io.File;
 
@@ -45,20 +47,9 @@ import java.io.File;
  *
  * <p>The server is intended to be fully-featured, high performance, and useful in testing.
  */
-@ExperimentalApi("There is no plan to make this API stable.")
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1783")
 public final class InProcessServerBuilder
         extends AbstractServerImplBuilder<InProcessServerBuilder> {
-  /**
-   * Create a server builder that will bind with the given name.
-   *
-   * @param name the identity of the server for clients to connect to
-   * @param registry the registry of handlers used for dispatching incoming calls
-   * @return a new builder
-   */
-  public static InProcessServerBuilder forName(String name, HandlerRegistry registry) {
-    return new InProcessServerBuilder(name, registry);
-  }
-
   /**
    * Create a server builder that will bind with the given name.
    *
@@ -71,13 +62,12 @@ public final class InProcessServerBuilder
 
   private final String name;
 
-  private InProcessServerBuilder(String name, HandlerRegistry registry) {
-    super(registry);
-    this.name = Preconditions.checkNotNull(name, "name");
-  }
-
   private InProcessServerBuilder(String name) {
     this.name = Preconditions.checkNotNull(name, "name");
+    // TODO(zhangkun83): InProcessTransport by-passes framer and deframer, thus message sizses are
+    // not counted.  Therefore, we disable Census for now.
+    // (https://github.com/grpc/grpc-java/issues/2284)
+    super.censusContextFactory(NoopCensusContextFactory.INSTANCE);
   }
 
   @Override
@@ -88,5 +78,15 @@ public final class InProcessServerBuilder
   @Override
   public InProcessServerBuilder useTransportSecurity(File certChain, File privateKey) {
     throw new UnsupportedOperationException("TLS not supported in InProcessServer");
+  }
+
+  @Internal
+  @Override
+  public InProcessServerBuilder censusContextFactory(CensusContextFactory censusFactory) {
+    // TODO(zhangkun83): InProcessTransport by-passes framer and deframer, thus message sizses are
+    // not counted.  Census is disabled by using a NOOP Census factory in the constructor, and here
+    // we prevent the user from overriding it.
+    // (https://github.com/grpc/grpc-java/issues/2284)
+    return this;
   }
 }

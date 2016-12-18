@@ -65,11 +65,14 @@ import org.junit.runners.Parameterized.Parameters;
 
 import java.io.File;
 import java.io.IOException;
+import java.security.NoSuchAlgorithmException;
 import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+
+import javax.net.ssl.SSLContext;
 
 
 /**
@@ -91,17 +94,22 @@ public class TlsTest {
   @Parameter(value = 0)
   public SslProvider sslProvider;
 
-  private int port = TestUtils.pickUnusedPort();
   private ScheduledExecutorService executor;
   private Server server;
   private ManagedChannel channel;
   private SslContextBuilder clientContextBuilder;
 
   @Before
-  public void setUp() {
+  public void setUp() throws NoSuchAlgorithmException {
     executor = Executors.newSingleThreadScheduledExecutor();
     if (sslProvider == SslProvider.OPENSSL) {
       Assume.assumeTrue(OpenSsl.isAvailable());
+    }
+    if (sslProvider == SslProvider.JDK) {
+      Assume.assumeTrue(Arrays.asList(
+          SSLContext.getDefault().getSupportedSSLParameters().getCipherSuites())
+          .contains("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"));
+
     }
     clientContextBuilder = GrpcSslContexts.configure(SslContextBuilder.forClient(), sslProvider);
   }
@@ -130,8 +138,8 @@ public class TlsTest {
     X509Certificate[] serverTrustedCaCerts = {
       TestUtils.loadX509Cert("ca.pem")
     };
-    server = serverBuilder(port, serverCertFile, serverPrivateKeyFile, serverTrustedCaCerts)
-        .addService(TestServiceGrpc.bindService(new TestServiceImpl(executor)))
+    server = serverBuilder(0, serverCertFile, serverPrivateKeyFile, serverTrustedCaCerts)
+        .addService(new TestServiceImpl(executor))
         .build()
         .start();
 
@@ -141,7 +149,7 @@ public class TlsTest {
     X509Certificate[] clientTrustedCaCerts = {
       TestUtils.loadX509Cert("ca.pem")
     };
-    channel = clientChannel(port, clientContextBuilder
+    channel = clientChannel(server.getPort(), clientContextBuilder
         .keyManager(clientCertChainFile, clientPrivateKeyFile)
         .trustManager(clientTrustedCaCerts)
         .build());
@@ -166,8 +174,8 @@ public class TlsTest {
     X509Certificate[] serverTrustedCaCerts = {
       TestUtils.loadX509Cert("ca.pem")
     };
-    server = serverBuilder(port, serverCertFile, serverPrivateKeyFile, serverTrustedCaCerts)
-        .addService(TestServiceGrpc.bindService(new TestServiceImpl(executor)))
+    server = serverBuilder(0, serverCertFile, serverPrivateKeyFile, serverTrustedCaCerts)
+        .addService(new TestServiceImpl(executor))
         .build()
         .start();
 
@@ -179,7 +187,7 @@ public class TlsTest {
     X509Certificate[] clientTrustedCaCerts = {
       TestUtils.loadX509Cert("ca.pem")
     };
-    channel = clientChannel(port, clientContextBuilder
+    channel = clientChannel(server.getPort(), clientContextBuilder
         .keyManager(clientCertChainFile, clientPrivateKeyFile)
         .trustManager(clientTrustedCaCerts)
         .build());
@@ -213,8 +221,8 @@ public class TlsTest {
     X509Certificate[] serverTrustedCaCerts = {
       TestUtils.loadX509Cert("ca.pem")
     };
-    server = serverBuilder(port, serverCertFile, serverPrivateKeyFile, serverTrustedCaCerts)
-        .addService(TestServiceGrpc.bindService(new TestServiceImpl(executor)))
+    server = serverBuilder(0, serverCertFile, serverPrivateKeyFile, serverTrustedCaCerts)
+        .addService(new TestServiceImpl(executor))
         .build()
         .start();
 
@@ -222,7 +230,7 @@ public class TlsTest {
     X509Certificate[] clientTrustedCaCerts = {
       TestUtils.loadX509Cert("ca.pem")
     };
-    channel = clientChannel(port, clientContextBuilder
+    channel = clientChannel(server.getPort(), clientContextBuilder
         .trustManager(clientTrustedCaCerts)
         .build());
     TestServiceGrpc.TestServiceBlockingStub client = TestServiceGrpc.newBlockingStub(channel);
@@ -255,8 +263,8 @@ public class TlsTest {
     X509Certificate[] serverTrustedCaCerts = {
       TestUtils.loadX509Cert("ca.pem")
     };
-    server = serverBuilder(port, serverCertFile, serverPrivateKeyFile, serverTrustedCaCerts)
-        .addService(TestServiceGrpc.bindService(new TestServiceImpl(executor)))
+    server = serverBuilder(0, serverCertFile, serverPrivateKeyFile, serverTrustedCaCerts)
+        .addService(new TestServiceImpl(executor))
         .build()
         .start();
 
@@ -266,7 +274,7 @@ public class TlsTest {
     X509Certificate[] clientTrustedCaCerts = {
       TestUtils.loadX509Cert("ca.pem")
     };
-    channel = clientChannel(port, clientContextBuilder
+    channel = clientChannel(server.getPort(), clientContextBuilder
         .keyManager(clientCertChainFile, clientPrivateKeyFile)
         .trustManager(clientTrustedCaCerts)
         .build());

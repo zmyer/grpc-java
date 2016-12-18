@@ -31,6 +31,7 @@
 
 package io.grpc;
 
+import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 
 import java.util.Collections;
@@ -43,7 +44,7 @@ import javax.annotation.concurrent.Immutable;
 /**
  * An immutable type-safe container of attributes.
  */
-@ExperimentalApi
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1764")
 @Immutable
 public final class Attributes {
 
@@ -70,6 +71,13 @@ public final class Attributes {
    */
   public Set<Key<?>> keys() {
     return Collections.unmodifiableSet(data.keySet());
+  }
+
+  /**
+   * Create a new builder that is pre-populated with the content from a given container.
+   */
+  public static Builder newBuilder(Attributes base) {
+    return newBuilder().setAll(base);
   }
 
   /**
@@ -108,6 +116,42 @@ public final class Attributes {
     return data.toString();
   }
 
+  /**
+   * Returns true if the given object is also a {@link Attributes} with an equal attribute values.
+   *
+   * <p>Note that if a stored values are mutable, it is possible for two objects to be considered
+   * equal at one point in time and not equal at another (due to concurrent mutation of attribute
+   * values).
+   *
+   * @param o an object.
+   * @return true if the given object is a {@link Attributes} equal attributes.
+   */
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    Attributes that = (Attributes) o;
+    return Objects.equal(data, that.data);
+  }
+
+  /**
+   * Returns a hash code for the attributes.
+   *
+   * <p>Note that if a stored values are mutable, it is possible for two objects to be considered
+   * equal at one point in time and not equal at another (due to concurrent mutation of attribute
+   * values).
+   *
+   * @return a hash code for the attributes map.
+   */
+  @Override
+  public int hashCode() {
+    return data.hashCode();
+  }
+
   public static final class Builder {
     private Attributes product;
 
@@ -117,6 +161,11 @@ public final class Attributes {
 
     public <T> Builder set(Key<T> key, T value) {
       product.data.put(key, value);
+      return this;
+    }
+
+    public <T> Builder setAll(Attributes other) {
+      product.data.putAll(other.data);
       return this;
     }
 

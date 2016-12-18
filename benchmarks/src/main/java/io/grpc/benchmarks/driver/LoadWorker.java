@@ -31,8 +31,13 @@
 
 package io.grpc.benchmarks.driver;
 
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+
 import io.grpc.Status;
 import io.grpc.benchmarks.proto.Control;
+import io.grpc.benchmarks.proto.Control.ClientArgs;
+import io.grpc.benchmarks.proto.Control.ServerArgs;
+import io.grpc.benchmarks.proto.Control.ServerArgs.ArgtypeCase;
 import io.grpc.benchmarks.proto.WorkerServiceGrpc;
 import io.grpc.internal.ServerImpl;
 import io.grpc.netty.NettyServerBuilder;
@@ -55,12 +60,16 @@ public class LoadWorker {
 
   LoadWorker(int driverPort, int serverPort) throws Exception {
     this.serverPort = serverPort;
-    NioEventLoopGroup singleThreadGroup = new NioEventLoopGroup(1);
+    NioEventLoopGroup singleThreadGroup = new NioEventLoopGroup(1,
+        new ThreadFactoryBuilder()
+            .setDaemon(true)
+            .setNameFormat("load-worker-%d")
+            .build());
     this.driverServer = NettyServerBuilder.forPort(driverPort)
         .directExecutor()
         .workerEventLoopGroup(singleThreadGroup)
         .bossEventLoopGroup(singleThreadGroup)
-        .addService(WorkerServiceGrpc.bindService(new WorkerServiceImpl()))
+        .addService(new WorkerServiceImpl())
         .build();
   }
 
@@ -116,24 +125,29 @@ public class LoadWorker {
     LoadWorker loadWorker = new LoadWorker(driverPort, serverPort);
     loadWorker.start();
     loadWorker.driverServer.awaitTermination();
+    log.log(Level.INFO, "DriverServer has terminated.");
+
+    // Allow enough time for quitWorker to deliver OK status to the driver.
+    Thread.sleep(3000);
   }
 
   /**
    * Implement the worker service contract which can launch clients and servers.
    */
-  private class WorkerServiceImpl implements WorkerServiceGrpc.WorkerService {
+  private class WorkerServiceImpl extends WorkerServiceGrpc.WorkerServiceImplBase {
 
     private LoadServer workerServer;
     private LoadClient workerClient;
 
     @Override
-    public StreamObserver<Control.ServerArgs> runServer(
+    public StreamObserver<ServerArgs> runServer(
         final StreamObserver<Control.ServerStatus> responseObserver) {
-      return new StreamObserver<Control.ServerArgs>() {
+      return new StreamObserver<ServerArgs>() {
         @Override
-        public void onNext(Control.ServerArgs value) {
+        public void onNext(ServerArgs value) {
           try {
-            if (value.getSetup() != null && workerServer == null) {
+            ArgtypeCase argTypeCase = value.getArgtypeCase();
+            if (argTypeCase == ServerArgs.ArgtypeCase.SETUP && workerServer == null) {
               if (serverPort != 0 && value.getSetup().getPort() == 0) {
                 Control.ServerArgs.Builder builder = value.toBuilder();
                 builder.getSetupBuilder().setPort(serverPort);
@@ -145,7 +159,7 @@ public class LoadWorker {
                   .setPort(workerServer.getPort())
                   .setCores(workerServer.getCores())
                   .build());
-            } else if (value.getMark() != null && workerServer != null) {
+            } else if (argTypeCase == ArgtypeCase.MARK && workerServer != null) {
               responseObserver.onNext(Control.ServerStatus.newBuilder()
                   .setStats(workerServer.getStats())
                   .build());
@@ -186,17 +200,18 @@ public class LoadWorker {
     }
 
     @Override
-    public StreamObserver<Control.ClientArgs> runClient(
+    public StreamObserver<ClientArgs> runClient(
         final StreamObserver<Control.ClientStatus> responseObserver) {
-      return new StreamObserver<Control.ClientArgs>() {
+      return new StreamObserver<ClientArgs>() {
         @Override
-        public void onNext(Control.ClientArgs value) {
+        public void onNext(ClientArgs value) {
           try {
-            if (value.getSetup() != null && workerClient == null) {
+            ClientArgs.ArgtypeCase argTypeCase = value.getArgtypeCase();
+            if (argTypeCase == ClientArgs.ArgtypeCase.SETUP && workerClient == null) {
               workerClient = new LoadClient(value.getSetup());
               workerClient.start();
               responseObserver.onNext(Control.ClientStatus.newBuilder().build());
-            } else if (value.getMark() != null && workerClient != null) {
+            } else if (argTypeCase == ClientArgs.ArgtypeCase.MARK && workerClient != null) {
               responseObserver.onNext(Control.ClientStatus.newBuilder()
                   .setStats(workerClient.getStats())
                   .build());
@@ -250,13 +265,13 @@ public class LoadWorker {
     public void quitWorker(Control.Void request,
                            StreamObserver<Control.Void> responseObserver) {
       try {
+        log.log(Level.INFO, "Received quitWorker request.");
         responseObserver.onNext(Control.Void.getDefaultInstance());
         responseObserver.onCompleted();
         driverServer.shutdownNow();
       } catch (Throwable t) {
         log.log(Level.WARNING, "Error during shutdown", t);
       }
-      System.exit(0);
     }
   }
 }

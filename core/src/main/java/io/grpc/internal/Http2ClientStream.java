@@ -34,6 +34,7 @@ package io.grpc.internal;
 import com.google.common.base.Charsets;
 import com.google.common.base.Preconditions;
 
+import io.grpc.InternalMetadata;
 import io.grpc.Metadata;
 import io.grpc.Status;
 
@@ -44,36 +45,45 @@ import javax.annotation.Nullable;
 /**
  * Base implementation for client streams using HTTP2 as the transport.
  */
-public abstract class Http2ClientStream extends AbstractClientStream<Integer> {
+public abstract class Http2ClientStream extends AbstractClientStream {
 
   /**
    * Metadata marshaller for HTTP status lines.
    */
-  private static final Metadata.AsciiMarshaller<Integer> HTTP_STATUS_LINE_MARSHALLER =
-      new Metadata.AsciiMarshaller<Integer>() {
+  private static final InternalMetadata.TrustedAsciiMarshaller<Integer> HTTP_STATUS_MARSHALLER =
+      new InternalMetadata.TrustedAsciiMarshaller<Integer>() {
         @Override
-        public String toAsciiString(Integer value) {
-          return value.toString();
+        public byte[] toAsciiString(Integer value) {
+          throw new UnsupportedOperationException();
         }
 
+        /**
+         * RFC 7231 says status codes are 3 digits long.
+         *
+         * @see: <a href="https://tools.ietf.org/html/rfc7231#section-6">RFC 7231</a>
+         */
         @Override
-        public Integer parseAsciiString(String serialized) {
-          return Integer.parseInt(serialized.split(" ", 2)[0]);
+        public Integer parseAsciiString(byte[] serialized) {
+          if (serialized.length >= 3) {
+            return (serialized[0] - '0') * 100 + (serialized[1] - '0') * 10 + (serialized[2] - '0');
+          }
+          throw new NumberFormatException(
+              "Malformed status code " + new String(serialized, InternalMetadata.US_ASCII));
         }
       };
 
-  private static final Metadata.Key<Integer> HTTP2_STATUS = Metadata.Key.of(":status",
-      HTTP_STATUS_LINE_MARSHALLER);
+  private static final Metadata.Key<Integer> HTTP2_STATUS = InternalMetadata.keyOf(":status",
+      HTTP_STATUS_MARSHALLER);
 
   /** When non-{@code null}, {@link #transportErrorMetadata} must also be non-{@code null}. */
   private Status transportError;
   private Metadata transportErrorMetadata;
   private Charset errorCharset = Charsets.UTF_8;
-  private boolean contentTypeChecked;
+  private boolean headersReceived;
 
-  protected Http2ClientStream(WritableBufferAllocator bufferAllocator,
-                              int maxMessageSize) {
-    super(bufferAllocator, maxMessageSize);
+  protected Http2ClientStream(WritableBufferAllocator bufferAllocator, int maxMessageSize,
+      StatsTraceContext statsTraceCtx) {
+    super(bufferAllocator, maxMessageSize, statsTraceCtx);
   }
 
   /**
@@ -82,30 +92,39 @@ public abstract class Http2ClientStream extends AbstractClientStream<Integer> {
    * @param headers the received headers
    */
   protected void transportHeadersReceived(Metadata headers) {
-    Preconditions.checkNotNull(headers);
+    Preconditions.checkNotNull(headers, "headers");
     if (transportError != null) {
-      // Already received a transport error so just augment it.
-      transportError = transportError.augmentDescription(headers.toString());
+      // Already received a transport error so just augment it. Something is really, really strange.
+      transportError = transportError.augmentDescription("headers: " + headers);
       return;
     }
-    Status httpStatus = statusFromHttpStatus(headers);
-    if (httpStatus == null) {
-      transportError = Status.INTERNAL.withDescription(
-          "received non-terminal headers with no :status");
-    } else if (!httpStatus.isOk()) {
-      transportError = httpStatus;
-    } else {
-      transportError = checkContentType(headers);
-    }
-    if (transportError != null) {
-      // Note we don't immediately report the transport error, instead we wait for more data on the
-      // stream so we can accumulate more detail into the error before reporting it.
-      transportError = transportError.augmentDescription("\n" + headers);
-      transportErrorMetadata = headers;
-      errorCharset = extractCharset(headers);
-    } else {
+    try {
+      if (headersReceived) {
+        transportError = Status.INTERNAL.withDescription("Received headers twice");
+        return;
+      }
+      Integer httpStatus = headers.get(HTTP2_STATUS);
+      if (httpStatus != null && httpStatus >= 100 && httpStatus < 200) {
+        // Ignore the headers. See RFC 7540 §8.1
+        return;
+      }
+      headersReceived = true;
+
+      transportError = validateInitialMetadata(headers);
+      if (transportError != null) {
+        return;
+      }
+
       stripTransportDetails(headers);
       inboundHeadersReceived(headers);
+    } finally {
+      if (transportError != null) {
+        // Note we don't immediately report the transport error, instead we wait for more data on
+        // the stream so we can accumulate more detail into the error before reporting it.
+        transportError = transportError.augmentDescription("headers: " + headers);
+        transportErrorMetadata = headers;
+        errorCharset = extractCharset(headers);
+      }
     }
   }
 
@@ -137,7 +156,8 @@ public abstract class Http2ClientStream extends AbstractClientStream<Integer> {
       inboundDataReceived(frame);
       if (endOfStream) {
         // This is a protocol violation as we expect to receive trailers.
-        transportError = Status.INTERNAL.withDescription("Received EOS on DATA frame");
+        transportError =
+            Status.INTERNAL.withDescription("Received unexpected EOS on DATA frame from server.");
         transportErrorMetadata = new Metadata();
         inboundTransportError(transportError, transportErrorMetadata);
       }
@@ -150,15 +170,15 @@ public abstract class Http2ClientStream extends AbstractClientStream<Integer> {
    * @param trailers the received terminal trailer metadata
    */
   protected void transportTrailersReceived(Metadata trailers) {
-    Preconditions.checkNotNull(trailers);
-    if (transportError != null) {
-      // Already received a transport error so just augment it.
-      transportError = transportError.augmentDescription(trailers.toString());
-    } else {
-      transportError = checkContentType(trailers);
-      transportErrorMetadata = trailers;
+    Preconditions.checkNotNull(trailers, "trailers");
+    if (transportError == null && !headersReceived) {
+      transportError = validateInitialMetadata(trailers);
+      if (transportError != null) {
+        transportErrorMetadata = trailers;
+      }
     }
     if (transportError != null) {
+      transportError = transportError.augmentDescription("trailers: " + trailers);
       inboundTransportError(transportError, transportErrorMetadata);
       sendCancel(Status.CANCELLED);
     } else {
@@ -168,50 +188,44 @@ public abstract class Http2ClientStream extends AbstractClientStream<Integer> {
     }
   }
 
-  private static Status statusFromHttpStatus(Metadata metadata) {
-    Integer httpStatus = metadata.get(HTTP2_STATUS);
-    if (httpStatus != null) {
-      Status status = GrpcUtil.httpStatusToGrpcStatus(httpStatus);
-      return status.isOk() ? status
-          : status.augmentDescription("extracted status from HTTP :status " + httpStatus);
-    }
-    return null;
-  }
-
   /**
    * Extract the response status from trailers.
    */
   private Status statusFromTrailers(Metadata trailers) {
     Status status = trailers.get(Status.CODE_KEY);
-    if (status == null) {
-      status = statusFromHttpStatus(trailers);
-      if (status == null || status.isOk()) {
-        status = Status.UNKNOWN.withDescription("missing GRPC status in response");
-      } else {
-        status = status.withDescription(
-            "missing GRPC status, inferred error from HTTP status code");
-      }
+    if (status != null) {
+      return status.withDescription(trailers.get(Status.MESSAGE_KEY));
     }
-    String message = trailers.get(Status.MESSAGE_KEY);
-    if (message != null) {
-      status = status.augmentDescription(message);
+    // No status; something is broken. Try to provide a resonanable error.
+    if (headersReceived) {
+      return Status.UNKNOWN.withDescription("missing GRPC status in response");
     }
-    return status;
+    Integer httpStatus = trailers.get(HTTP2_STATUS);
+    if (httpStatus != null) {
+      status = GrpcUtil.httpStatusToGrpcStatus(httpStatus);
+    } else {
+      status = Status.INTERNAL.withDescription("missing HTTP status code");
+    }
+    return status.augmentDescription(
+        "missing GRPC status, inferred error from HTTP status code");
   }
 
   /**
-   * Inspect the content type field from received headers or trailers and return an error Status if
-   * content type is invalid or not present. Returns null if no error was found.
+   * Inspect initial headers to make sure they conform to HTTP and gRPC, returning a {@code Status}
+   * on failure.
+   *
+   * @return status with description of failure, or {@code null} when valid
    */
   @Nullable
-  private Status checkContentType(Metadata headers) {
-    if (contentTypeChecked) {
-      return null;
+  private Status validateInitialMetadata(Metadata headers) {
+    Integer httpStatus = headers.get(HTTP2_STATUS);
+    if (httpStatus == null) {
+      return Status.INTERNAL.withDescription("Missing HTTP status code");
     }
-    contentTypeChecked = true;
     String contentType = headers.get(GrpcUtil.CONTENT_TYPE_KEY);
     if (!GrpcUtil.isGrpcContentType(contentType)) {
-      return Status.INTERNAL.withDescription("Invalid content-type: " + contentType);
+      return GrpcUtil.httpStatusToGrpcStatus(httpStatus)
+          .augmentDescription("invalid content-type: " + contentType);
     }
     return null;
   }
@@ -237,8 +251,8 @@ public abstract class Http2ClientStream extends AbstractClientStream<Integer> {
    * the application layer.
    */
   private static void stripTransportDetails(Metadata metadata) {
-    metadata.removeAll(HTTP2_STATUS);
-    metadata.removeAll(Status.CODE_KEY);
-    metadata.removeAll(Status.MESSAGE_KEY);
+    metadata.discardAll(HTTP2_STATUS);
+    metadata.discardAll(Status.CODE_KEY);
+    metadata.discardAll(Status.MESSAGE_KEY);
   }
 }

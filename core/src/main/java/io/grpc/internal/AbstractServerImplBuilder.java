@@ -32,8 +32,11 @@
 package io.grpc.internal;
 
 import static com.google.common.base.MoreObjects.firstNonNull;
+import static com.google.common.base.Preconditions.checkNotNull;
 
-import com.google.common.base.Preconditions;
+import com.google.census.Census;
+import com.google.census.CensusContextFactory;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.MoreExecutors;
 
 import io.grpc.BindableService;
@@ -42,11 +45,15 @@ import io.grpc.Context;
 import io.grpc.DecompressorRegistry;
 import io.grpc.HandlerRegistry;
 import io.grpc.Internal;
-import io.grpc.MutableHandlerRegistry;
-import io.grpc.MutableHandlerRegistryImpl;
+import io.grpc.InternalNotifyOnServerBuild;
 import io.grpc.ServerBuilder;
+import io.grpc.ServerMethodDefinition;
 import io.grpc.ServerServiceDefinition;
+import io.grpc.ServerTransportFilter;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.Executor;
 
 import javax.annotation.Nullable;
@@ -59,7 +66,31 @@ import javax.annotation.Nullable;
 public abstract class AbstractServerImplBuilder<T extends AbstractServerImplBuilder<T>>
         extends ServerBuilder<T> {
 
-  private final HandlerRegistry registry;
+  private static final HandlerRegistry EMPTY_FALLBACK_REGISTRY = new HandlerRegistry() {
+      @Override
+      public List<ServerServiceDefinition> getServices() {
+        return Collections.emptyList();
+      }
+
+      @Override
+      public ServerMethodDefinition<?, ?> lookupMethod(String methodName,
+          @Nullable String authority) {
+        return null;
+      }
+    };
+
+  private final InternalHandlerRegistry.Builder registryBuilder =
+      new InternalHandlerRegistry.Builder();
+
+  private final ArrayList<ServerTransportFilter> transportFilters =
+      new ArrayList<ServerTransportFilter>();
+
+  private final List<InternalNotifyOnServerBuild> notifyOnBuildList =
+      new ArrayList<InternalNotifyOnServerBuild>();
+
+  @Nullable
+  private HandlerRegistry fallbackRegistry;
+
   @Nullable
   private Executor executor;
 
@@ -69,19 +100,8 @@ public abstract class AbstractServerImplBuilder<T extends AbstractServerImplBuil
   @Nullable
   private CompressorRegistry compressorRegistry;
 
-  /**
-   * Constructs using a given handler registry.
-   */
-  protected AbstractServerImplBuilder(HandlerRegistry registry) {
-    this.registry = Preconditions.checkNotNull(registry);
-  }
-
-  /**
-   * Constructs with a MutableHandlerRegistry created internally.
-   */
-  protected AbstractServerImplBuilder() {
-    this.registry = new MutableHandlerRegistryImpl();
-  }
+  @Nullable
+  private CensusContextFactory censusFactory;
 
   @Override
   public final T directExecutor() {
@@ -94,34 +114,30 @@ public abstract class AbstractServerImplBuilder<T extends AbstractServerImplBuil
     return thisT();
   }
 
-  /**
-   * Adds a service implementation to the handler registry.
-   *
-   * <p>This is supported only if the user didn't provide a handler registry, or the provided one is
-   * a {@link MutableHandlerRegistry}. Otherwise it throws an UnsupportedOperationException.
-   *
-   * @param service ServerServiceDefinition object.
-   */
   @Override
   public final T addService(ServerServiceDefinition service) {
-    if (registry instanceof MutableHandlerRegistry) {
-      ((MutableHandlerRegistry) registry).addService(service);
-      return thisT();
-    }
-    throw new UnsupportedOperationException("Underlying HandlerRegistry is not mutable");
+    registryBuilder.addService(service);
+    return thisT();
   }
 
-  /**
-   * Adds a service implementation to the handler registry.
-   *
-   * <p>This is supported only if the user didn't provide a handler registry, or the provided one is
-   * a {@link MutableHandlerRegistry}. Otherwise it throws an UnsupportedOperationException.
-   *
-   * @param bindableService BindableService object.
-   */
   @Override
   public final T addService(BindableService bindableService) {
+    if (bindableService instanceof InternalNotifyOnServerBuild) {
+      notifyOnBuildList.add((InternalNotifyOnServerBuild) bindableService);
+    }
     return addService(bindableService.bindService());
+  }
+
+  @Override
+  public final T addTransportFilter(ServerTransportFilter filter) {
+    transportFilters.add(checkNotNull(filter, "filter"));
+    return thisT();
+  }
+
+  @Override
+  public final T fallbackHandlerRegistry(HandlerRegistry registry) {
+    this.fallbackRegistry = registry;
+    return thisT();
   }
 
   @Override
@@ -136,12 +152,31 @@ public abstract class AbstractServerImplBuilder<T extends AbstractServerImplBuil
     return thisT();
   }
 
+  /**
+   * Override the default Census implementation.  This is meant to be used in tests.
+   */
+  @VisibleForTesting
+  @Internal
+  public T censusContextFactory(CensusContextFactory censusFactory) {
+    this.censusFactory = censusFactory;
+    return thisT();
+  }
+
   @Override
   public ServerImpl build() {
-    io.grpc.internal.Server transportServer = buildTransportServer();
-    return new ServerImpl(executor, registry, transportServer, Context.ROOT,
-        firstNonNull(decompressorRegistry, DecompressorRegistry.getDefaultInstance()),
-        firstNonNull(compressorRegistry, CompressorRegistry.getDefaultInstance()));
+    io.grpc.internal.InternalServer transportServer = buildTransportServer();
+    ServerImpl server = new ServerImpl(executor, registryBuilder.build(),
+        firstNonNull(fallbackRegistry, EMPTY_FALLBACK_REGISTRY), transportServer,
+        Context.ROOT, firstNonNull(decompressorRegistry, DecompressorRegistry.getDefaultInstance()),
+        firstNonNull(compressorRegistry, CompressorRegistry.getDefaultInstance()),
+        transportFilters,
+        firstNonNull(censusFactory,
+            firstNonNull(Census.getCensusContextFactory(), NoopCensusContextFactory.INSTANCE)),
+        GrpcUtil.STOPWATCH_SUPPLIER);
+    for (InternalNotifyOnServerBuild notifyTarget : notifyOnBuildList) {
+      notifyTarget.notifyOnBuild(server);
+    }
+    return server;
   }
 
   /**
@@ -150,7 +185,7 @@ public abstract class AbstractServerImplBuilder<T extends AbstractServerImplBuil
    * used by normal users.
    */
   @Internal
-  protected abstract io.grpc.internal.Server buildTransportServer();
+  protected abstract io.grpc.internal.InternalServer buildTransportServer();
 
   private T thisT() {
     @SuppressWarnings("unchecked")

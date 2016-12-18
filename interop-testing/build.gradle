@@ -3,16 +3,6 @@ apply plugin: 'application'
 description = "gRPC: Integration Testing"
 startScripts.enabled = false
 
-// Add dependency on the protobuf plugin
-buildscript {
-    repositories {
-        mavenCentral()
-    }
-    dependencies {
-        classpath libraries.protobuf_plugin
-    }
-}
-
 dependencies {
     compile project(':grpc-auth'),
             project(':grpc-core'),
@@ -21,6 +11,7 @@ dependencies {
             project(':grpc-protobuf'),
             project(':grpc-stub'),
             project(':grpc-testing'),
+            project(':grpc-testing-proto'),
             libraries.junit,
             libraries.mockito,
             libraries.netty_tcnative,
@@ -29,7 +20,7 @@ dependencies {
 
 test {
     // For the automated tests, use Jetty ALPN.
-    jvmArgs "-Xbootclasspath/p:" + configurations.alpnboot.asPath
+    jvmArgs "-javaagent:" + configurations.alpnagent.asPath
 }
 
 // The application plugin uses the distribution plugin and configures the jars to be
@@ -74,7 +65,7 @@ task stresstest_client(type: CreateStartScripts) {
     applicationName = "stresstest-client"
     outputDir = new File(project.buildDir, 'tmp')
     classpath = jar.outputs.files + configurations.runtime + configurations.tcnative
-    defaultJvmOpts = ["-verbose:gc"]
+    defaultJvmOpts = ["-verbose:gc", "-XX:+PrintFlagsFinal"]
 }
 
 applicationDistribution.into("bin") {
@@ -83,14 +74,4 @@ applicationDistribution.into("bin") {
     from(reconnect_test_client)
     from(stresstest_client)
     fileMode = 0755
-}
-
-configureProtoCompilation()
-
-// Let intellij projects refer to generated code
-idea {
-    module {
-        sourceDirs += file("${projectDir}/src/generated/main/java");
-        sourceDirs += file("${projectDir}/src/generated/main/grpc");
-    }
 }

@@ -31,6 +31,10 @@
 
 package io.grpc.benchmarks.driver;
 
+import static java.util.concurrent.ForkJoinPool.defaultForkJoinWorkerThreadFactory;
+
+import com.google.common.util.concurrent.UncaughtExceptionHandlers;
+
 import com.sun.management.OperatingSystemMXBean;
 
 import io.grpc.Metadata;
@@ -40,6 +44,7 @@ import io.grpc.ServerBuilder;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerServiceDefinition;
+import io.grpc.ServiceDescriptor;
 import io.grpc.Status;
 import io.grpc.benchmarks.ByteBufOutputMarshaller;
 import io.grpc.benchmarks.Utils;
@@ -51,12 +56,15 @@ import io.grpc.stub.StreamObserver;
 import io.grpc.testing.TestUtils;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
-import io.netty.util.concurrent.DefaultThreadFactory;
 
 import java.io.File;
 import java.lang.management.ManagementFactory;
 import java.util.List;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ForkJoinPool.ForkJoinWorkerThreadFactory;
+import java.util.concurrent.ForkJoinWorkerThread;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -85,7 +93,7 @@ final class LoadServer {
           new ByteBufOutputMarshaller(),
           new ByteBufOutputMarshaller());
 
-  private static final Logger LOG = Logger.getLogger(LoadServer.class.getName());
+  private static final Logger log = Logger.getLogger(LoadServer.class.getName());
 
   private final Server server;
   private final BenchmarkServiceImpl benchmarkService;
@@ -97,8 +105,8 @@ final class LoadServer {
   private long lastMarkCpuTime;
 
   LoadServer(Control.ServerConfig config) throws Exception {
-    LOG.log(Level.INFO, "Server Config \n" + config.toString());
-    port = config.getPort() ==  0 ? TestUtils.pickUnusedPort() : config.getPort();
+    log.log(Level.INFO, "Server Config \n" + config.toString());
+    port = config.getPort() ==  0 ? Utils.pickUnusedPort() : config.getPort();
     ServerBuilder<?> serverBuilder = ServerBuilder.forPort(port);
     int asyncThreads = config.getAsyncServerThreads() == 0
         ? Runtime.getRuntime().availableProcessors()
@@ -109,8 +117,7 @@ final class LoadServer {
     // fully async.
     switch (config.getServerType()) {
       case ASYNC_SERVER: {
-        serverBuilder.executor(Executors.newFixedThreadPool(asyncThreads,
-            new DefaultThreadFactory("server-worker", true)));
+        serverBuilder.executor(getExecutor(asyncThreads));
         break;
       }
       case SYNC_SERVER: {
@@ -118,8 +125,7 @@ final class LoadServer {
         break;
       }
       case ASYNC_GENERIC_SERVER: {
-        serverBuilder.executor(Executors.newFixedThreadPool(asyncThreads,
-            new DefaultThreadFactory("server-worker", true)));
+        serverBuilder.executor(getExecutor(asyncThreads));
         // Create buffers for the generic service
         PooledByteBufAllocator alloc = PooledByteBufAllocator.DEFAULT;
         genericResponse = alloc.buffer(config.getPayloadConfig().getBytebufParams().getRespSize());
@@ -141,11 +147,12 @@ final class LoadServer {
     if (config.getServerType() == Control.ServerType.ASYNC_GENERIC_SERVER) {
       serverBuilder.addService(
           ServerServiceDefinition
-              .builder(BenchmarkServiceGrpc.SERVICE_NAME)
+              .builder(new ServiceDescriptor(BenchmarkServiceGrpc.SERVICE_NAME,
+                  GENERIC_STREAMING_PING_PONG_METHOD))
               .addMethod(GENERIC_STREAMING_PING_PONG_METHOD, new GenericServiceCallHandler())
               .build());
     } else {
-      serverBuilder.addService(BenchmarkServiceGrpc.bindService(benchmarkService));
+      serverBuilder.addService(benchmarkService);
     }
     server = serverBuilder.build();
 
@@ -156,6 +163,23 @@ final class LoadServer {
     } else {
       osBean = null;
     }
+  }
+
+  ExecutorService getExecutor(int asyncThreads) {
+    // TODO(carl-mastrangelo): This should not be necessary.  I don't know where this should be
+    // put.  Move it somewhere else, or remove it if no longer necessary.
+    // See: https://github.com/grpc/grpc-java/issues/2119
+    return new ForkJoinPool(asyncThreads,
+        new ForkJoinWorkerThreadFactory() {
+          final AtomicInteger num = new AtomicInteger();
+          @Override
+          public ForkJoinWorkerThread newThread(ForkJoinPool pool) {
+            ForkJoinWorkerThread thread = defaultForkJoinWorkerThreadFactory.newThread(pool);
+            thread.setDaemon(true);
+            thread.setName("server-worker-" + "-" + num.getAndIncrement());
+            return thread;
+          }
+        }, UncaughtExceptionHandlers.systemExit(), true /* async */);
   }
 
   int getPort() {
@@ -194,7 +218,7 @@ final class LoadServer {
     server.shutdownNow();
   }
 
-  private class BenchmarkServiceImpl implements BenchmarkServiceGrpc.BenchmarkService {
+  private class BenchmarkServiceImpl extends BenchmarkServiceGrpc.BenchmarkServiceImplBase {
 
     @Override
     public void unaryCall(Messages.SimpleRequest request,
@@ -230,9 +254,10 @@ final class LoadServer {
   }
 
   private class GenericServiceCallHandler implements ServerCallHandler<ByteBuf, ByteBuf> {
+
     @Override
-    public ServerCall.Listener<ByteBuf> startCall(MethodDescriptor<ByteBuf, ByteBuf> method,
-        final ServerCall<ByteBuf> call, Metadata headers) {
+    public ServerCall.Listener<ByteBuf> startCall(
+        final ServerCall<ByteBuf, ByteBuf> call, Metadata headers) {
       call.sendHeaders(new Metadata());
       call.request(1);
       return new ServerCall.Listener<ByteBuf>() {

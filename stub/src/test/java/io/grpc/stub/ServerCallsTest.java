@@ -31,32 +31,29 @@
 
 package io.grpc.stub;
 
+import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Mockito.times;
 
 import io.grpc.CallOptions;
 import io.grpc.ClientCall;
+import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerServiceDefinition;
+import io.grpc.ServiceDescriptor;
 import io.grpc.Status;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
-import io.grpc.internal.ManagedChannelImpl;
 
-import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-import org.mockito.Mock;
-import org.mockito.Mockito;
-import org.mockito.MockitoAnnotations;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -64,6 +61,8 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -87,13 +86,7 @@ public class ServerCallsTest {
       "some/unarymethod",
       new IntegerMarshaller(), new IntegerMarshaller());
 
-  @Mock
-  ServerCall<Integer> serverCall;
-
-  @Before
-  public void setUp() throws Exception {
-    MockitoAnnotations.initMocks(this);
-  }
+  private final ServerCallRecorder serverCall = new ServerCallRecorder();
 
   @Test
   public void runtimeStreamObserverIsServerCallStreamObserver() throws Exception {
@@ -128,9 +121,9 @@ public class ServerCallsTest {
               }
             });
     ServerCall.Listener<Integer> callListener =
-        callHandler.startCall(STREAMING_METHOD, serverCall, new Metadata());
-    Mockito.when(serverCall.isReady()).thenReturn(true).thenReturn(false);
-    Mockito.when(serverCall.isCancelled()).thenReturn(false).thenReturn(true);
+        callHandler.startCall(serverCall, new Metadata());
+    serverCall.isReady = true;
+    serverCall.isCancelled = false;
     assertTrue(callObserver.get().isReady());
     assertFalse(callObserver.get().isCancelled());
     callListener.onReady();
@@ -139,11 +132,13 @@ public class ServerCallsTest {
     assertTrue(invokeCalled.get());
     assertTrue(onReadyCalled.get());
     assertTrue(onCancelCalled.get());
+    serverCall.isReady = false;
+    serverCall.isCancelled = true;
     assertFalse(callObserver.get().isReady());
     assertTrue(callObserver.get().isCancelled());
     // Is called twice, once to permit the first message and once again after the first message
     // has been processed (auto flow control)
-    Mockito.verify(serverCall, times(2)).request(1);
+    assertThat(serverCall.requestCalls).containsExactly(1, 1).inOrder();
   }
 
   @Test
@@ -160,7 +155,7 @@ public class ServerCallsTest {
               }
             });
     ServerCall.Listener<Integer> callListener =
-        callHandler.startCall(STREAMING_METHOD, serverCall, new Metadata());
+        callHandler.startCall(serverCall, new Metadata());
     callListener.onMessage(1);
     try {
       callObserver.get().setOnCancelHandler(new Runnable() {
@@ -188,7 +183,7 @@ public class ServerCallsTest {
               }
             });
     ServerCall.Listener<Integer> callListener =
-        callHandler.startCall(STREAMING_METHOD, serverCall, new Metadata());
+        callHandler.startCall(serverCall, new Metadata());
     callListener.onMessage(1);
     try {
       callObserver.get().setOnReadyHandler(new Runnable() {
@@ -216,7 +211,7 @@ public class ServerCallsTest {
               }
             });
     ServerCall.Listener<Integer> callListener =
-        callHandler.startCall(STREAMING_METHOD, serverCall, new Metadata());
+        callHandler.startCall(serverCall, new Metadata());
     callListener.onMessage(1);
     try {
       callObserver.get().disableAutoInboundFlowControl();
@@ -240,13 +235,13 @@ public class ServerCallsTest {
               }
             });
     ServerCall.Listener<Integer> callListener =
-        callHandler.startCall(STREAMING_METHOD, serverCall, new Metadata());
+        callHandler.startCall(serverCall, new Metadata());
     callListener.onReady();
     // Transport should not call this if nothing has been requested but forcing it here
     // to verify that message delivery does not trigger a call to request(1).
     callListener.onMessage(1);
     // Should never be called
-    Mockito.verify(serverCall, times(0)).request(1);
+    assertThat(serverCall.requestCalls).isEmpty();
   }
 
   @Test
@@ -261,18 +256,15 @@ public class ServerCallsTest {
                 serverCallObserver.disableAutoInboundFlowControl();
               }
             });
-    ServerCall.Listener<Integer> callListener =
-        callHandler.startCall(UNARY_METHOD, serverCall, new Metadata());
+    callHandler.startCall(serverCall, new Metadata());
     // Auto inbound flow-control always requests 2 messages for unary to detect a violation
     // of the unary semantic.
-    Mockito.verify(serverCall, times(1)).request(2);
+    assertThat(serverCall.requestCalls).containsExactly(2);
   }
 
   @Test
   public void onReadyHandlerCalledForUnaryRequest() throws Exception {
     final AtomicInteger onReadyCalled = new AtomicInteger();
-    final AtomicReference<ServerCallStreamObserver<Integer>> callObserver =
-        new AtomicReference<ServerCallStreamObserver<Integer>>();
     ServerCallHandler<Integer, Integer> callHandler =
         ServerCalls.asyncServerStreamingCall(
             new ServerCalls.ServerStreamingMethod<Integer, Integer>() {
@@ -289,9 +281,9 @@ public class ServerCallsTest {
               }
             });
     ServerCall.Listener<Integer> callListener =
-        callHandler.startCall(STREAMING_METHOD, serverCall, new Metadata());
-    Mockito.when(serverCall.isReady()).thenReturn(true).thenReturn(false);
-    Mockito.when(serverCall.isCancelled()).thenReturn(false).thenReturn(true);
+        callHandler.startCall(serverCall, new Metadata());
+    serverCall.isReady = true;
+    serverCall.isCancelled = false;
     callListener.onReady();
     // On ready is not called until the unary request message is delivered
     assertEquals(0, onReadyCalled.get());
@@ -309,7 +301,8 @@ public class ServerCallsTest {
   @Test
   public void inprocessTransportManualFlow() throws Exception {
     final Semaphore semaphore = new Semaphore(1);
-    ServerServiceDefinition service = ServerServiceDefinition.builder("some")
+    ServerServiceDefinition service = ServerServiceDefinition.builder(
+        new ServiceDescriptor("some", STREAMING_METHOD))
         .addMethod(STREAMING_METHOD, ServerCalls.asyncBidiStreamingCall(
             new ServerCalls.BidiStreamingMethod<Integer, Integer>() {
               int iteration;
@@ -339,7 +332,7 @@ public class ServerCallsTest {
         .build();
     long tag = System.nanoTime();
     InProcessServerBuilder.forName("go-with-the-flow" + tag).addService(service).build().start();
-    ManagedChannelImpl channel = InProcessChannelBuilder.forName("go-with-the-flow" + tag).build();
+    ManagedChannel channel = InProcessChannelBuilder.forName("go-with-the-flow" + tag).build();
     final ClientCall<Integer, Integer> clientCall = channel.newCall(STREAMING_METHOD,
         CallOptions.DEFAULT);
     final CountDownLatch latch = new CountDownLatch(1);
@@ -391,6 +384,53 @@ public class ServerCallsTest {
       } catch (IOException ioe) {
         throw new RuntimeException(ioe);
       }
+    }
+  }
+
+  private static class ServerCallRecorder extends ServerCall<Integer, Integer> {
+    private List<Integer> requestCalls = new ArrayList<Integer>();
+    private Metadata headers;
+    private Integer message;
+    private Metadata trailers;
+    private Status status;
+    private boolean isCancelled;
+    private MethodDescriptor<Integer, Integer> methodDescriptor;
+    private boolean isReady;
+
+    @Override
+    public void request(int numMessages) {
+      requestCalls.add(numMessages);
+    }
+
+    @Override
+    public void sendHeaders(Metadata headers) {
+      this.headers = headers;
+    }
+
+    @Override
+    public void sendMessage(Integer message) {
+      this.message = message;
+    }
+
+    @Override
+    public void close(Status status, Metadata trailers) {
+      this.status = status;
+      this.trailers = trailers;
+    }
+
+    @Override
+    public boolean isCancelled() {
+      return isCancelled;
+    }
+
+    @Override
+    public boolean isReady() {
+      return isReady;
+    }
+
+    @Override
+    public MethodDescriptor<Integer, Integer> getMethodDescriptor() {
+      return methodDescriptor;
     }
   }
 }

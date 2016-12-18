@@ -33,6 +33,7 @@ package io.grpc.stub;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
+import io.grpc.CallCredentials;
 import io.grpc.CallOptions;
 import io.grpc.Channel;
 import io.grpc.ClientInterceptor;
@@ -72,8 +73,8 @@ public abstract class AbstractStub<S extends AbstractStub<S>> {
    * @param callOptions the runtime call options to be applied to every call on this stub
    */
   protected AbstractStub(Channel channel, CallOptions callOptions) {
-    this.channel = checkNotNull(channel);
-    this.callOptions = checkNotNull(callOptions);
+    this.channel = checkNotNull(channel, "channel");
+    this.callOptions = checkNotNull(callOptions, "callOptions");
   }
 
   /**
@@ -106,7 +107,6 @@ public abstract class AbstractStub<S extends AbstractStub<S>> {
    *
    * @param deadline the deadline or {@code null} for unsetting the deadline.
    */
-  @ExperimentalApi
   public final S withDeadline(@Nullable Deadline deadline) {
     return build(channel, callOptions.withDeadline(deadline));
   }
@@ -144,7 +144,7 @@ public abstract class AbstractStub<S extends AbstractStub<S>> {
    *
    * @param compressorName the name (e.g. "gzip") of the compressor to use.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   public final S withCompression(String compressorName) {
     return build(channel, callOptions.withCompression(compressorName));
   }
@@ -157,9 +157,36 @@ public abstract class AbstractStub<S extends AbstractStub<S>> {
   }
 
   /**
+   * Sets a custom option to be passed to client interceptors on the channel
+   * {@link io.grpc.ClientInterceptor} via the CallOptions parameter.
+   * @param key the option being set
+   * @param value the value for the key
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1869")
+  public final <T> S withOption(CallOptions.Key<T> key, T value) {
+    return build(channel, callOptions.withOption(key, value));
+  }
+
+  /**
    * Returns a new stub that has the given interceptors attached to the underlying channel.
    */
   public final S withInterceptors(ClientInterceptor... interceptors) {
     return build(ClientInterceptors.intercept(channel, interceptors), callOptions);
+  }
+
+  /**
+   * Returns a new stub that uses the given call credentials.
+   */
+  @ExperimentalApi("https//github.com/grpc/grpc-java/issues/1914")
+  public final S withCallCredentials(CallCredentials credentials) {
+    return build(channel, callOptions.withCallCredentials(credentials));
+  }
+
+  /**
+   * Returns a new stub that uses the 'wait for ready' call option.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1915")
+  public final S withWaitForReady() {
+    return build(channel, callOptions.withWaitForReady());
   }
 }

@@ -75,20 +75,32 @@ public abstract class ServerBuilder<T extends ServerBuilder<T>> {
    * Adds a service implementation to the handler registry.
    *
    * @param service ServerServiceDefinition object
-   * @throws UnsupportedOperationException if this builder does not support dynamically adding
-   *                                       services.
    */
   public abstract T addService(ServerServiceDefinition service);
 
   /**
-   * Adds a service implementation to the handler registry.
+   * Adds a service implementation to the handler registry. If bindableService implements
+   * {@link InternalNotifyOnServerBuild}, the service will receive a reference to the generated
+   * server instance upon build().
    *
    * @param bindableService BindableService object
-   * @throws UnsupportedOperationException if this builder does not support dynamically adding
-   *     services.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2222")
   public abstract T addService(BindableService bindableService);
+
+  /**
+   * Adds a {@link ServerTransportFilter}. The order of filters being added is the order they will
+   * be executed.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2132")
+  public abstract T addTransportFilter(ServerTransportFilter filter);
+
+  /**
+   * Sets a fallback handler registry that will be looked up in if a method is not found in the
+   * primary registry.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/933")
+  public abstract T fallbackHandlerRegistry(@Nullable HandlerRegistry fallbackRegistry);
 
   /**
    * Makes the server use TLS.
@@ -103,16 +115,16 @@ public abstract class ServerBuilder<T extends ServerBuilder<T>> {
    * shouldn't be used unless you are using custom message encoding.   The default supported
    * decompressors are in {@code DecompressorRegistry.getDefaultInstance}.
    */
-  @ExperimentalApi
-  public abstract T decompressorRegistry(DecompressorRegistry registry);
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
+  public abstract T decompressorRegistry(@Nullable DecompressorRegistry registry);
 
   /**
    * Set the compression registry for use in the channel.  This is an advanced API call and
    * shouldn't be used unless you are using custom message encoding.   The default supported
    * compressors are in {@code CompressorRegistry.getDefaultInstance}.
    */
-  @ExperimentalApi
-  public abstract T compressorRegistry(CompressorRegistry registry);
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
+  public abstract T compressorRegistry(@Nullable CompressorRegistry registry);
 
   /**
    * Builds a server using the given parameters.

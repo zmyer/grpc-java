@@ -31,23 +31,38 @@
 
 package io.grpc;
 
-import static io.grpc.Status.formatThrowableMessage;
+import javax.annotation.Nullable;
 
 /**
- * {@link Status} in Exception form, for propagating Status information via exceptions.
- *
- * @see StatusRuntimeException
+ * {@link Status} in Exception form, for propagating Status information via exceptions. This is
+ * semantically equivalent to {@link StatusRuntimeException}, except for usage in APIs that promote
+ * checked exceptions. gRPC's stubs favor {@code StatusRuntimeException}.
  */
 public class StatusException extends Exception {
   private static final long serialVersionUID = -660954903976144640L;
   private final Status status;
+  private final Metadata trailers;
 
   public StatusException(Status status) {
-    super(formatThrowableMessage(status), status.getCause());
+    this(status, null);
+  }
+
+  /**
+   * Constructs an exception with both a status and trailers.
+   */
+  @ExperimentalApi
+  public StatusException(Status status, @Nullable Metadata trailers) {
+    super(Status.formatThrowableMessage(status), status.getCause());
     this.status = status;
+    this.trailers = trailers;
   }
 
   public final Status getStatus() {
     return status;
+  }
+
+  @ExperimentalApi
+  public final Metadata getTrailers() {
+    return trailers;
   }
 }

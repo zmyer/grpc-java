@@ -36,6 +36,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import io.grpc.CallOptions;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 
@@ -45,6 +46,7 @@ import org.mockito.stubbing.Answer;
 import java.net.SocketAddress;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import javax.annotation.Nullable;
 
 /**
  * Common utility methods for tests.
@@ -55,14 +57,14 @@ final class TestUtils {
     /**
      * A mock transport created by the mock transport factory.
      */
-    final ManagedClientTransport transport;
+    final ConnectionClientTransport transport;
 
     /**
      * The listener passed to the start() of the mock transport.
      */
     final ManagedClientTransport.Listener listener;
 
-    MockClientTransportInfo(ManagedClientTransport transport,
+    MockClientTransportInfo(ConnectionClientTransport transport,
         ManagedClientTransport.Listener listener) {
       this.transport = transport;
       this.listener = listener;
@@ -77,27 +79,34 @@ final class TestUtils {
    */
   static BlockingQueue<MockClientTransportInfo> captureTransports(
       ClientTransportFactory mockTransportFactory) {
+    return captureTransports(mockTransportFactory, null);
+  }
+
+  static BlockingQueue<MockClientTransportInfo> captureTransports(
+      ClientTransportFactory mockTransportFactory, @Nullable final Runnable startRunnable) {
     final BlockingQueue<MockClientTransportInfo> captor =
         new LinkedBlockingQueue<MockClientTransportInfo>();
 
-    doAnswer(new Answer<ManagedClientTransport>() {
+    doAnswer(new Answer<ConnectionClientTransport>() {
       @Override
-      public ManagedClientTransport answer(InvocationOnMock invocation) throws Throwable {
-        final ManagedClientTransport mockTransport = mock(ManagedClientTransport.class);
-        when(mockTransport.newStream(any(MethodDescriptor.class), any(Metadata.class)))
+      public ConnectionClientTransport answer(InvocationOnMock invocation) throws Throwable {
+        final ConnectionClientTransport mockTransport = mock(ConnectionClientTransport.class);
+        when(mockTransport.newStream(any(MethodDescriptor.class), any(Metadata.class),
+                any(CallOptions.class), any(StatsTraceContext.class)))
             .thenReturn(mock(ClientStream.class));
         // Save the listener
-        doAnswer(new Answer<Void>() {
+        doAnswer(new Answer<Runnable>() {
           @Override
-          public Void answer(InvocationOnMock invocation) throws Throwable {
+          public Runnable answer(InvocationOnMock invocation) throws Throwable {
             captor.add(new MockClientTransportInfo(
                 mockTransport, (ManagedClientTransport.Listener) invocation.getArguments()[0]));
-            return null;
+            return startRunnable;
           }
         }).when(mockTransport).start(any(ManagedClientTransport.Listener.class));
         return mockTransport;
       }
-    }).when(mockTransportFactory).newClientTransport(any(SocketAddress.class), any(String.class));
+    }).when(mockTransportFactory)
+        .newClientTransport(any(SocketAddress.class), any(String.class), any(String.class));
 
     return captor;
   }

@@ -39,6 +39,7 @@ import io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.NegotiationType;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.okhttp.OkHttpChannelBuilder;
+import io.grpc.okhttp.internal.Platform;
 import io.grpc.testing.TestUtils;
 import io.netty.handler.ssl.SslContext;
 
@@ -52,8 +53,8 @@ import java.nio.charset.Charset;
 import javax.net.ssl.SSLSocketFactory;
 
 /**
- * Application that starts a client for the {@link TestServiceGrpc.TestService} and runs through a
- * series of tests.
+ * Application that starts a client for the {@link TestServiceGrpc.TestServiceImplBase} and runs
+ * through a series of tests.
  */
 public class TestServiceClient {
 
@@ -165,7 +166,8 @@ public class TestServiceClient {
           + "\n    Valid options:"
           + validTestCasesHelpText()
           + "\n  --use_tls=true|false        Whether to use TLS. Default " + c.useTls
-          + "\n  --use_test_ca=true|false    Whether to trust our fake CA. Default " + c.useTestCa
+          + "\n  --use_test_ca=true|false    Whether to trust our fake CA. Requires --use_tls=true "
+          + "\n                              to have effect. Default " + c.useTestCa
           + "\n  --use_okhttp=true|false     Whether to use OkHttp instead of Netty. Default "
             + c.useOkHttp
           + "\n  --default_service_account   Email of GCE default service account. Default "
@@ -266,6 +268,11 @@ public class TestServiceClient {
         break;
       }
 
+      case UNIMPLEMENTED_SERVICE: {
+        tester.unimplementedService();
+        break;
+      }
+
       case CANCEL_AFTER_BEGIN: {
         tester.cancelAfterBegin();
         break;
@@ -324,15 +331,24 @@ public class TestServiceClient {
         if (useTls) {
           try {
             SSLSocketFactory factory = useTestCa
-                ? TestUtils.newSslSocketFactoryForCa(TestUtils.loadCert("ca.pem"))
+                ? TestUtils.newSslSocketFactoryForCa(Platform.get().getProvider(),
+                    TestUtils.loadCert("ca.pem"))
                 : (SSLSocketFactory) SSLSocketFactory.getDefault();
             builder.sslSocketFactory(factory);
           } catch (Exception e) {
             throw new RuntimeException(e);
           }
+        } else {
+          builder.usePlaintext(true);
         }
         return builder.build();
       }
+    }
+
+    @Override
+    protected boolean metricsExpected() {
+      // Server-side metrics won't be found, because server is a separate process.
+      return false;
     }
   }
 

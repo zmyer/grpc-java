@@ -33,6 +33,7 @@ package io.grpc.okhttp;
 
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import io.grpc.ManagedChannelProvider;
 
@@ -47,7 +48,24 @@ public class OkHttpChannelProviderTest {
 
   @Test
   public void provided() {
-    assertSame(OkHttpChannelProvider.class, ManagedChannelProvider.provider().getClass());
+    for (ManagedChannelProvider current
+        : ManagedChannelProvider.getCandidatesViaServiceLoader(getClass().getClassLoader())) {
+      if (current instanceof OkHttpChannelProvider) {
+        return;
+      }
+    }
+    fail("ServiceLoader unable to load OkHttpChannelProvider");
+  }
+
+  @Test
+  public void providedHardCoded() {
+    for (ManagedChannelProvider current
+        : ManagedChannelProvider.getCandidatesViaHardCoded(getClass().getClassLoader())) {
+      if (current instanceof OkHttpChannelProvider) {
+        return;
+      }
+    }
+    fail("Hard coded unable to load OkHttpChannelProvider");
   }
 
   @Test

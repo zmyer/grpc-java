@@ -37,9 +37,9 @@ import static java.util.Collections.singletonList;
 import static java.util.concurrent.Executors.newFixedThreadPool;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
-import com.google.api.client.repackaged.com.google.common.base.Joiner;
-import com.google.api.client.repackaged.com.google.common.base.Objects;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Joiner;
+import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.collect.Iterators;
@@ -49,17 +49,24 @@ import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import io.grpc.Status;
 import io.grpc.StatusException;
+import io.grpc.netty.GrpcSslContexts;
+import io.grpc.netty.NegotiationType;
+import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.StreamObserver;
+import io.grpc.testing.TestUtils;
+
+import io.netty.handler.ssl.SslContext;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
@@ -109,6 +116,10 @@ public class StressTestClient {
   private List<InetSocketAddress> addresses =
       singletonList(new InetSocketAddress("localhost", 8080));
   private List<TestCaseWeightPair> testCaseWeightPairs = new ArrayList<TestCaseWeightPair>();
+
+  private String serverHostOverride;
+  private boolean useTls = false;
+  private boolean useTestCa = false;
   private int durationSecs = -1;
   private int channelsPerServer = 1;
   private int stubsPerChannel = 1;
@@ -131,6 +142,7 @@ public class StressTestClient {
   @VisibleForTesting
   void parseArgs(String[] args) {
     boolean usage = false;
+    String serverAddresses = "";
     for (String arg : args) {
       if (!arg.startsWith("--")) {
         System.err.println("All arguments must start with '--': " + arg);
@@ -150,8 +162,14 @@ public class StressTestClient {
       }
       String value = parts[1];
       if ("server_addresses".equals(key)) {
-        addresses = parseServerAddresses(value);
-        usage = addresses.isEmpty();
+        // May need to apply server host overrides to the addresses, so delay processing
+        serverAddresses = value;
+      } else if ("server_host_override".equals(key)) {
+        serverHostOverride = value;
+      } else if ("use_tls".equals(key)) {
+        useTls = Boolean.parseBoolean(value);
+      } else if ("use_test_ca".equals(key)) {
+        useTestCa = Boolean.parseBoolean(value);
       } else if ("test_cases".equals(key)) {
         testCaseWeightPairs = parseTestCases(value);
       } else if ("test_duration_secs".equals(key)) {
@@ -168,11 +186,19 @@ public class StressTestClient {
         break;
       }
     }
+
+    if (!usage && !serverAddresses.isEmpty()) {
+      addresses = parseServerAddresses(serverAddresses);
+      usage = addresses.isEmpty();
+    }
+
     if (usage) {
       StressTestClient c = new StressTestClient();
       System.err.println(
           "Usage: [ARGS...]"
               + "\n"
+              + "\n  --server_host_override=HOST    Claimed identification expected of server."
+              + "\n                                 Defaults to server host"
               + "\n  --server_addresses=<name_1>:<port_1>,<name_2>:<port_2>...<name_N>:<port_N>"
               + "\n    Default: " + serverAddressesToString(c.addresses)
               + "\n  --test_cases=<testcase_1:w_1>,<testcase_2:w_2>...<testcase_n:w_n>"
@@ -180,6 +206,10 @@ public class StressTestClient {
               + " testcase is run."
               + "\n    Valid Testcases:"
               + validTestCasesHelpText()
+              + "\n  --use_tls=true|false           Whether to use TLS. Default: " + c.useTls
+              + "\n  --use_test_ca=true|false       Whether to trust our fake CA. Requires"
+              + " --use_tls=true"
+              + "\n                                 to have effect. Default: " + c.useTestCa
               + "\n  --test_duration_secs=SECONDS   '-1' for no limit. Default: " + c.durationSecs
               + "\n  --num_channels_per_server=INT  Number of connections to each server address."
               + " Default: " + c.channelsPerServer
@@ -196,7 +226,7 @@ public class StressTestClient {
     Preconditions.checkState(!shutdown, "client was shutdown.");
 
     metricsServer = ServerBuilder.forPort(metricsPort)
-        .addService(MetricsServiceGrpc.bindService(new MetricsServiceImpl()))
+        .addService(new MetricsServiceImpl())
         .build()
         .start();
   }
@@ -211,15 +241,15 @@ public class StressTestClient {
     int numChannels = addresses.size() * channelsPerServer;
     int numThreads = numChannels * stubsPerChannel;
     threadpool = MoreExecutors.listeningDecorator(newFixedThreadPool(numThreads));
-    int server_idx = -1;
+    int serverIdx = -1;
     for (InetSocketAddress address : addresses) {
-      server_idx++;
+      serverIdx++;
       for (int i = 0; i < channelsPerServer; i++) {
         ManagedChannel channel = createChannel(address);
         channels.add(channel);
         for (int j = 0; j < stubsPerChannel; j++) {
           String gaugeName =
-              String.format("/stress_test/server_%d/channel_%d/stub_%d/qps", server_idx, i, j);
+              String.format("/stress_test/server_%d/channel_%d/stub_%d/qps", serverIdx, i, j);
           Worker worker =
               new Worker(channel, testCaseWeightPairs, durationSecs, gaugeName);
 
@@ -273,13 +303,28 @@ public class StressTestClient {
     }
   }
 
-  private static List<InetSocketAddress> parseServerAddresses(String addressesStr) {
+  @VisibleForTesting
+  int getMetricServerPort() {
+    return metricsServer.getPort();
+  }
+
+  private List<InetSocketAddress> parseServerAddresses(String addressesStr) {
     List<InetSocketAddress> addresses = new ArrayList<InetSocketAddress>();
 
     for (List<String> namePort : parseCommaSeparatedTuples(addressesStr)) {
+      InetAddress address;
       String name = namePort.get(0);
       int port = Integer.valueOf(namePort.get(1));
-      addresses.add(new InetSocketAddress(name, port));
+      try {
+        address = InetAddress.getByName(name);
+        if (serverHostOverride != null) {
+          // Force the hostname to match the cert the server uses.
+          address = InetAddress.getByAddress(serverHostOverride, address.getAddress());
+        }
+      } catch (UnknownHostException ex) {
+        throw new RuntimeException(ex);
+      }
+      addresses.add(new InetSocketAddress(address, port));
     }
 
     return addresses;
@@ -311,9 +356,19 @@ public class StressTestClient {
     return tuples;
   }
 
-  private static ManagedChannel createChannel(InetSocketAddress address) {
-    return ManagedChannelBuilder.forAddress(address.getHostName(), address.getPort())
-        .usePlaintext(true)
+  private ManagedChannel createChannel(InetSocketAddress address) {
+    SslContext sslContext = null;
+    if (useTestCa) {
+      try {
+        sslContext = GrpcSslContexts.forClient().trustManager(
+            TestUtils.loadCert("ca.pem")).build();
+      } catch (Exception ex) {
+        throw new RuntimeException(ex);
+      }
+    }
+    return NettyChannelBuilder.forAddress(address)
+        .negotiationType(useTls ? NegotiationType.TLS : NegotiationType.PLAINTEXT)
+        .sslContext(sslContext)
         .build();
   }
 
@@ -359,10 +414,11 @@ public class StressTestClient {
     Worker(ManagedChannel channel, List<TestCaseWeightPair> testCaseWeightPairs,
         int durationSec, String gaugeName) {
       Preconditions.checkArgument(durationSec >= -1, "durationSec must be gte -1.");
-      this.channel = Preconditions.checkNotNull(channel);
-      this.testCaseWeightPairs = Preconditions.checkNotNull(testCaseWeightPairs);
+      this.channel = Preconditions.checkNotNull(channel, "channel");
+      this.testCaseWeightPairs =
+          Preconditions.checkNotNull(testCaseWeightPairs, "testCaseWeightPairs");
       this.durationSec = durationSec == -1 ? null : durationSec;
-      this.gaugeName = Preconditions.checkNotNull(gaugeName);
+      this.gaugeName = Preconditions.checkNotNull(gaugeName, "gaugeName");
     }
 
     @Override
@@ -446,6 +502,11 @@ public class StressTestClient {
           break;
         }
 
+        case UNIMPLEMENTED_SERVICE: {
+          tester.unimplementedService();
+          break;
+        }
+
         case CANCEL_AFTER_BEGIN: {
           tester.cancelAfterBegin();
           break;
@@ -471,6 +532,19 @@ public class StressTestClient {
       protected ManagedChannel createChannel() {
         return Worker.this.channel;
       }
+
+      @Override
+      protected int operationTimeoutMillis() {
+        // Don't enforce a timeout when using the interop tests for the stress test client.
+        // Fixes https://github.com/grpc/grpc-java/issues/1812
+        return Integer.MAX_VALUE;
+      }
+
+      @Override
+      protected boolean metricsExpected() {
+        // TODO(zhangkun83): we may want to enable the real Census implementation in stress tests.
+        return false;
+      }
     }
 
     class WeightedTestCaseSelector {
@@ -481,7 +555,7 @@ public class StressTestClient {
       final Iterator<TestCases> testCases;
 
       WeightedTestCaseSelector(List<TestCaseWeightPair> testCaseWeightPairs) {
-        Preconditions.checkNotNull(testCaseWeightPairs);
+        Preconditions.checkNotNull(testCaseWeightPairs, "testCaseWeightPairs");
         Preconditions.checkArgument(testCaseWeightPairs.size() > 0);
 
         List<TestCases> testCases = new ArrayList<TestCases>();
@@ -505,7 +579,7 @@ public class StressTestClient {
   /**
    * Service that exports the QPS metrics of the stress test.
    */
-  private class MetricsServiceImpl implements MetricsServiceGrpc.MetricsService {
+  private class MetricsServiceImpl extends MetricsServiceGrpc.MetricsServiceImplBase {
 
     @Override
     public void getAllGauges(Metrics.EmptyMessage request,
@@ -537,7 +611,7 @@ public class StressTestClient {
 
     TestCaseWeightPair(TestCases testCase, int weight) {
       Preconditions.checkArgument(weight >= 0, "weight must be positive.");
-      this.testCase = Preconditions.checkNotNull(testCase);
+      this.testCase = Preconditions.checkNotNull(testCase, "testCase");
       this.weight = weight;
     }
 
@@ -559,6 +633,21 @@ public class StressTestClient {
   @VisibleForTesting
   List<InetSocketAddress> addresses() {
     return Collections.unmodifiableList(addresses);
+  }
+
+  @VisibleForTesting
+  String serverHostOverride() {
+    return serverHostOverride;
+  }
+
+  @VisibleForTesting
+  boolean useTls() {
+    return useTls;
+  }
+
+  @VisibleForTesting
+  boolean useTestCa() {
+    return useTestCa;
   }
 
   @VisibleForTesting

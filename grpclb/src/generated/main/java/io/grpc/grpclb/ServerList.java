@@ -7,11 +7,11 @@ package io.grpc.grpclb;
  * Protobuf type {@code grpc.lb.v1.ServerList}
  */
 public  final class ServerList extends
-    com.google.protobuf.GeneratedMessage implements
+    com.google.protobuf.GeneratedMessageV3 implements
     // @@protoc_insertion_point(message_implements:grpc.lb.v1.ServerList)
     ServerListOrBuilder {
   // Use ServerList.newBuilder() to construct.
-  private ServerList(com.google.protobuf.GeneratedMessage.Builder<?> builder) {
+  private ServerList(com.google.protobuf.GeneratedMessageV3.Builder<?> builder) {
     super(builder);
   }
   private ServerList() {
@@ -25,7 +25,8 @@ public  final class ServerList extends
   }
   private ServerList(
       com.google.protobuf.CodedInputStream input,
-      com.google.protobuf.ExtensionRegistryLite extensionRegistry) {
+      com.google.protobuf.ExtensionRegistryLite extensionRegistry)
+      throws com.google.protobuf.InvalidProtocolBufferException {
     this();
     int mutable_bitField0_ = 0;
     try {
@@ -47,7 +48,8 @@ public  final class ServerList extends
               servers_ = new java.util.ArrayList<io.grpc.grpclb.Server>();
               mutable_bitField0_ |= 0x00000001;
             }
-            servers_.add(input.readMessage(io.grpc.grpclb.Server.parser(), extensionRegistry));
+            servers_.add(
+                input.readMessage(io.grpc.grpclb.Server.parser(), extensionRegistry));
             break;
           }
           case 26: {
@@ -66,11 +68,10 @@ public  final class ServerList extends
         }
       }
     } catch (com.google.protobuf.InvalidProtocolBufferException e) {
-      throw new RuntimeException(e.setUnfinishedMessage(this));
+      throw e.setUnfinishedMessage(this);
     } catch (java.io.IOException e) {
-      throw new RuntimeException(
-          new com.google.protobuf.InvalidProtocolBufferException(
-              e.getMessage()).setUnfinishedMessage(this));
+      throw new com.google.protobuf.InvalidProtocolBufferException(
+          e).setUnfinishedMessage(this);
     } finally {
       if (((mutable_bitField0_ & 0x00000001) == 0x00000001)) {
         servers_ = java.util.Collections.unmodifiableList(servers_);
@@ -83,7 +84,7 @@ public  final class ServerList extends
     return io.grpc.grpclb.LoadBalancerProto.internal_static_grpc_lb_v1_ServerList_descriptor;
   }
 
-  protected com.google.protobuf.GeneratedMessage.FieldAccessorTable
+  protected com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
       internalGetFieldAccessorTable() {
     return io.grpc.grpclb.LoadBalancerProto.internal_static_grpc_lb_v1_ServerList_fieldAccessorTable
         .ensureFieldAccessorsInitialized(
@@ -94,67 +95,67 @@ public  final class ServerList extends
   public static final int SERVERS_FIELD_NUMBER = 1;
   private java.util.List<io.grpc.grpclb.Server> servers_;
   /**
-   * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-   *
    * <pre>
    * Contains a list of servers selected by the load balancer. The list will
    * be updated when server resolutions change or as needed to balance load
    * across more servers. The client should consume the server list in order
    * unless instructed otherwise via the client_config.
    * </pre>
+   *
+   * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
    */
   public java.util.List<io.grpc.grpclb.Server> getServersList() {
     return servers_;
   }
   /**
-   * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-   *
    * <pre>
    * Contains a list of servers selected by the load balancer. The list will
    * be updated when server resolutions change or as needed to balance load
    * across more servers. The client should consume the server list in order
    * unless instructed otherwise via the client_config.
    * </pre>
+   *
+   * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
    */
   public java.util.List<? extends io.grpc.grpclb.ServerOrBuilder> 
       getServersOrBuilderList() {
     return servers_;
   }
   /**
-   * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-   *
    * <pre>
    * Contains a list of servers selected by the load balancer. The list will
    * be updated when server resolutions change or as needed to balance load
    * across more servers. The client should consume the server list in order
    * unless instructed otherwise via the client_config.
    * </pre>
+   *
+   * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
    */
   public int getServersCount() {
     return servers_.size();
   }
   /**
-   * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-   *
    * <pre>
    * Contains a list of servers selected by the load balancer. The list will
    * be updated when server resolutions change or as needed to balance load
    * across more servers. The client should consume the server list in order
    * unless instructed otherwise via the client_config.
    * </pre>
+   *
+   * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
    */
   public io.grpc.grpclb.Server getServers(int index) {
     return servers_.get(index);
   }
   /**
-   * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-   *
    * <pre>
    * Contains a list of servers selected by the load balancer. The list will
    * be updated when server resolutions change or as needed to balance load
    * across more servers. The client should consume the server list in order
    * unless instructed otherwise via the client_config.
    * </pre>
+   *
+   * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
    */
   public io.grpc.grpclb.ServerOrBuilder getServersOrBuilder(
       int index) {
@@ -164,40 +165,40 @@ public  final class ServerList extends
   public static final int EXPIRATION_INTERVAL_FIELD_NUMBER = 3;
   private com.google.protobuf.Duration expirationInterval_;
   /**
-   * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
-   *
    * <pre>
    * Indicates the amount of time that the client should consider this server
    * list as valid. It may be considered stale after waiting this interval of
    * time after receiving the list. If the interval is not positive, the
    * client can assume the list is valid until the next list is received.
    * </pre>
+   *
+   * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
    */
   public boolean hasExpirationInterval() {
     return expirationInterval_ != null;
   }
   /**
-   * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
-   *
    * <pre>
    * Indicates the amount of time that the client should consider this server
    * list as valid. It may be considered stale after waiting this interval of
    * time after receiving the list. If the interval is not positive, the
    * client can assume the list is valid until the next list is received.
    * </pre>
+   *
+   * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
    */
   public com.google.protobuf.Duration getExpirationInterval() {
     return expirationInterval_ == null ? com.google.protobuf.Duration.getDefaultInstance() : expirationInterval_;
   }
   /**
-   * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
-   *
    * <pre>
    * Indicates the amount of time that the client should consider this server
    * list as valid. It may be considered stale after waiting this interval of
    * time after receiving the list. If the interval is not positive, the
    * client can assume the list is valid until the next list is received.
    * </pre>
+   *
+   * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
    */
   public com.google.protobuf.DurationOrBuilder getExpirationIntervalOrBuilder() {
     return getExpirationInterval();
@@ -241,6 +242,47 @@ public  final class ServerList extends
   }
 
   private static final long serialVersionUID = 0L;
+  @java.lang.Override
+  public boolean equals(final java.lang.Object obj) {
+    if (obj == this) {
+     return true;
+    }
+    if (!(obj instanceof io.grpc.grpclb.ServerList)) {
+      return super.equals(obj);
+    }
+    io.grpc.grpclb.ServerList other = (io.grpc.grpclb.ServerList) obj;
+
+    boolean result = true;
+    result = result && getServersList()
+        .equals(other.getServersList());
+    result = result && (hasExpirationInterval() == other.hasExpirationInterval());
+    if (hasExpirationInterval()) {
+      result = result && getExpirationInterval()
+          .equals(other.getExpirationInterval());
+    }
+    return result;
+  }
+
+  @java.lang.Override
+  public int hashCode() {
+    if (memoizedHashCode != 0) {
+      return memoizedHashCode;
+    }
+    int hash = 41;
+    hash = (19 * hash) + getDescriptorForType().hashCode();
+    if (getServersCount() > 0) {
+      hash = (37 * hash) + SERVERS_FIELD_NUMBER;
+      hash = (53 * hash) + getServersList().hashCode();
+    }
+    if (hasExpirationInterval()) {
+      hash = (37 * hash) + EXPIRATION_INTERVAL_FIELD_NUMBER;
+      hash = (53 * hash) + getExpirationInterval().hashCode();
+    }
+    hash = (29 * hash) + unknownFields.hashCode();
+    memoizedHashCode = hash;
+    return hash;
+  }
+
   public static io.grpc.grpclb.ServerList parseFrom(
       com.google.protobuf.ByteString data)
       throws com.google.protobuf.InvalidProtocolBufferException {
@@ -264,34 +306,40 @@ public  final class ServerList extends
   }
   public static io.grpc.grpclb.ServerList parseFrom(java.io.InputStream input)
       throws java.io.IOException {
-    return PARSER.parseFrom(input);
+    return com.google.protobuf.GeneratedMessageV3
+        .parseWithIOException(PARSER, input);
   }
   public static io.grpc.grpclb.ServerList parseFrom(
       java.io.InputStream input,
       com.google.protobuf.ExtensionRegistryLite extensionRegistry)
       throws java.io.IOException {
-    return PARSER.parseFrom(input, extensionRegistry);
+    return com.google.protobuf.GeneratedMessageV3
+        .parseWithIOException(PARSER, input, extensionRegistry);
   }
   public static io.grpc.grpclb.ServerList parseDelimitedFrom(java.io.InputStream input)
       throws java.io.IOException {
-    return PARSER.parseDelimitedFrom(input);
+    return com.google.protobuf.GeneratedMessageV3
+        .parseDelimitedWithIOException(PARSER, input);
   }
   public static io.grpc.grpclb.ServerList parseDelimitedFrom(
       java.io.InputStream input,
       com.google.protobuf.ExtensionRegistryLite extensionRegistry)
       throws java.io.IOException {
-    return PARSER.parseDelimitedFrom(input, extensionRegistry);
+    return com.google.protobuf.GeneratedMessageV3
+        .parseDelimitedWithIOException(PARSER, input, extensionRegistry);
   }
   public static io.grpc.grpclb.ServerList parseFrom(
       com.google.protobuf.CodedInputStream input)
       throws java.io.IOException {
-    return PARSER.parseFrom(input);
+    return com.google.protobuf.GeneratedMessageV3
+        .parseWithIOException(PARSER, input);
   }
   public static io.grpc.grpclb.ServerList parseFrom(
       com.google.protobuf.CodedInputStream input,
       com.google.protobuf.ExtensionRegistryLite extensionRegistry)
       throws java.io.IOException {
-    return PARSER.parseFrom(input, extensionRegistry);
+    return com.google.protobuf.GeneratedMessageV3
+        .parseWithIOException(PARSER, input, extensionRegistry);
   }
 
   public Builder newBuilderForType() { return newBuilder(); }
@@ -308,7 +356,7 @@ public  final class ServerList extends
 
   @java.lang.Override
   protected Builder newBuilderForType(
-      com.google.protobuf.GeneratedMessage.BuilderParent parent) {
+      com.google.protobuf.GeneratedMessageV3.BuilderParent parent) {
     Builder builder = new Builder(parent);
     return builder;
   }
@@ -316,7 +364,7 @@ public  final class ServerList extends
    * Protobuf type {@code grpc.lb.v1.ServerList}
    */
   public static final class Builder extends
-      com.google.protobuf.GeneratedMessage.Builder<Builder> implements
+      com.google.protobuf.GeneratedMessageV3.Builder<Builder> implements
       // @@protoc_insertion_point(builder_implements:grpc.lb.v1.ServerList)
       io.grpc.grpclb.ServerListOrBuilder {
     public static final com.google.protobuf.Descriptors.Descriptor
@@ -324,7 +372,7 @@ public  final class ServerList extends
       return io.grpc.grpclb.LoadBalancerProto.internal_static_grpc_lb_v1_ServerList_descriptor;
     }
 
-    protected com.google.protobuf.GeneratedMessage.FieldAccessorTable
+    protected com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
         internalGetFieldAccessorTable() {
       return io.grpc.grpclb.LoadBalancerProto.internal_static_grpc_lb_v1_ServerList_fieldAccessorTable
           .ensureFieldAccessorsInitialized(
@@ -337,12 +385,13 @@ public  final class ServerList extends
     }
 
     private Builder(
-        com.google.protobuf.GeneratedMessage.BuilderParent parent) {
+        com.google.protobuf.GeneratedMessageV3.BuilderParent parent) {
       super(parent);
       maybeForceBuilderInitialization();
     }
     private void maybeForceBuilderInitialization() {
-      if (com.google.protobuf.GeneratedMessage.alwaysUseFieldBuilders) {
+      if (com.google.protobuf.GeneratedMessageV3
+              .alwaysUseFieldBuilders) {
         getServersFieldBuilder();
       }
     }
@@ -403,6 +452,32 @@ public  final class ServerList extends
       return result;
     }
 
+    public Builder clone() {
+      return (Builder) super.clone();
+    }
+    public Builder setField(
+        com.google.protobuf.Descriptors.FieldDescriptor field,
+        Object value) {
+      return (Builder) super.setField(field, value);
+    }
+    public Builder clearField(
+        com.google.protobuf.Descriptors.FieldDescriptor field) {
+      return (Builder) super.clearField(field);
+    }
+    public Builder clearOneof(
+        com.google.protobuf.Descriptors.OneofDescriptor oneof) {
+      return (Builder) super.clearOneof(oneof);
+    }
+    public Builder setRepeatedField(
+        com.google.protobuf.Descriptors.FieldDescriptor field,
+        int index, Object value) {
+      return (Builder) super.setRepeatedField(field, index, value);
+    }
+    public Builder addRepeatedField(
+        com.google.protobuf.Descriptors.FieldDescriptor field,
+        Object value) {
+      return (Builder) super.addRepeatedField(field, value);
+    }
     public Builder mergeFrom(com.google.protobuf.Message other) {
       if (other instanceof io.grpc.grpclb.ServerList) {
         return mergeFrom((io.grpc.grpclb.ServerList)other);
@@ -433,7 +508,7 @@ public  final class ServerList extends
             servers_ = other.servers_;
             bitField0_ = (bitField0_ & ~0x00000001);
             serversBuilder_ = 
-              com.google.protobuf.GeneratedMessage.alwaysUseFieldBuilders ?
+              com.google.protobuf.GeneratedMessageV3.alwaysUseFieldBuilders ?
                  getServersFieldBuilder() : null;
           } else {
             serversBuilder_.addAllMessages(other.servers_);
@@ -460,7 +535,7 @@ public  final class ServerList extends
         parsedMessage = PARSER.parsePartialFrom(input, extensionRegistry);
       } catch (com.google.protobuf.InvalidProtocolBufferException e) {
         parsedMessage = (io.grpc.grpclb.ServerList) e.getUnfinishedMessage();
-        throw e;
+        throw e.unwrapIOException();
       } finally {
         if (parsedMessage != null) {
           mergeFrom(parsedMessage);
@@ -479,18 +554,18 @@ public  final class ServerList extends
        }
     }
 
-    private com.google.protobuf.RepeatedFieldBuilder<
+    private com.google.protobuf.RepeatedFieldBuilderV3<
         io.grpc.grpclb.Server, io.grpc.grpclb.Server.Builder, io.grpc.grpclb.ServerOrBuilder> serversBuilder_;
 
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public java.util.List<io.grpc.grpclb.Server> getServersList() {
       if (serversBuilder_ == null) {
@@ -500,14 +575,14 @@ public  final class ServerList extends
       }
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public int getServersCount() {
       if (serversBuilder_ == null) {
@@ -517,14 +592,14 @@ public  final class ServerList extends
       }
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public io.grpc.grpclb.Server getServers(int index) {
       if (serversBuilder_ == null) {
@@ -534,14 +609,14 @@ public  final class ServerList extends
       }
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public Builder setServers(
         int index, io.grpc.grpclb.Server value) {
@@ -558,14 +633,14 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public Builder setServers(
         int index, io.grpc.grpclb.Server.Builder builderForValue) {
@@ -579,14 +654,14 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public Builder addServers(io.grpc.grpclb.Server value) {
       if (serversBuilder_ == null) {
@@ -602,14 +677,14 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public Builder addServers(
         int index, io.grpc.grpclb.Server value) {
@@ -626,14 +701,14 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public Builder addServers(
         io.grpc.grpclb.Server.Builder builderForValue) {
@@ -647,14 +722,14 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public Builder addServers(
         int index, io.grpc.grpclb.Server.Builder builderForValue) {
@@ -668,14 +743,14 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public Builder addAllServers(
         java.lang.Iterable<? extends io.grpc.grpclb.Server> values) {
@@ -690,14 +765,14 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public Builder clearServers() {
       if (serversBuilder_ == null) {
@@ -710,14 +785,14 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public Builder removeServers(int index) {
       if (serversBuilder_ == null) {
@@ -730,28 +805,28 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public io.grpc.grpclb.Server.Builder getServersBuilder(
         int index) {
       return getServersFieldBuilder().getBuilder(index);
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public io.grpc.grpclb.ServerOrBuilder getServersOrBuilder(
         int index) {
@@ -761,14 +836,14 @@ public  final class ServerList extends
       }
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public java.util.List<? extends io.grpc.grpclb.ServerOrBuilder> 
          getServersOrBuilderList() {
@@ -779,28 +854,28 @@ public  final class ServerList extends
       }
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public io.grpc.grpclb.Server.Builder addServersBuilder() {
       return getServersFieldBuilder().addBuilder(
           io.grpc.grpclb.Server.getDefaultInstance());
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public io.grpc.grpclb.Server.Builder addServersBuilder(
         int index) {
@@ -808,24 +883,24 @@ public  final class ServerList extends
           index, io.grpc.grpclb.Server.getDefaultInstance());
     }
     /**
-     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
-     *
      * <pre>
      * Contains a list of servers selected by the load balancer. The list will
      * be updated when server resolutions change or as needed to balance load
      * across more servers. The client should consume the server list in order
      * unless instructed otherwise via the client_config.
      * </pre>
+     *
+     * <code>repeated .grpc.lb.v1.Server servers = 1;</code>
      */
     public java.util.List<io.grpc.grpclb.Server.Builder> 
          getServersBuilderList() {
       return getServersFieldBuilder().getBuilderList();
     }
-    private com.google.protobuf.RepeatedFieldBuilder<
+    private com.google.protobuf.RepeatedFieldBuilderV3<
         io.grpc.grpclb.Server, io.grpc.grpclb.Server.Builder, io.grpc.grpclb.ServerOrBuilder> 
         getServersFieldBuilder() {
       if (serversBuilder_ == null) {
-        serversBuilder_ = new com.google.protobuf.RepeatedFieldBuilder<
+        serversBuilder_ = new com.google.protobuf.RepeatedFieldBuilderV3<
             io.grpc.grpclb.Server, io.grpc.grpclb.Server.Builder, io.grpc.grpclb.ServerOrBuilder>(
                 servers_,
                 ((bitField0_ & 0x00000001) == 0x00000001),
@@ -837,30 +912,30 @@ public  final class ServerList extends
     }
 
     private com.google.protobuf.Duration expirationInterval_ = null;
-    private com.google.protobuf.SingleFieldBuilder<
+    private com.google.protobuf.SingleFieldBuilderV3<
         com.google.protobuf.Duration, com.google.protobuf.Duration.Builder, com.google.protobuf.DurationOrBuilder> expirationIntervalBuilder_;
     /**
-     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
-     *
      * <pre>
      * Indicates the amount of time that the client should consider this server
      * list as valid. It may be considered stale after waiting this interval of
      * time after receiving the list. If the interval is not positive, the
      * client can assume the list is valid until the next list is received.
      * </pre>
+     *
+     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
      */
     public boolean hasExpirationInterval() {
       return expirationIntervalBuilder_ != null || expirationInterval_ != null;
     }
     /**
-     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
-     *
      * <pre>
      * Indicates the amount of time that the client should consider this server
      * list as valid. It may be considered stale after waiting this interval of
      * time after receiving the list. If the interval is not positive, the
      * client can assume the list is valid until the next list is received.
      * </pre>
+     *
+     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
      */
     public com.google.protobuf.Duration getExpirationInterval() {
       if (expirationIntervalBuilder_ == null) {
@@ -870,14 +945,14 @@ public  final class ServerList extends
       }
     }
     /**
-     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
-     *
      * <pre>
      * Indicates the amount of time that the client should consider this server
      * list as valid. It may be considered stale after waiting this interval of
      * time after receiving the list. If the interval is not positive, the
      * client can assume the list is valid until the next list is received.
      * </pre>
+     *
+     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
      */
     public Builder setExpirationInterval(com.google.protobuf.Duration value) {
       if (expirationIntervalBuilder_ == null) {
@@ -893,14 +968,14 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
-     *
      * <pre>
      * Indicates the amount of time that the client should consider this server
      * list as valid. It may be considered stale after waiting this interval of
      * time after receiving the list. If the interval is not positive, the
      * client can assume the list is valid until the next list is received.
      * </pre>
+     *
+     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
      */
     public Builder setExpirationInterval(
         com.google.protobuf.Duration.Builder builderForValue) {
@@ -914,14 +989,14 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
-     *
      * <pre>
      * Indicates the amount of time that the client should consider this server
      * list as valid. It may be considered stale after waiting this interval of
      * time after receiving the list. If the interval is not positive, the
      * client can assume the list is valid until the next list is received.
      * </pre>
+     *
+     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
      */
     public Builder mergeExpirationInterval(com.google.protobuf.Duration value) {
       if (expirationIntervalBuilder_ == null) {
@@ -939,14 +1014,14 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
-     *
      * <pre>
      * Indicates the amount of time that the client should consider this server
      * list as valid. It may be considered stale after waiting this interval of
      * time after receiving the list. If the interval is not positive, the
      * client can assume the list is valid until the next list is received.
      * </pre>
+     *
+     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
      */
     public Builder clearExpirationInterval() {
       if (expirationIntervalBuilder_ == null) {
@@ -960,14 +1035,14 @@ public  final class ServerList extends
       return this;
     }
     /**
-     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
-     *
      * <pre>
      * Indicates the amount of time that the client should consider this server
      * list as valid. It may be considered stale after waiting this interval of
      * time after receiving the list. If the interval is not positive, the
      * client can assume the list is valid until the next list is received.
      * </pre>
+     *
+     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
      */
     public com.google.protobuf.Duration.Builder getExpirationIntervalBuilder() {
       
@@ -975,14 +1050,14 @@ public  final class ServerList extends
       return getExpirationIntervalFieldBuilder().getBuilder();
     }
     /**
-     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
-     *
      * <pre>
      * Indicates the amount of time that the client should consider this server
      * list as valid. It may be considered stale after waiting this interval of
      * time after receiving the list. If the interval is not positive, the
      * client can assume the list is valid until the next list is received.
      * </pre>
+     *
+     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
      */
     public com.google.protobuf.DurationOrBuilder getExpirationIntervalOrBuilder() {
       if (expirationIntervalBuilder_ != null) {
@@ -993,20 +1068,20 @@ public  final class ServerList extends
       }
     }
     /**
-     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
-     *
      * <pre>
      * Indicates the amount of time that the client should consider this server
      * list as valid. It may be considered stale after waiting this interval of
      * time after receiving the list. If the interval is not positive, the
      * client can assume the list is valid until the next list is received.
      * </pre>
+     *
+     * <code>optional .google.protobuf.Duration expiration_interval = 3;</code>
      */
-    private com.google.protobuf.SingleFieldBuilder<
+    private com.google.protobuf.SingleFieldBuilderV3<
         com.google.protobuf.Duration, com.google.protobuf.Duration.Builder, com.google.protobuf.DurationOrBuilder> 
         getExpirationIntervalFieldBuilder() {
       if (expirationIntervalBuilder_ == null) {
-        expirationIntervalBuilder_ = new com.google.protobuf.SingleFieldBuilder<
+        expirationIntervalBuilder_ = new com.google.protobuf.SingleFieldBuilderV3<
             com.google.protobuf.Duration, com.google.protobuf.Duration.Builder, com.google.protobuf.DurationOrBuilder>(
                 getExpirationInterval(),
                 getParentForChildren(),
@@ -1045,16 +1120,7 @@ public  final class ServerList extends
         com.google.protobuf.CodedInputStream input,
         com.google.protobuf.ExtensionRegistryLite extensionRegistry)
         throws com.google.protobuf.InvalidProtocolBufferException {
-      try {
         return new ServerList(input, extensionRegistry);
-      } catch (RuntimeException e) {
-        if (e.getCause() instanceof
-            com.google.protobuf.InvalidProtocolBufferException) {
-          throw (com.google.protobuf.InvalidProtocolBufferException)
-              e.getCause();
-        }
-        throw e;
-      }
     }
   };
 

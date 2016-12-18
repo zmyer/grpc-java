@@ -31,6 +31,8 @@
 
 package io.grpc.benchmarks.qps;
 
+import com.google.common.util.concurrent.UncaughtExceptionHandlers;
+
 import io.grpc.Server;
 import io.grpc.benchmarks.Utils;
 import io.grpc.benchmarks.proto.BenchmarkServiceGrpc;
@@ -50,7 +52,11 @@ import io.netty.handler.ssl.SslProvider;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ForkJoinPool.ForkJoinWorkerThreadFactory;
+import java.util.concurrent.ForkJoinWorkerThread;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * QPS server using the non-blocking API.
@@ -133,8 +139,8 @@ public class AsyncServer {
           @SuppressWarnings("unchecked")
           Class<? extends ServerChannel> channelClass = (Class<? extends ServerChannel>)
               Class.forName("io.netty.channel.epoll.EpollServerSocketChannel");
-          boss = (EventLoopGroup) groupClass.newInstance();
-          worker = (EventLoopGroup) groupClass.newInstance();
+          boss = (EventLoopGroup) groupClass.getConstructor().newInstance();
+          worker = (EventLoopGroup) groupClass.getConstructor().newInstance();
           channelType = channelClass;
           break;
         } catch (Exception e) {
@@ -148,8 +154,8 @@ public class AsyncServer {
           @SuppressWarnings("unchecked")
           Class<? extends ServerChannel> channelClass = (Class<? extends ServerChannel>)
               Class.forName("io.netty.channel.epoll.EpollServerDomainSocketChannel");
-          boss = (EventLoopGroup) groupClass.newInstance();
-          worker = (EventLoopGroup) groupClass.newInstance();
+          boss = (EventLoopGroup) groupClass.getConstructor().newInstance();
+          worker = (EventLoopGroup) groupClass.getConstructor().newInstance();
           channelType = channelClass;
           break;
         } catch (Exception e) {
@@ -167,17 +173,33 @@ public class AsyncServer {
         .bossEventLoopGroup(boss)
         .workerEventLoopGroup(worker)
         .channelType(channelType)
-        .addService(BenchmarkServiceGrpc.bindService(new BenchmarkServiceImpl()))
+        .addService(new BenchmarkServiceImpl())
         .sslContext(sslContext)
         .flowControlWindow(config.flowControlWindow);
     if (config.directExecutor) {
       builder.directExecutor();
+    } else {
+      // TODO(carl-mastrangelo): This should not be necessary.  I don't know where this should be
+      // put.  Move it somewhere else, or remove it if no longer necessary.
+      // See: https://github.com/grpc/grpc-java/issues/2119
+      builder.executor(new ForkJoinPool(Runtime.getRuntime().availableProcessors(),
+          new ForkJoinWorkerThreadFactory() {
+            final AtomicInteger num = new AtomicInteger();
+            @Override
+            public ForkJoinWorkerThread newThread(ForkJoinPool pool) {
+              ForkJoinWorkerThread thread =
+                  ForkJoinPool.defaultForkJoinWorkerThreadFactory.newThread(pool);
+              thread.setDaemon(true);
+              thread.setName("grpc-server-app-" + "-" + num.getAndIncrement());
+              return thread;
+            }
+          }, UncaughtExceptionHandlers.systemExit(), true /* async */));
     }
 
     return builder.build();
   }
 
-  public static class BenchmarkServiceImpl implements BenchmarkServiceGrpc.BenchmarkService {
+  public static class BenchmarkServiceImpl extends BenchmarkServiceGrpc.BenchmarkServiceImplBase {
 
     @Override
     public void unaryCall(SimpleRequest request, StreamObserver<SimpleResponse> responseObserver) {

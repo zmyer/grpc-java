@@ -36,6 +36,8 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.EmptyProtos;
 
 import io.grpc.Status;
+import io.grpc.internal.LogExceptionRunnable;
+import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import io.grpc.testing.integration.Messages.PayloadType;
 import io.grpc.testing.integration.Messages.ResponseParameters;
@@ -58,7 +60,7 @@ import java.util.concurrent.TimeUnit;
  * Implementation of the business logic for the TestService. Uses an executor to schedule chunks
  * sent in response streams.
  */
-public class TestServiceImpl implements TestServiceGrpc.TestService {
+public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
   private static final String UNCOMPRESSABLE_FILE =
       "/io/grpc/testing/integration/testdata/uncompressable.bin";
   private final Random random = new Random();
@@ -78,7 +80,7 @@ public class TestServiceImpl implements TestServiceGrpc.TestService {
 
   @Override
   public void emptyCall(EmptyProtos.Empty empty,
-                        StreamObserver<EmptyProtos.Empty> responseObserver) {
+      StreamObserver<EmptyProtos.Empty> responseObserver) {
     responseObserver.onNext(EmptyProtos.Empty.getDefaultInstance());
     responseObserver.onCompleted();
   }
@@ -87,9 +89,36 @@ public class TestServiceImpl implements TestServiceGrpc.TestService {
    * Immediately responds with a payload of the type and size specified in the request.
    */
   @Override
-  public void unaryCall(SimpleRequest req,
-        StreamObserver<SimpleResponse> responseObserver) {
+  public void unaryCall(SimpleRequest req, StreamObserver<SimpleResponse> responseObserver) {
+    ServerCallStreamObserver<SimpleResponse> obs =
+        (ServerCallStreamObserver<SimpleResponse>) responseObserver;
     SimpleResponse.Builder responseBuilder = SimpleResponse.newBuilder();
+    try {
+      switch (req.getResponseCompression()) {
+        case DEFLATE:
+          // fallthrough, just use gzip
+        case GZIP:
+          obs.setCompression("gzip");
+          break;
+        case NONE:
+          obs.setCompression("identity");
+          break;
+        case UNRECOGNIZED:
+          // fallthrough
+        default:
+          obs.onError(Status.INVALID_ARGUMENT
+              .withDescription("Unknown: " + req.getResponseCompression())
+              .asRuntimeException());
+          return;
+      }
+    } catch (IllegalArgumentException e) {
+      obs.onError(Status.UNIMPLEMENTED
+          .withDescription("compression not supported.")
+          .withCause(e)
+          .asRuntimeException());
+      return;
+    }
+
     if (req.getResponseSize() != 0) {
       boolean compressable = compressableResponse(req.getResponseType());
       ByteString dataBuffer = compressable ? compressableBuffer : uncompressableBuffer;
@@ -306,7 +335,8 @@ public class TestServiceImpl implements TestServiceGrpc.TestService {
         Chunk nextChunk = chunks.peek();
         if (nextChunk != null) {
           scheduled = true;
-          executor.schedule(dispatchTask, nextChunk.delayMicroseconds, TimeUnit.MICROSECONDS);
+          executor.schedule(new LogExceptionRunnable(dispatchTask),
+              nextChunk.delayMicroseconds, TimeUnit.MICROSECONDS);
           return;
         }
       }

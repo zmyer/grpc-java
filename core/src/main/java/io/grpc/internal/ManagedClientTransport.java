@@ -33,6 +33,8 @@ package io.grpc.internal;
 
 import io.grpc.Status;
 
+import javax.annotation.CheckReturnValue;
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -53,12 +55,16 @@ public interface ManagedClientTransport extends ClientTransport, WithLogId {
    * Starts transport. This method may only be called once.
    *
    * <p>Implementations must not call {@code listener} from within {@link #start}; implementations
-   * are expected to notify listener on a separate thread.  This method should not throw any
-   * exceptions.
+   * are expected to notify listener on a separate thread or when the returned {@link Runnable} is
+   * run. This method and the returned {@code Runnable} should not throw any exceptions.
    *
    * @param listener non-{@code null} listener of transport events
+   * @return a {@link Runnable} that is executed after-the-fact by the original caller, typically
+   *     after locks are released
    */
-  void start(Listener listener);
+  @CheckReturnValue
+  @Nullable
+  Runnable start(Listener listener);
 
   /**
    * Initiates an orderly shutdown of the transport.  Existing streams continue, but the transport
@@ -69,8 +75,14 @@ public interface ManagedClientTransport extends ClientTransport, WithLogId {
   void shutdown();
 
   /**
+   * Initiates a forceful shutdown in which preexisting and new calls are closed. Existing calls
+   * should be closed with the provided {@code reason}.
+   */
+  void shutdownNow(Status reason);
+
+  /**
    * Receives notifications for the transport life-cycle events. Implementation does not need to be
-   * thread-safe, so notifications must be properly sychronized externally.
+   * thread-safe, so notifications must be properly synchronized externally.
    */
   interface Listener {
     /**
@@ -100,5 +112,11 @@ public interface ManagedClientTransport extends ClientTransport, WithLogId {
      * called at most once.
      */
     void transportReady();
+
+    /**
+     * Called whenever the transport's in-use state has changed. A transport is in-use when it has
+     * at least one stream.
+     */
+    void transportInUse(boolean inUse);
   }
 }

@@ -37,7 +37,7 @@ import io.grpc.ExperimentalApi;
  * A refinement of {@link CallStreamObserver} to allows for interaction with call
  * cancellation events on the server side.
  */
-@ExperimentalApi
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1788")
 public abstract class ServerCallStreamObserver<V> extends CallStreamObserver<V> {
 
   /**
@@ -56,4 +56,12 @@ public abstract class ServerCallStreamObserver<V> extends CallStreamObserver<V> 
    * @param onCancelHandler to call when client has cancelled the call.
    */
   public abstract void setOnCancelHandler(Runnable onCancelHandler);
+
+  /**
+   * Sets the compression algorithm to use for the call.  May only be called before sending any
+   * messages.
+   *
+   * @param compression the compression algorithm to use.
+   */
+  public abstract void setCompression(String compression);
 }

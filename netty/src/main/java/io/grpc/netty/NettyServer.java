@@ -35,8 +35,9 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static io.netty.channel.ChannelOption.SO_BACKLOG;
 import static io.netty.channel.ChannelOption.SO_KEEPALIVE;
 
-import io.grpc.internal.Server;
+import io.grpc.internal.InternalServer;
 import io.grpc.internal.ServerListener;
+import io.grpc.internal.ServerTransportListener;
 import io.grpc.internal.SharedResourceHolder;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
@@ -60,8 +61,8 @@ import javax.annotation.Nullable;
 /**
  * Netty-based server implementation.
  */
-class NettyServer implements Server {
-  private static final Logger log = Logger.getLogger(Server.class.getName());
+class NettyServer implements InternalServer {
+  private static final Logger log = Logger.getLogger(InternalServer.class.getName());
 
   private final SocketAddress address;
   private final Class<? extends ServerChannel> channelType;
@@ -104,7 +105,7 @@ class NettyServer implements Server {
     if (!(localAddr instanceof InetSocketAddress)) {
       return -1;
     }
-    return ((InetSocketAddress)localAddr).getPort();
+    return ((InetSocketAddress) localAddr).getPort();
   }
 
   @Override
@@ -133,7 +134,18 @@ class NettyServer implements Server {
         });
         NettyServerTransport transport = new NettyServerTransport(ch, protocolNegotiator,
             maxStreamsPerConnection, flowControlWindow, maxMessageSize, maxHeaderListSize);
-        transport.start(listener.transportCreated(transport));
+        ServerTransportListener transportListener;
+        // This is to order callbacks on the listener, not to guard access to channel.
+        synchronized (NettyServer.this) {
+          if (channel != null && !channel.isOpen()) {
+            // Server already shutdown.
+            ch.close();
+            return;
+          }
+
+          transportListener = listener.transportCreated(transport);
+        }
+        transport.start(transportListener);
       }
     });
     // Bind and start to accept incoming connections.
@@ -162,7 +174,9 @@ class NettyServer implements Server {
         if (!future.isSuccess()) {
           log.log(Level.WARNING, "Error shutting down server", future.cause());
         }
-        listener.serverShutdown();
+        synchronized (NettyServer.this) {
+          listener.serverShutdown();
+        }
         eventLoopReferenceCounter.release();
       }
     });

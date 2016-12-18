@@ -98,7 +98,7 @@ public class ClientInterceptors {
    * @return a new channel instance with the interceptors applied.
    */
   public static Channel intercept(Channel channel, List<? extends ClientInterceptor> interceptors) {
-    Preconditions.checkNotNull(channel);
+    Preconditions.checkNotNull(channel, "channel");
     for (ClientInterceptor interceptor : interceptors) {
       channel = new InterceptorChannel(channel, interceptor);
     }
@@ -134,7 +134,7 @@ public class ClientInterceptors {
     public void request(int numMessages) {}
 
     @Override
-    public void cancel() {}
+    public void cancel(String message, Throwable cause) {}
 
     @Override
     public void halfClose() {}

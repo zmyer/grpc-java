@@ -47,6 +47,7 @@ model {
       }
     }
     gcc(Gcc) {
+      target("ppcle_64")
     }
     clang(Clang) {
     }
@@ -59,11 +60,14 @@ model {
     x86_64 {
       architecture "x86_64"
     }
+    ppcle_64 {
+      architecture "ppcle_64"
+    }
   }
 
   components {
     java_plugin(NativeExecutableSpec) {
-      if (arch in ['x86_32', 'x86_64']) {
+      if (arch in ['x86_32', 'x86_64', 'ppcle_64']) {
         // If arch is not within the defined platforms, we do not specify the
         // targetPlatform so that Gradle will choose what is appropriate.
         targetPlatform arch
@@ -125,7 +129,11 @@ dependencies {
 }
 
 sourceSets {
-  testLite {}
+  testLite {
+    proto {
+      setSrcDirs(['src/test/proto'])
+    }
+  }
   testNano {
     proto {
       setSrcDirs(['src/test/proto'])
@@ -133,9 +141,17 @@ sourceSets {
   }
 }
 
+compileTestJava {
+  options.compilerArgs += ["-Xlint:-cast"]
+}
+
 compileTestLiteJava {
   // Protobuf-generated Lite produces quite a few warnings.
-  it.options.compilerArgs.removeAll(["-Xlint:unchecked", "-Xlint:rawtypes"])
+  options.compilerArgs += ["-Xlint:-rawtypes", "-Xlint:-unchecked"]
+}
+
+compileTestNanoJava {
+  options.compilerArgs = compileTestJava.options.compilerArgs
 }
 
 protobuf {
@@ -147,18 +163,34 @@ protobuf {
     }
   }
   plugins {
+    javalite {
+      if (project.hasProperty('protoc-gen-javalite')) {
+        path = project['protoc-gen-javalite']
+      } else {
+        artifact = libraries.protoc_lite
+      }
+    }
     grpc {
       path = javaPluginPath
     }
   }
   generateProtoTasks {
-    all()*.dependsOn 'java_pluginExecutable'
+    all().each { task ->
+      task.dependsOn 'java_pluginExecutable'
+      task.inputs.file javaPluginPath
+    }
     ofSourceSet('test')*.plugins {
       grpc {}
     }
-    ofSourceSet('testLite')*.plugins {
-      grpc {
-        option 'lite'
+    ofSourceSet('testLite')*.each { task ->
+      task.builtins {
+        remove java
+      }
+      task.plugins {
+        javalite {}
+        grpc {
+          option 'lite'
+        }
       }
     }
     ofSourceSet('testNano').each { task ->

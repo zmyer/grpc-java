@@ -23,7 +23,7 @@ startScripts.enabled = false
 run.enabled = false
 
 jmh {
-    jmhVersion = '1.11.3'
+    jmhVersion = '1.14'
     warmupIterations = 10
     iterations = 10
     fork = 1
@@ -45,18 +45,24 @@ dependencies {
             libraries.math
 }
 
+compileJmhJava {
+  options.compilerArgs = compileJava.options.compilerArgs
+}
+
 configureProtoCompilation()
 
 def vmArgs = [
         "-server",
         "-Xms2g",
-        "-Xmx2g"
+        "-Xmx2g",
+        "-XX:+PrintGCDetails",
+        "-XX:+PrintFlagsFinal"
 ]
 
 task qps_client(type: CreateStartScripts) {
     mainClassName = "io.grpc.benchmarks.qps.AsyncClient"
     applicationName = "qps_client"
-    defaultJvmOpts = ["-Xbootclasspath/p:" + configurations.alpnboot.asPath] + vmArgs
+    defaultJvmOpts = ["-javaagent:" + configurations.alpnagent.asPath] + vmArgs
     outputDir = new File(project.buildDir, 'tmp')
     classpath = jar.outputs.files + project.configurations.runtime
 }
@@ -64,7 +70,7 @@ task qps_client(type: CreateStartScripts) {
 task openloop_client(type: CreateStartScripts) {
     mainClassName = "io.grpc.benchmarks.qps.OpenLoopClient"
     applicationName = "openloop_client"
-    defaultJvmOpts = ["-Xbootclasspath/p:" + configurations.alpnboot.asPath] + vmArgs
+    defaultJvmOpts = ["-javaagent:" + configurations.alpnagent.asPath] + vmArgs
     outputDir = new File(project.buildDir, 'tmp')
     classpath = jar.outputs.files + project.configurations.runtime
 }
@@ -72,7 +78,7 @@ task openloop_client(type: CreateStartScripts) {
 task qps_server(type: CreateStartScripts) {
     mainClassName = "io.grpc.benchmarks.qps.AsyncServer"
     applicationName = "qps_server"
-    defaultJvmOpts = ["-Xbootclasspath/p:" + configurations.alpnboot.asPath] + vmArgs
+    defaultJvmOpts = ["-javaagent:" + configurations.alpnagent.asPath] + vmArgs
     outputDir = new File(project.buildDir, 'tmp')
     classpath = jar.outputs.files + project.configurations.runtime
 }
@@ -80,7 +86,7 @@ task qps_server(type: CreateStartScripts) {
 task benchmark_worker(type: CreateStartScripts) {
     mainClassName = "io.grpc.benchmarks.driver.LoadWorker"
     applicationName = "benchmark_worker"
-    defaultJvmOpts = ["-Xbootclasspath/p:" + configurations.alpnboot.asPath] + vmArgs
+    defaultJvmOpts = ["-javaagent:" + configurations.alpnagent.asPath] + vmArgs
     outputDir = new File(project.buildDir, 'tmp')
     classpath = jar.outputs.files + project.configurations.runtime
 }

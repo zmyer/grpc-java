@@ -31,6 +31,8 @@
 
 package io.grpc;
 
+import com.google.errorprone.annotations.DoNotMock;
+
 import java.net.SocketAddress;
 
 import javax.net.ssl.SSLSession;
@@ -49,23 +51,32 @@ import javax.net.ssl.SSLSession;
  *
  * <p>Methods are guaranteed to be non-blocking. Implementations are not required to be thread-safe.
  *
+ * @param <ReqT> parsed type of request message.
  * @param <RespT> parsed type of response message.
  */
-public abstract class ServerCall<RespT> {
+@DoNotMock("Use InProcessTransport and make a fake server instead")
+public abstract class ServerCall<ReqT, RespT> {
   /**
    * {@link Attributes.Key} for the remote address of server call attributes
    * {@link ServerCall#attributes()}
+   *
+   * @deprecated use the equivalent {@link io.grpc.Grpc#TRANSPORT_ATTR_REMOTE_ADDR} instead
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1710")
+  @Deprecated
   public static final Attributes.Key<SocketAddress> REMOTE_ADDR_KEY =
-          Attributes.Key.of("remote-addr");
+      Grpc.TRANSPORT_ATTR_REMOTE_ADDR;
+
   /**
    * {@link Attributes.Key} for the SSL session of server call attributes
    * {@link ServerCall#attributes()}
+   *
+   * @deprecated use the equivalent {@link io.grpc.Grpc#TRANSPORT_ATTR_SSL_SESSION} instead
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1710")
+  @Deprecated
   public static final Attributes.Key<SSLSession> SSL_SESSION_KEY =
-          Attributes.Key.of("ssl-session");
+      Grpc.TRANSPORT_ATTR_SSL_SESSION;
 
   /**
    * Callbacks for consuming incoming RPC messages.
@@ -194,9 +205,10 @@ public abstract class ServerCall<RespT> {
 
   /**
    * Enables per-message compression, if an encoding type has been negotiated.  If no message
-   * encoding has been negotiated, this is a no-op.
+   * encoding has been negotiated, this is a no-op. By default per-message compression is enabled,
+   * but may not have any effect if compression is not enabled on the call.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   public void setMessageCompression(boolean enabled) {
     // noop
   }
@@ -210,19 +222,28 @@ public abstract class ServerCall<RespT> {
    * @param compressor the name of the compressor to use.
    * @throws IllegalArgumentException if the compressor name can not be found.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   public void setCompression(String compressor) {
     // noop
   }
 
   /**
-   * Returns properties of a single call. This is a generic container which can contain any kind of
-   * information describing call like for example remote address, TLS information (OU etc.)
+   * Returns properties of a single call.
+   *
+   * <p>Attributes originate from the transport and can be altered by {@link ServerTransportFilter}.
+   * {@link Grpc} defines commonly used attributes, while the availability of them in a particular
+   * {@code ServerCall} is not guaranteed.
    *
    * @return Attributes container
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1779")
   public Attributes attributes() {
     return Attributes.EMPTY;
   }
+
+
+  /**
+   * The {@link MethodDescriptor} for the call.
+   */
+  public abstract MethodDescriptor<ReqT, RespT> getMethodDescriptor();
 }

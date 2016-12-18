@@ -48,33 +48,33 @@ import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
-import static org.mockito.Mockito.when;
 
 import com.google.common.io.ByteStreams;
 
+import io.grpc.Attributes;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.Status.Code;
-import io.grpc.internal.MessageFramer;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.ServerStream;
 import io.grpc.internal.ServerStreamListener;
 import io.grpc.internal.ServerTransportListener;
-import io.grpc.internal.WritableBuffer;
+import io.grpc.internal.StatsTraceContext;
+import io.grpc.netty.GrpcHttp2HeadersDecoder.GrpcHttp2ServerHeadersDecoder;
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
-import io.netty.handler.codec.http2.DefaultHttp2FrameWriter;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2Error;
-import io.netty.handler.codec.http2.Http2FlowController;
 import io.netty.handler.codec.http2.Http2Headers;
+import io.netty.handler.codec.http2.Http2LocalFlowController;
 import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.Http2Stream;
 import io.netty.util.AsciiString;
@@ -88,7 +88,6 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
-import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 
 /**
@@ -100,26 +99,44 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
   private static final int STREAM_ID = 3;
 
   @Mock
-  private ServerTransportListener transportListener;
-
-  @Mock
   private ServerStreamListener streamListener;
+
+  private final ServerTransportListener transportListener = spy(new ServerTransportListenerImpl());
+
+  private final StatsTraceContext statsTraceCtx = StatsTraceContext.NOOP;
 
   private NettyServerStream stream;
 
   private int flowControlWindow = DEFAULT_WINDOW_SIZE;
   private int maxConcurrentStreams = Integer.MAX_VALUE;
 
+  private class ServerTransportListenerImpl implements ServerTransportListener {
+
+    @Override
+    public StatsTraceContext methodDetermined(String methodName, Metadata headers) {
+      return statsTraceCtx;
+    }
+
+    @Override
+    public void streamCreated(ServerStream stream, String method, Metadata headers) {
+      stream.setListener(streamListener);
+    }
+
+    @Override
+    public Attributes transportReady(Attributes attributes) {
+      return Attributes.EMPTY;
+    }
+
+    @Override
+    public void transportTerminated() {
+    }
+  }
+
   @Before
   public void setUp() throws Exception {
     MockitoAnnotations.initMocks(this);
 
-    when(transportListener.streamCreated(any(ServerStream.class),
-        any(String.class),
-        any(Metadata.class)))
-        .thenReturn(streamListener);
-
-    initChannel();
+    initChannel(new GrpcHttp2ServerHeadersDecoder(GrpcUtil.DEFAULT_MAX_HEADER_LIST_SIZE));
 
     // Simulate receipt of the connection preface
     channelRead(Http2CodecUtil.connectionPrefaceBuf());
@@ -133,7 +150,8 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     createStream();
 
     // Send a frame and verify that it was written.
-    ChannelFuture future = enqueue(new SendGrpcFrameCommand(stream, content(), false));
+    ChannelFuture future = enqueue(
+        new SendGrpcFrameCommand(stream.transportState(), content(), false));
     assertTrue(future.isSuccess());
     verifyWrite().writeData(eq(ctx()), eq(STREAM_ID), eq(content()), eq(0), eq(false),
         any(ChannelPromise.class));
@@ -154,11 +172,12 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     stream.request(1);
 
     // Create a data frame and then trigger the handler to read it.
-    ByteBuf frame = dataFrame(STREAM_ID, endStream);
+    ByteBuf frame = grpcDataFrame(STREAM_ID, endStream, contentAsArray());
     channelRead(frame);
     ArgumentCaptor<InputStream> captor = ArgumentCaptor.forClass(InputStream.class);
     verify(streamListener).messageRead(captor.capture());
     assertArrayEquals(ByteBufUtil.getBytes(content()), ByteStreams.toByteArray(captor.getValue()));
+    captor.getValue().close();
 
     if (endStream) {
       verify(streamListener).halfClosed();
@@ -265,7 +284,7 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     setUp();
 
     Http2Stream connectionStream = connection().connectionStream();
-    Http2FlowController localFlowController = connection().local().flowController();
+    Http2LocalFlowController localFlowController = connection().local().flowController();
     int actualInitialWindowSize = localFlowController.initialWindowSize(connectionStream);
     int actualWindowSize = localFlowController.windowSize(connectionStream);
     assertEquals(flowControlWindow, actualWindowSize);
@@ -275,9 +294,9 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
   @Test
   public void cancelShouldSendRstStream() throws Exception {
     createStream();
-    enqueue(new CancelServerStreamCommand(stream, Status.DEADLINE_EXCEEDED));
-    verifyWrite().writeRstStream(eq(ctx()), eq(stream.id()), eq(Http2Error.CANCEL.code()),
-        any(ChannelPromise.class));
+    enqueue(new CancelServerStreamCommand(stream.transportState(), Status.DEADLINE_EXCEEDED));
+    verifyWrite().writeRstStream(eq(ctx()), eq(stream.transportState().id()),
+        eq(Http2Error.CANCEL.code()), any(ChannelPromise.class));
   }
 
   @Test
@@ -291,6 +310,24 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     channelRead(headersFrame);
     verifyWrite().writeRstStream(eq(ctx()), eq(STREAM_ID), eq(Http2Error.REFUSED_STREAM.code()),
         any(ChannelPromise.class));
+  }
+
+  @Test
+  public void headersSupportExtensionContentType() throws Exception {
+    Http2Headers headers = new DefaultHttp2Headers()
+        .method(HTTP_METHOD)
+        .set(CONTENT_TYPE_HEADER, new AsciiString("application/grpc+json", UTF_8))
+        .set(TE_HEADER, TE_TRAILERS)
+        .path(new AsciiString("/foo/bar"));
+    ByteBuf headersFrame = headersFrame(STREAM_ID, headers);
+    channelRead(headersFrame);
+
+    ArgumentCaptor<NettyServerStream> streamCaptor =
+        ArgumentCaptor.forClass(NettyServerStream.class);
+    ArgumentCaptor<String> methodCaptor = ArgumentCaptor.forClass(String.class);
+    verify(transportListener).streamCreated(streamCaptor.capture(), methodCaptor.capture(),
+        any(Metadata.class));
+    stream = streamCaptor.getValue();
   }
 
   private void createStream() throws Exception {
@@ -310,33 +347,10 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
     stream = streamCaptor.getValue();
   }
 
-  private ByteBuf dataFrame(int streamId, boolean endStream) {
-    byte[] contentAsArray = contentAsArray();
-    final ByteBuf compressionFrame = Unpooled.buffer(contentAsArray.length);
-    MessageFramer framer = new MessageFramer(new MessageFramer.Sink() {
-      @Override
-      public void deliverFrame(WritableBuffer frame, boolean endOfStream, boolean flush) {
-        if (frame != null) {
-          ByteBuf bytebuf = ((NettyWritableBuffer) frame).bytebuf();
-          compressionFrame.writeBytes(bytebuf);
-        }
-      }
-    }, new NettyWritableBufferAllocator(ByteBufAllocator.DEFAULT));
-    framer.writePayload(new ByteArrayInputStream(contentAsArray));
-    framer.flush();
-    if (endStream) {
-      framer.close();
-    }
-    ChannelHandlerContext ctx = newMockContext();
-    new DefaultHttp2FrameWriter().writeData(ctx, streamId, compressionFrame, 0, endStream,
-        newPromise());
-    return captureWrite(ctx);
-  }
-
   private ByteBuf emptyGrpcFrame(int streamId, boolean endStream) throws Exception {
     ByteBuf buf = NettyTestUtil.messageFrame("");
     try {
-      return super.dataFrame(streamId, endStream, buf);
+      return dataFrame(streamId, endStream, buf);
     } finally {
       buf.release();
     }
@@ -351,5 +365,10 @@ public class NettyServerHandlerTest extends NettyHandlerTestBase<NettyServerHand
   @Override
   protected WriteQueue initWriteQueue() {
     return handler().getWriteQueue();
+  }
+
+  @Override
+  protected void makeStream() throws Exception {
+    createStream();
   }
 }

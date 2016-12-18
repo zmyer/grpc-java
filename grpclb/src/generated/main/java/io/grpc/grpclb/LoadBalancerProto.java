@@ -6,49 +6,55 @@ package io.grpc.grpclb;
 public final class LoadBalancerProto {
   private LoadBalancerProto() {}
   public static void registerAllExtensions(
-      com.google.protobuf.ExtensionRegistry registry) {
+      com.google.protobuf.ExtensionRegistryLite registry) {
   }
-  static com.google.protobuf.Descriptors.Descriptor
+
+  public static void registerAllExtensions(
+      com.google.protobuf.ExtensionRegistry registry) {
+    registerAllExtensions(
+        (com.google.protobuf.ExtensionRegistryLite) registry);
+  }
+  static final com.google.protobuf.Descriptors.Descriptor
     internal_static_grpc_lb_v1_LoadBalanceRequest_descriptor;
-  static
-    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+  static final 
+    com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
       internal_static_grpc_lb_v1_LoadBalanceRequest_fieldAccessorTable;
-  static com.google.protobuf.Descriptors.Descriptor
+  static final com.google.protobuf.Descriptors.Descriptor
     internal_static_grpc_lb_v1_InitialLoadBalanceRequest_descriptor;
-  static
-    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+  static final 
+    com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
       internal_static_grpc_lb_v1_InitialLoadBalanceRequest_fieldAccessorTable;
-  static com.google.protobuf.Descriptors.Descriptor
+  static final com.google.protobuf.Descriptors.Descriptor
     internal_static_grpc_lb_v1_ClientStats_descriptor;
-  static
-    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+  static final 
+    com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
       internal_static_grpc_lb_v1_ClientStats_fieldAccessorTable;
-  static com.google.protobuf.Descriptors.Descriptor
+  static final com.google.protobuf.Descriptors.Descriptor
     internal_static_grpc_lb_v1_LoadBalanceResponse_descriptor;
-  static
-    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+  static final 
+    com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
       internal_static_grpc_lb_v1_LoadBalanceResponse_fieldAccessorTable;
-  static com.google.protobuf.Descriptors.Descriptor
+  static final com.google.protobuf.Descriptors.Descriptor
     internal_static_grpc_lb_v1_InitialLoadBalanceResponse_descriptor;
-  static
-    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+  static final 
+    com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
       internal_static_grpc_lb_v1_InitialLoadBalanceResponse_fieldAccessorTable;
-  static com.google.protobuf.Descriptors.Descriptor
+  static final com.google.protobuf.Descriptors.Descriptor
     internal_static_grpc_lb_v1_ServerList_descriptor;
-  static
-    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+  static final 
+    com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
       internal_static_grpc_lb_v1_ServerList_fieldAccessorTable;
-  static com.google.protobuf.Descriptors.Descriptor
+  static final com.google.protobuf.Descriptors.Descriptor
     internal_static_grpc_lb_v1_Server_descriptor;
-  static
-    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+  static final 
+    com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
       internal_static_grpc_lb_v1_Server_fieldAccessorTable;
 
   public static com.google.protobuf.Descriptors.FileDescriptor
       getDescriptor() {
     return descriptor;
   }
-  private static com.google.protobuf.Descriptors.FileDescriptor
+  private static  com.google.protobuf.Descriptors.FileDescriptor
       descriptor;
   static {
     java.lang.String[] descriptorData = {
@@ -65,19 +71,19 @@ public final class LoadBalancerProto {
       "al_response\030\001 \001(\0132&.grpc.lb.v1.InitialLo" +
       "adBalanceResponseH\000\022-\n\013server_list\030\002 \001(\013" +
       "2\026.grpc.lb.v1.ServerListH\000B\034\n\032load_balan" +
-      "ce_response_type\"\230\001\n\032InitialLoadBalanceR" +
-      "esponse\022 \n\026load_balancer_delegate\030\002 \001(\tH" +
-      "\000\022?\n\034client_stats_report_interval\030\003 \001(\0132" +
-      "\031.google.protobuf.DurationB\027\n\025initial_re" +
-      "sponse_type\"i\n\nServerList\022#\n\007servers\030\001 \003" +
-      "(\0132\022.grpc.lb.v1.Server\0226\n\023expiration_int" +
-      "erval\030\003 \001(\0132\031.google.protobuf.Duration\"\\",
-      "\n\006Server\022\022\n\nip_address\030\001 \001(\014\022\014\n\004port\030\002 \001" +
-      "(\005\022\032\n\022load_balance_token\030\003 \001(\t\022\024\n\014drop_r" +
-      "equest\030\004 \001(\0102b\n\014LoadBalancer\022R\n\013BalanceL" +
-      "oad\022\036.grpc.lb.v1.LoadBalanceRequest\032\037.gr" +
-      "pc.lb.v1.LoadBalanceResponse(\0010\001B%\n\016io.g" +
-      "rpc.grpclbB\021LoadBalancerProtoP\001b\006proto3"
+      "ce_response_type\"}\n\032InitialLoadBalanceRe" +
+      "sponse\022\036\n\026load_balancer_delegate\030\001 \001(\t\022?" +
+      "\n\034client_stats_report_interval\030\002 \001(\0132\031.g" +
+      "oogle.protobuf.Duration\"i\n\nServerList\022#\n" +
+      "\007servers\030\001 \003(\0132\022.grpc.lb.v1.Server\0226\n\023ex" +
+      "piration_interval\030\003 \001(\0132\031.google.protobu" +
+      "f.Duration\"\\\n\006Server\022\022\n\nip_address\030\001 \001(\014",
+      "\022\014\n\004port\030\002 \001(\005\022\032\n\022load_balance_token\030\003 \001" +
+      "(\t\022\024\n\014drop_request\030\004 \001(\0102b\n\014LoadBalancer" +
+      "\022R\n\013BalanceLoad\022\036.grpc.lb.v1.LoadBalance" +
+      "Request\032\037.grpc.lb.v1.LoadBalanceResponse" +
+      "(\0010\001B%\n\016io.grpc.grpclbB\021LoadBalancerProt" +
+      "oP\001b\006proto3"
     };
     com.google.protobuf.Descriptors.FileDescriptor.InternalDescriptorAssigner assigner =
         new com.google.protobuf.Descriptors.FileDescriptor.    InternalDescriptorAssigner() {
@@ -95,43 +101,43 @@ public final class LoadBalancerProto {
     internal_static_grpc_lb_v1_LoadBalanceRequest_descriptor =
       getDescriptor().getMessageTypes().get(0);
     internal_static_grpc_lb_v1_LoadBalanceRequest_fieldAccessorTable = new
-      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+      com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_grpc_lb_v1_LoadBalanceRequest_descriptor,
         new java.lang.String[] { "InitialRequest", "ClientStats", "LoadBalanceRequestType", });
     internal_static_grpc_lb_v1_InitialLoadBalanceRequest_descriptor =
       getDescriptor().getMessageTypes().get(1);
     internal_static_grpc_lb_v1_InitialLoadBalanceRequest_fieldAccessorTable = new
-      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+      com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_grpc_lb_v1_InitialLoadBalanceRequest_descriptor,
         new java.lang.String[] { "Name", });
     internal_static_grpc_lb_v1_ClientStats_descriptor =
       getDescriptor().getMessageTypes().get(2);
     internal_static_grpc_lb_v1_ClientStats_fieldAccessorTable = new
-      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+      com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_grpc_lb_v1_ClientStats_descriptor,
         new java.lang.String[] { "TotalRequests", "ClientRpcErrors", "DroppedRequests", });
     internal_static_grpc_lb_v1_LoadBalanceResponse_descriptor =
       getDescriptor().getMessageTypes().get(3);
     internal_static_grpc_lb_v1_LoadBalanceResponse_fieldAccessorTable = new
-      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+      com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_grpc_lb_v1_LoadBalanceResponse_descriptor,
         new java.lang.String[] { "InitialResponse", "ServerList", "LoadBalanceResponseType", });
     internal_static_grpc_lb_v1_InitialLoadBalanceResponse_descriptor =
       getDescriptor().getMessageTypes().get(4);
     internal_static_grpc_lb_v1_InitialLoadBalanceResponse_fieldAccessorTable = new
-      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+      com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_grpc_lb_v1_InitialLoadBalanceResponse_descriptor,
-        new java.lang.String[] { "LoadBalancerDelegate", "ClientStatsReportInterval", "InitialResponseType", });
+        new java.lang.String[] { "LoadBalancerDelegate", "ClientStatsReportInterval", });
     internal_static_grpc_lb_v1_ServerList_descriptor =
       getDescriptor().getMessageTypes().get(5);
     internal_static_grpc_lb_v1_ServerList_fieldAccessorTable = new
-      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+      com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_grpc_lb_v1_ServerList_descriptor,
         new java.lang.String[] { "Servers", "ExpirationInterval", });
     internal_static_grpc_lb_v1_Server_descriptor =
       getDescriptor().getMessageTypes().get(6);
     internal_static_grpc_lb_v1_Server_fieldAccessorTable = new
-      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+      com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_grpc_lb_v1_Server_descriptor,
         new java.lang.String[] { "IpAddress", "Port", "LoadBalanceToken", "DropRequest", });
     com.google.protobuf.DurationProto.getDescriptor();

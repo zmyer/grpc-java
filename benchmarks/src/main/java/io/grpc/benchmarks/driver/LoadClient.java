@@ -60,7 +60,6 @@ import org.HdrHistogram.Recorder;
 import org.apache.commons.math3.distribution.ExponentialDistribution;
 
 import java.lang.management.ManagementFactory;
-
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -106,8 +105,8 @@ class LoadClient {
               config.hasSecurityParams(),
               config.hasSecurityParams() && config.getSecurityParams().getUseTestCa(),
               config.hasSecurityParams()
-                  ? config.getSecurityParams().getServerHostOverride() :
-                  null,
+                  ? config.getSecurityParams().getServerHostOverride()
+                  : null,
               true,
               Utils.DEFAULT_FLOW_CONTROL_WINDOW,
               false);
@@ -139,14 +138,20 @@ class LoadClient {
         new DefaultThreadFactory("client-worker", true));
 
     // Create the load distribution
-    if (config.getLoadParams().getClosedLoop() != null) {
-      distribution = null;
-    } else if (config.getLoadParams().getPoisson() != null) {
-      // Mean of exp distribution per thread is <no threads> / <offered load per second>
-      distribution = new ExponentialDistribution(
-          (double) threadCount / config.getLoadParams().getPoisson().getOfferedLoad());
-    } else  {
-      throw new UnsupportedOperationException();
+    switch (config.getLoadParams().getLoadCase()) {
+      case CLOSED_LOOP:
+        distribution = null;
+        break;
+      case LOAD_NOT_SET:
+        distribution = null;
+        break;
+      case POISSON:
+        // Mean of exp distribution per thread is <no threads> / <offered load per second>
+        distribution = new ExponentialDistribution(
+            threadCount / config.getLoadParams().getPoisson().getOfferedLoad());
+        break;
+      default:
+        throw new IllegalArgumentException("Scenario not implemented");
     }
 
     // Create payloads
@@ -260,15 +265,15 @@ class LoadClient {
       latenciesBuilder.addBucket(0);
       base = base * resolution;
     }
-    latenciesBuilder.setMaxSeen((double) intervalHistogram.getMaxValue());
-    latenciesBuilder.setMinSeen((double) intervalHistogram.getMinNonZeroValue());
+    latenciesBuilder.setMaxSeen(intervalHistogram.getMaxValue());
+    latenciesBuilder.setMinSeen(intervalHistogram.getMinNonZeroValue());
     latenciesBuilder.setCount(intervalHistogram.getTotalCount());
     latenciesBuilder.setSum(intervalHistogram.getMean()
         * intervalHistogram.getTotalCount());
     // TODO: No support for sum of squares
 
-    statsBuilder.setTimeElapsed(((double)(intervalHistogram.getEndTimeStamp()
-        - intervalHistogram.getStartTimeStamp())) / 1000.0);
+    statsBuilder.setTimeElapsed((intervalHistogram.getEndTimeStamp()
+        - intervalHistogram.getStartTimeStamp()) / 1000.0);
     if (osBean != null) {
       // Report all the CPU time as user-time  (which is intentionally incorrect)
       long nowCpu = osBean.getProcessCpuTime();
@@ -323,6 +328,7 @@ class LoadClient {
       this.stub = stub;
     }
 
+    @Override
     public void run() {
       while (!shutdown) {
         long now = System.nanoTime();
@@ -346,8 +352,12 @@ class LoadClient {
 
     @Override
     public void run() {
-      while (!shutdown) {
+      while (true) {
         maxOutstanding.acquireUninterruptibly();
+        if (shutdown) {
+          maxOutstanding.release();
+          return;
+        }
         stub.unaryCall(simpleRequest, new StreamObserver<Messages.SimpleResponse>() {
           long now = System.nanoTime();
           @Override
@@ -358,8 +368,8 @@ class LoadClient {
           @Override
           public void onError(Throwable t) {
             maxOutstanding.release();
-            log.log(Level.INFO, "Error in AsyncUnary call", t);
-
+            Level level = shutdown ? Level.FINE : Level.INFO;
+            log.log(level, "Error in AsyncUnary call", t);
           }
 
           @Override
@@ -397,17 +407,20 @@ class LoadClient {
               @Override
               public void onNext(Messages.SimpleResponse value) {
                 delay(System.nanoTime() - now);
-                requestObserver.get().onNext(simpleRequest);
-                now = System.nanoTime();
                 if (shutdown) {
                   requestObserver.get().onCompleted();
+                  // Must not send another request.
+                  return;
                 }
+                requestObserver.get().onNext(simpleRequest);
+                now = System.nanoTime();
               }
 
               @Override
               public void onError(Throwable t) {
                 maxOutstanding.release();
-                log.log(Level.INFO, "Error in Async Ping-Pong call", t);
+                Level level = shutdown ? Level.FINE : Level.INFO;
+                log.log(level, "Error in Async Ping-Pong call", t);
 
               }
 
@@ -432,6 +445,7 @@ class LoadClient {
       this.channel = channel;
     }
 
+    @Override
     public void run() {
       long now;
       while (!shutdown) {
@@ -456,14 +470,20 @@ class LoadClient {
       this.channel = channel;
     }
 
+    @Override
     public void run() {
-      while (!shutdown) {
+      while (true) {
         maxOutstanding.acquireUninterruptibly();
+        if (shutdown) {
+          maxOutstanding.release();
+          return;
+        }
         ClientCalls.asyncUnaryCall(
             channel.newCall(LoadServer.GENERIC_UNARY_METHOD, CallOptions.DEFAULT),
             genericRequest.slice(),
             new StreamObserver<ByteBuf>() {
               long now = System.nanoTime();
+
               @Override
               public void onNext(ByteBuf value) {
 
@@ -472,7 +492,8 @@ class LoadClient {
               @Override
               public void onError(Throwable t) {
                 maxOutstanding.release();
-                log.log(Level.INFO, "Error in Generic Async Unary call", t);
+                Level level = shutdown ? Level.FINE : Level.INFO;
+                log.log(level, "Error in Generic Async Unary call", t);
               }
 
               @Override
@@ -499,8 +520,12 @@ class LoadClient {
 
     @Override
     public void run() {
-      while (!shutdown) {
+      while (true) {
         maxOutstanding.acquireUninterruptibly();
+        if (shutdown) {
+          maxOutstanding.release();
+          return;
+        }
         final ClientCall<ByteBuf, ByteBuf> call =
             channel.newCall(LoadServer.GENERIC_STREAMING_PING_PONG_METHOD, CallOptions.DEFAULT);
         call.start(new ClientCall.Listener<ByteBuf>() {
@@ -509,19 +534,21 @@ class LoadClient {
           @Override
           public void onMessage(ByteBuf message) {
             delay(System.nanoTime() - now);
+            if (shutdown) {
+              call.cancel("Shutting down", null);
+              return;
+            }
             call.request(1);
             call.sendMessage(genericRequest.slice());
             now = System.nanoTime();
-            if (shutdown) {
-              call.cancel();
-            }
           }
 
           @Override
           public void onClose(Status status, Metadata trailers) {
             maxOutstanding.release();
+            Level level = shutdown ? Level.FINE : Level.INFO;
             if (!status.isOk() && status.getCode() != Status.Code.CANCELLED) {
-              log.log(Level.INFO, "Error in Generic Async Ping-Pong call", status.getCause());
+              log.log(level, "Error in Generic Async Ping-Pong call", status.getCause());
             }
           }
         }, new Metadata());

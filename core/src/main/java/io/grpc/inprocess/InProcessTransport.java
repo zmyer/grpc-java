@@ -34,40 +34,47 @@ package io.grpc.inprocess;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import io.grpc.Attributes;
+import io.grpc.CallOptions;
 import io.grpc.Compressor;
 import io.grpc.Decompressor;
+import io.grpc.Grpc;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
-import io.grpc.ServerCall;
 import io.grpc.Status;
 import io.grpc.internal.ClientStream;
 import io.grpc.internal.ClientStreamListener;
-import io.grpc.internal.GrpcUtil;
+import io.grpc.internal.ConnectionClientTransport;
+import io.grpc.internal.LogId;
 import io.grpc.internal.ManagedClientTransport;
 import io.grpc.internal.NoopClientStream;
 import io.grpc.internal.ServerStream;
 import io.grpc.internal.ServerStreamListener;
 import io.grpc.internal.ServerTransport;
 import io.grpc.internal.ServerTransportListener;
+import io.grpc.internal.StatsTraceContext;
 
 import java.io.InputStream;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import javax.annotation.CheckReturnValue;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
 @ThreadSafe
-class InProcessTransport implements ServerTransport, ManagedClientTransport {
+class InProcessTransport implements ServerTransport, ConnectionClientTransport {
   private static final Logger log = Logger.getLogger(InProcessTransport.class.getName());
 
+  private final LogId logId = LogId.allocate(getClass().getName());
   private final String name;
   private ServerTransportListener serverTransportListener;
-  private final Attributes serverStreamAttributes;
+  private Attributes serverStreamAttributes;
   private ManagedClientTransport.Listener clientTransportListener;
   @GuardedBy("this")
   private boolean shutdown;
@@ -80,13 +87,11 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
 
   public InProcessTransport(String name) {
     this.name = name;
-    this.serverStreamAttributes = Attributes.newBuilder()
-        .set(ServerCall.REMOTE_ADDR_KEY, new InProcessSocketAddress(name))
-        .build();
   }
 
+  @CheckReturnValue
   @Override
-  public synchronized void start(ManagedClientTransport.Listener listener) {
+  public synchronized Runnable start(ManagedClientTransport.Listener listener) {
     this.clientTransportListener = listener;
     InProcessServer server = InProcessServer.findServer(name);
     if (server != null) {
@@ -95,7 +100,7 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
     if (serverTransportListener == null) {
       shutdownStatus = Status.UNAVAILABLE.withDescription("Could not find server: " + name);
       final Status localShutdownStatus = shutdownStatus;
-      Thread shutdownThread = new Thread(new Runnable() {
+      return new Runnable() {
         @Override
         public void run() {
           synchronized (InProcessTransport.this) {
@@ -103,28 +108,27 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
             notifyTerminated();
           }
         }
-      });
-      shutdownThread.setDaemon(true);
-      shutdownThread.setName("grpc-inprocess-shutdown");
-      shutdownThread.start();
-      return;
+      };
     }
-    Thread readyThread = new Thread(new Runnable() {
+    return new Runnable() {
       @Override
+      @SuppressWarnings("deprecation")
       public void run() {
         synchronized (InProcessTransport.this) {
+          Attributes serverTransportAttrs = Attributes.newBuilder()
+              .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, new InProcessSocketAddress(name))
+              .build();
+          serverStreamAttributes = serverTransportListener.transportReady(serverTransportAttrs);
           clientTransportListener.transportReady();
         }
       }
-    });
-    readyThread.setDaemon(true);
-    readyThread.setName("grpc-inprocess-ready");
-    readyThread.start();
+    };
   }
 
   @Override
   public synchronized ClientStream newStream(
-      final MethodDescriptor<?, ?> method, final Metadata headers) {
+      final MethodDescriptor<?, ?> method, final Metadata headers, final CallOptions callOptions,
+      StatsTraceContext clientStatsTraceContext) {
     if (shutdownStatus != null) {
       final Status capturedStatus = shutdownStatus;
       return new NoopClientStream() {
@@ -134,8 +138,15 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
         }
       };
     }
+    StatsTraceContext serverStatsTraceContext = serverTransportListener.methodDetermined(
+        method.getFullMethodName(), headers);
+    return new InProcessStream(method, headers, serverStatsTraceContext).clientStream;
+  }
 
-    return new InProcessStream(method, headers).clientStream;
+  @Override
+  public synchronized ClientStream newStream(
+      final MethodDescriptor<?, ?> method, final Metadata headers) {
+    return newStream(method, headers, CallOptions.DEFAULT, StatsTraceContext.NOOP);
   }
 
   @Override
@@ -172,13 +183,34 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
   }
 
   @Override
+  public void shutdownNow(Status reason) {
+    checkNotNull(reason, "reason");
+    List<InProcessStream> streamsCopy;
+    synchronized (this) {
+      shutdown();
+      if (terminated) {
+        return;
+      }
+      streamsCopy = new ArrayList<InProcessStream>(streams);
+    }
+    for (InProcessStream stream : streamsCopy) {
+      stream.clientStream.cancel(reason);
+    }
+  }
+
+  @Override
   public String toString() {
     return getLogId() + "(" + name + ")";
   }
 
   @Override
-  public String getLogId() {
-    return GrpcUtil.getLogId(this);
+  public LogId getLogId() {
+    return logId;
+  }
+
+  @Override
+  public Attributes getAttrs() {
+    return Attributes.EMPTY;
   }
 
   private synchronized void notifyShutdown(Status s) {
@@ -203,21 +235,27 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
   private class InProcessStream {
     private final InProcessServerStream serverStream = new InProcessServerStream();
     private final InProcessClientStream clientStream = new InProcessClientStream();
+    private final StatsTraceContext serverStatsTraceContext;
     private final Metadata headers;
-    private MethodDescriptor<?, ?> method;
+    private final MethodDescriptor<?, ?> method;
 
-    private InProcessStream(MethodDescriptor<?, ?> method, Metadata headers) {
-      this.method = checkNotNull(method);
-      this.headers = checkNotNull(headers);
-
+    private InProcessStream(MethodDescriptor<?, ?> method, Metadata headers,
+        StatsTraceContext serverStatsTraceContext) {
+      this.method = checkNotNull(method, "method");
+      this.headers = checkNotNull(headers, "headers");
+      this.serverStatsTraceContext =
+          checkNotNull(serverStatsTraceContext, "serverStatsTraceContext");
     }
 
     // Can be called multiple times due to races on both client and server closing at same time.
     private void streamClosed() {
       synchronized (InProcessTransport.this) {
         boolean justRemovedAnElement = streams.remove(this);
-        if (shutdown && streams.isEmpty() && justRemovedAnElement) {
-          notifyTerminated();
+        if (streams.isEmpty() && justRemovedAnElement) {
+          clientTransportListener.transportInUse(false);
+          if (shutdown) {
+            notifyTerminated();
+          }
         }
       }
     }
@@ -239,6 +277,11 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
 
       private synchronized void setListener(ClientStreamListener listener) {
         clientStreamListener = listener;
+      }
+
+      @Override
+      public void setListener(ServerStreamListener serverStreamListener) {
+        clientStream.setListener(serverStreamListener);
       }
 
       @Override
@@ -319,6 +362,7 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
 
       @Override
       public void close(Status status, Metadata trailers) {
+        status = stripCause(status);
         synchronized (this) {
           if (closed) {
             return;
@@ -375,6 +419,11 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
 
       @Override public Attributes attributes() {
         return serverStreamAttributes;
+      }
+
+      @Override
+      public StatsTraceContext statsTraceContext() {
+        return serverStatsTraceContext;
       }
     }
 
@@ -459,9 +508,10 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
         return serverRequested > 0;
       }
 
+      // Must be thread-safe for shutdownNow()
       @Override
       public void cancel(Status reason) {
-        if (!internalCancel(reason)) {
+        if (!internalCancel(stripCause(reason))) {
           return;
         }
         serverStream.clientCancelled(reason);
@@ -511,10 +561,11 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
         serverStream.setListener(listener);
 
         synchronized (InProcessTransport.this) {
-          ServerStreamListener serverStreamListener = serverTransportListener.streamCreated(
-              serverStream, method.getFullMethodName(), headers);
-          clientStream.setListener(serverStreamListener);
           streams.add(InProcessTransport.InProcessStream.this);
+          if (streams.size() == 1) {
+            clientTransportListener.transportInUse(true);
+          }
+          serverTransportListener.streamCreated(serverStream, method.getFullMethodName(), headers);
         }
       }
 
@@ -524,5 +575,21 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
       @Override
       public void setDecompressor(Decompressor decompressor) {}
     }
+  }
+
+  /**
+   * Returns a new status with the same code and description, but stripped of any other information
+   * (i.e. cause).
+   *
+   * <p>This is, so that the InProcess transport behaves in the same way as the other transports,
+   * when exchanging statuses between client and server and vice versa.
+   */
+  private static Status stripCause(Status status) {
+    if (status == null) {
+      return null;
+    }
+    return Status
+        .fromCodeValue(status.getCode().value())
+        .withDescription(status.getDescription());
   }
 }

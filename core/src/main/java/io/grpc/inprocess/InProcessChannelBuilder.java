@@ -31,13 +31,15 @@
 
 package io.grpc.inprocess;
 
+import com.google.census.CensusContextFactory;
 import com.google.common.base.Preconditions;
 
 import io.grpc.ExperimentalApi;
 import io.grpc.Internal;
 import io.grpc.internal.AbstractManagedChannelImplBuilder;
 import io.grpc.internal.ClientTransportFactory;
-import io.grpc.internal.ManagedClientTransport;
+import io.grpc.internal.ConnectionClientTransport;
+import io.grpc.internal.NoopCensusContextFactory;
 
 import java.net.SocketAddress;
 
@@ -47,7 +49,7 @@ import java.net.SocketAddress;
  *
  * <p>The channel is intended to be fully-featured, high performance, and useful in testing.
  */
-@ExperimentalApi("There is no plan to make this API stable.")
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1783")
 public class InProcessChannelBuilder extends
         AbstractManagedChannelImplBuilder<InProcessChannelBuilder> {
   /**
@@ -64,7 +66,17 @@ public class InProcessChannelBuilder extends
 
   private InProcessChannelBuilder(String name) {
     super(new InProcessSocketAddress(name), "localhost");
-    this.name = Preconditions.checkNotNull(name);
+    this.name = Preconditions.checkNotNull(name, "name");
+    // TODO(zhangkun83): InProcessTransport by-passes framer and deframer, thus message sizses are
+    // not counted.  Therefore, we disable Census for now.
+    // (https://github.com/grpc/grpc-java/issues/2284)
+    super.censusContextFactory(NoopCensusContextFactory.INSTANCE);
+  }
+
+  @Override
+  public final InProcessChannelBuilder maxInboundMessageSize(int max) {
+    // TODO(carl-mastrangelo): maybe throw an exception since this not enforced?
+    return super.maxInboundMessageSize(max);
   }
 
   /**
@@ -78,6 +90,16 @@ public class InProcessChannelBuilder extends
   @Override
   protected ClientTransportFactory buildTransportFactory() {
     return new InProcessClientTransportFactory(name);
+  }
+
+  @Internal
+  @Override
+  public InProcessChannelBuilder censusContextFactory(CensusContextFactory censusFactory) {
+    // TODO(zhangkun83): InProcessTransport by-passes framer and deframer, thus message sizses are
+    // not counted.  Census is disabled by using a NOOP Census factory in the constructor, and here
+    // we prevent the user from overriding it.
+    // (https://github.com/grpc/grpc-java/issues/2284)
+    return this;
   }
 
   /**
@@ -94,7 +116,8 @@ public class InProcessChannelBuilder extends
     }
 
     @Override
-    public ManagedClientTransport newClientTransport(SocketAddress addr, String authority) {
+    public ConnectionClientTransport newClientTransport(
+        SocketAddress addr, String authority, String userAgent) {
       if (closed) {
         throw new IllegalStateException("The transport factory is closed.");
       }

@@ -34,12 +34,12 @@ package io.grpc.internal;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
-import static io.grpc.internal.GrpcUtil.ACCEPT_ENCODING_JOINER;
-import static io.grpc.internal.GrpcUtil.ACCEPT_ENCODING_SPLITER;
+import static io.grpc.internal.GrpcUtil.ACCEPT_ENCODING_SPLITTER;
 import static io.grpc.internal.GrpcUtil.MESSAGE_ACCEPT_ENCODING_KEY;
 import static io.grpc.internal.GrpcUtil.MESSAGE_ENCODING_KEY;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Throwables;
 
 import io.grpc.Attributes;
 import io.grpc.Codec;
@@ -57,15 +57,15 @@ import io.grpc.Status;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
-import java.util.Set;
 
-final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
+final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
   private final ServerStream stream;
   private final MethodDescriptor<ReqT, RespT> method;
   private final Context.CancellableContext context;
-  private Metadata inboundHeaders;
+  private final String messageAcceptEncoding;
   private final DecompressorRegistry decompressorRegistry;
   private final CompressorRegistry compressorRegistry;
+  private final StatsTraceContext statsTraceCtx;
 
   // state
   private volatile boolean cancelled;
@@ -74,20 +74,21 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
   private Compressor compressor;
 
   ServerCallImpl(ServerStream stream, MethodDescriptor<ReqT, RespT> method,
-      Metadata inboundHeaders, Context.CancellableContext context,
+      Metadata inboundHeaders, Context.CancellableContext context, StatsTraceContext statsTraceCtx,
       DecompressorRegistry decompressorRegistry, CompressorRegistry compressorRegistry) {
     this.stream = stream;
     this.method = method;
     this.context = context;
-    this.inboundHeaders = inboundHeaders;
+    this.messageAcceptEncoding = inboundHeaders.get(MESSAGE_ACCEPT_ENCODING_KEY);
     this.decompressorRegistry = decompressorRegistry;
     this.compressorRegistry = compressorRegistry;
+    this.statsTraceCtx = checkNotNull(statsTraceCtx, "statsTraceCtx");
 
     if (inboundHeaders.containsKey(MESSAGE_ENCODING_KEY)) {
       String encoding = inboundHeaders.get(MESSAGE_ENCODING_KEY);
       Decompressor decompressor = decompressorRegistry.lookupDecompressor(encoding);
       if (decompressor == null) {
-        throw Status.INTERNAL
+        throw Status.UNIMPLEMENTED
             .withDescription(String.format("Can't find decompressor for %s", encoding))
             .asRuntimeException();
       }
@@ -105,23 +106,13 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
     checkState(!sendHeadersCalled, "sendHeaders has already been called");
     checkState(!closeCalled, "call is closed");
 
-    headers.removeAll(MESSAGE_ENCODING_KEY);
+    headers.discardAll(MESSAGE_ENCODING_KEY);
     if (compressor == null) {
       compressor = Codec.Identity.NONE;
-      if (inboundHeaders.containsKey(MESSAGE_ACCEPT_ENCODING_KEY)) {
-        String acceptEncodings = inboundHeaders.get(MESSAGE_ACCEPT_ENCODING_KEY);
-        for (String acceptEncoding : ACCEPT_ENCODING_SPLITER.split(acceptEncodings)) {
-          Compressor c = compressorRegistry.lookupCompressor(acceptEncoding);
-          if (c != null) {
-            compressor = c;
-            break;
-          }
-        }
-      }
     } else {
-      if (inboundHeaders.containsKey(MESSAGE_ACCEPT_ENCODING_KEY)) {
-        String acceptEncodings = inboundHeaders.get(MESSAGE_ACCEPT_ENCODING_KEY);
-        List<String> acceptedEncodingsList = ACCEPT_ENCODING_SPLITER.splitToList(acceptEncodings);
+      if (messageAcceptEncoding != null) {
+        List<String> acceptedEncodingsList =
+            ACCEPT_ENCODING_SPLITTER.splitToList(messageAcceptEncoding);
         if (!acceptedEncodingsList.contains(compressor.getMessageEncoding())) {
           // resort to using no compression.
           compressor = Codec.Identity.NONE;
@@ -130,16 +121,16 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
         compressor = Codec.Identity.NONE;
       }
     }
-    inboundHeaders = null;
-    if (compressor != Codec.Identity.NONE) {
-      headers.put(MESSAGE_ENCODING_KEY, compressor.getMessageEncoding());
-    }
+
+    // Always put compressor, even if it's identity.
+    headers.put(MESSAGE_ENCODING_KEY, compressor.getMessageEncoding());
+
     stream.setCompressor(compressor);
 
-    headers.removeAll(MESSAGE_ACCEPT_ENCODING_KEY);
-    Set<String> acceptEncodings = decompressorRegistry.getAdvertisedMessageEncodings();
-    if (!acceptEncodings.isEmpty()) {
-      headers.put(MESSAGE_ACCEPT_ENCODING_KEY, ACCEPT_ENCODING_JOINER.join(acceptEncodings));
+    headers.discardAll(MESSAGE_ACCEPT_ENCODING_KEY);
+    String advertisedEncodings = decompressorRegistry.getRawAdvertisedMessageEncodings();
+    if (!advertisedEncodings.isEmpty()) {
+      headers.put(MESSAGE_ACCEPT_ENCODING_KEY, advertisedEncodings);
     }
 
     // Don't check if sendMessage has been called, since it requires that sendHeaders was already
@@ -188,7 +179,6 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
   public void close(Status status, Metadata trailers) {
     checkState(!closeCalled, "call already closed");
     closeCalled = true;
-    inboundHeaders = null;
     stream.close(status, trailers);
   }
 
@@ -198,12 +188,17 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
   }
 
   ServerStreamListener newServerStreamListener(ServerCall.Listener<ReqT> listener) {
-    return new ServerStreamListenerImpl<ReqT>(this, listener, context);
+    return new ServerStreamListenerImpl<ReqT>(this, listener, context, statsTraceCtx);
   }
 
   @Override
   public Attributes attributes() {
     return stream.attributes();
+  }
+
+  @Override
+  public MethodDescriptor<ReqT, RespT> getMethodDescriptor() {
+    return method;
   }
 
   /**
@@ -215,25 +210,28 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
     private final ServerCallImpl<ReqT, ?> call;
     private final ServerCall.Listener<ReqT> listener;
     private final Context.CancellableContext context;
+    private final StatsTraceContext statsTraceCtx;
     private boolean messageReceived;
 
     public ServerStreamListenerImpl(
         ServerCallImpl<ReqT, ?> call, ServerCall.Listener<ReqT> listener,
-        Context.CancellableContext context) {
+        Context.CancellableContext context, StatsTraceContext statsTraceCtx) {
       this.call = checkNotNull(call, "call");
       this.listener = checkNotNull(listener, "listener must not be null");
       this.context = checkNotNull(context, "context");
+      this.statsTraceCtx = checkNotNull(statsTraceCtx, "statsTraceCtx");
     }
 
     @Override
     public void messageRead(final InputStream message) {
+      Throwable t = null;
       try {
         if (call.cancelled) {
           return;
         }
         // Special case for unary calls.
         if (messageReceived && call.method.getType() == MethodType.UNARY) {
-          call.stream.close(Status.INVALID_ARGUMENT.withDescription(
+          call.stream.close(Status.INTERNAL.withDescription(
                   "More than one request messages for unary call or server streaming call"),
               new Metadata());
           return;
@@ -241,11 +239,19 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
         messageReceived = true;
 
         listener.onMessage(call.method.parseRequest(message));
+      } catch (Throwable e) {
+        t = e;
       } finally {
         try {
           message.close();
         } catch (IOException e) {
           throw new RuntimeException(e);
+        } finally {
+          if (t != null) {
+            // TODO(carl-mastrangelo): Maybe log e here.
+            Throwables.throwIfUnchecked(t);
+            throw new RuntimeException(t);
+          }
         }
       }
     }
@@ -262,6 +268,7 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
     @Override
     public void closed(Status status) {
       try {
+        statsTraceCtx.callEnded(status);
         if (status.isOk()) {
           listener.onComplete();
         } else {

@@ -34,6 +34,7 @@ package io.grpc;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 
+import java.util.Arrays;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
@@ -61,10 +62,20 @@ public final class CallOptions {
   @Nullable
   private String authority;
 
+  @Nullable
+  private CallCredentials credentials;
+
   private Attributes affinity = Attributes.EMPTY;
 
   @Nullable
   private String compressorName;
+
+  private Object[][] customOptions = new Object[0][2];
+
+  /**
+   * Opposite to fail fast.
+   */
+  private boolean waitForReady;
 
   /**
    * Override the HTTP/2 authority the channel claims to be connecting to. <em>This is not
@@ -75,7 +86,7 @@ public final class CallOptions {
    * verification of the overridden value, such as making sure the authority matches the server's
    * TLS certificate.</em>
    */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/67")
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1767")
   public CallOptions withAuthority(@Nullable String authority) {
     CallOptions newOptions = new CallOptions(this);
     newOptions.authority = authority;
@@ -83,10 +94,20 @@ public final class CallOptions {
   }
 
   /**
+   * Returns a new {@code CallOptions} with the given call credentials.
+   */
+  @ExperimentalApi("https//github.com/grpc/grpc-java/issues/1914")
+  public CallOptions withCallCredentials(@Nullable CallCredentials credentials) {
+    CallOptions newOptions = new CallOptions(this);
+    newOptions.credentials = credentials;
+    return newOptions;
+  }
+
+  /**
    * Sets the compression to use for the call.  The compressor must be a valid name known in the
    * {@link CompressorRegistry}.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   public CallOptions withCompression(@Nullable String compressorName) {
     CallOptions newOptions = new CallOptions(this);
     newOptions.compressorName = compressorName;
@@ -101,7 +122,6 @@ public final class CallOptions {
    *
    * @param deadline the deadline or {@code null} for unsetting the deadline.
    */
-  @ExperimentalApi
   public CallOptions withDeadline(@Nullable Deadline deadline) {
     CallOptions newOptions = new CallOptions(this);
     newOptions.deadline = deadline;
@@ -152,7 +172,6 @@ public final class CallOptions {
   /**
    * Returns the deadline or {@code null} if the deadline is not set.
    */
-  @ExperimentalApi
   @Nullable
   public Deadline getDeadline() {
     return deadline;
@@ -161,26 +180,48 @@ public final class CallOptions {
   /**
    * Returns a new {@code CallOptions} with attributes for affinity-based routing.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1766")
   public CallOptions withAffinity(Attributes affinity) {
     CallOptions newOptions = new CallOptions(this);
-    newOptions.affinity = Preconditions.checkNotNull(affinity);
+    newOptions.affinity = Preconditions.checkNotNull(affinity, "affinity");
+    return newOptions;
+  }
+
+  /**
+   * Enables 'wait for ready' feature for the call.
+   * <a href="https://github.com/grpc/grpc/blob/master/doc/fail_fast.md">'Fail fast'</a>
+   * is the default option for gRPC calls and 'wait for ready' is the opposite to it.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1915")
+  public CallOptions withWaitForReady() {
+    CallOptions newOptions = new CallOptions(this);
+    newOptions.waitForReady = true;
+    return newOptions;
+  }
+
+  /**
+   * Disables 'wait for ready' feature for the call.
+   * This method should be rarely used because the default is without 'wait for ready'.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1915")
+  public CallOptions withoutWaitForReady() {
+    CallOptions newOptions = new CallOptions(this);
+    newOptions.waitForReady = false;
     return newOptions;
   }
 
   /**
    * Returns the attributes for affinity-based routing.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1766")
   public Attributes getAffinity() {
     return affinity;
   }
 
-
   /**
    * Returns the compressor's name.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   @Nullable
   public String getCompressor() {
     return compressorName;
@@ -196,9 +237,18 @@ public final class CallOptions {
    * TLS certificate.</em>
    */
   @Nullable
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/67")
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1767")
   public String getAuthority() {
     return authority;
+  }
+
+  /**
+   * Returns the call credentials.
+   */
+  @ExperimentalApi("https//github.com/grpc/grpc-java/issues/1914")
+  @Nullable
+  public CallCredentials getCredentials() {
+    return credentials;
   }
 
   /**
@@ -211,6 +261,89 @@ public final class CallOptions {
     return newOptions;
   }
 
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1869")
+  public static final class Key<T> {
+    private final String name;
+    private final T defaultValue;
+
+    private Key(String name, T defaultValue) {
+      this.name = name;
+      this.defaultValue = defaultValue;
+    }
+
+    public T getDefault() {
+      return defaultValue;
+    }
+
+    @Override
+    public String toString() {
+      return name;
+    }
+
+    /**
+     * Factory method for creating instances of {@link Key}.
+     *
+     * @param name the name of Key.
+     * @param defaultValue default value to return when value for key not set
+     * @param <T> Key type
+     * @return Key object
+     */
+    public static <T> Key<T> of(String name, T defaultValue) {
+      Preconditions.checkNotNull(name, "name");
+      return new Key<T>(name, defaultValue);
+    }
+  }
+
+  /**
+   * Sets a custom option. Any existing value for the key is overwritten.
+   *
+   * @param key The option key
+   * @param value The option value.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1869")
+  public <T> CallOptions withOption(Key<T> key, T value) {
+    Preconditions.checkNotNull(key, "key");
+    Preconditions.checkNotNull(value, "value");
+
+    CallOptions newOptions = new CallOptions(this);
+    int existingIdx = -1;
+    for (int i = 0; i < customOptions.length; i++) {
+      if (key.equals(customOptions[i][0])) {
+        existingIdx = i;
+        break;
+      }
+    }
+
+    newOptions.customOptions = new Object[customOptions.length + (existingIdx == -1 ? 1 : 0)][2];
+    System.arraycopy(customOptions, 0, newOptions.customOptions, 0, customOptions.length);
+
+    if (existingIdx == -1) {
+      // Add a new option
+      newOptions.customOptions[customOptions.length] = new Object[] {key, value};
+    } else {
+      // Replace an existing option
+      newOptions.customOptions[existingIdx][1] = value;
+    }
+
+    return newOptions;
+  }
+
+  /**
+   * Get the value for a custom option or its inherent default.
+   * @param key Key identifying option
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1869")
+  @SuppressWarnings("unchecked")
+  public <T> T getOption(Key<T> key) {
+    Preconditions.checkNotNull(key, "key");
+    for (int i = 0; i < customOptions.length; i++) {
+      if (key.equals(customOptions[i][0])) {
+        return (T) customOptions[i][1];
+      }
+    }
+    return key.defaultValue;
+  }
+
   @Nullable
   public Executor getExecutor() {
     return executor;
@@ -220,14 +353,27 @@ public final class CallOptions {
   }
 
   /**
+   * Returns whether 'wait for ready' option is enabled for the call.
+   * <a href="https://github.com/grpc/grpc/blob/master/doc/fail_fast.md">'Fail fast'</a>
+   * is the default option for gRPC calls and 'wait for ready' is the opposite to it.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1915")
+  public boolean isWaitForReady() {
+    return waitForReady;
+  }
+
+  /**
    * Copy constructor.
    */
   private CallOptions(CallOptions other) {
     deadline = other.deadline;
     authority = other.authority;
+    credentials = other.credentials;
     affinity = other.affinity;
     executor = other.executor;
     compressorName = other.compressorName;
+    customOptions = other.customOptions;
+    waitForReady = other.waitForReady;
   }
 
   @Override
@@ -235,9 +381,12 @@ public final class CallOptions {
     MoreObjects.ToStringHelper toStringHelper = MoreObjects.toStringHelper(this);
     toStringHelper.add("deadline", deadline);
     toStringHelper.add("authority", authority);
+    toStringHelper.add("callCredentials", credentials);
     toStringHelper.add("affinity", affinity);
     toStringHelper.add("executor", executor != null ? executor.getClass() : null);
     toStringHelper.add("compressorName", compressorName);
+    toStringHelper.add("customOptions", Arrays.deepToString(customOptions));
+    toStringHelper.add("waitForReady", isWaitForReady());
 
     return toStringHelper.toString();
   }

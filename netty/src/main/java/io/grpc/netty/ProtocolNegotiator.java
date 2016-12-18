@@ -33,7 +33,6 @@ package io.grpc.netty;
 
 import io.grpc.Internal;
 import io.netty.channel.ChannelHandler;
-import io.netty.handler.codec.http2.Http2ConnectionHandler;
 import io.netty.util.AsciiString;
 
 /**
@@ -56,5 +55,5 @@ public interface ProtocolNegotiator {
    * Creates a new handler to control the protocol negotiation. Once the negotiation
    * has completed successfully, the provided handler is installed.
    */
-  Handler newHandler(Http2ConnectionHandler handler);
+  Handler newHandler(GrpcHttp2ConnectionHandler handler);
 }

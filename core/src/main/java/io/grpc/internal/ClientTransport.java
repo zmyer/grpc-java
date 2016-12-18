@@ -31,6 +31,7 @@
 
 package io.grpc.internal;
 
+import io.grpc.CallOptions;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 
@@ -49,17 +50,24 @@ public interface ClientTransport {
   /**
    * Creates a new stream for sending messages to a remote end-point.
    *
-   * <p>
-   * This method returns immediately and does not wait for any validation of the request. If
+   * <p>This method returns immediately and does not wait for any validation of the request. If
    * creation fails for any reason, {@link ClientStreamListener#closed} will be called to provide
    * the error information. Any sent messages for this stream will be buffered until creation has
    * completed (either successfully or unsuccessfully).
    *
+   * <p>This method is called under the {@link io.grpc.Context} of the {@link io.grpc.ClientCall}.
+   *
    * @param method the descriptor of the remote method to be called for this stream.
    * @param headers to send at the beginning of the call
+   * @param callOptions runtime options of the call
+   * @param statsTraceCtx carries stats and tracing information
    * @return the newly created stream.
    */
   // TODO(nmittler): Consider also throwing for stopping.
+  ClientStream newStream(MethodDescriptor<?, ?> method, Metadata headers, CallOptions callOptions,
+      StatsTraceContext statsTraceCtx);
+
+  // TODO(zdapeng): Remove two-argument version in favor of four-argument overload.
   ClientStream newStream(MethodDescriptor<?, ?> method, Metadata headers);
 
   /**

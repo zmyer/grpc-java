@@ -31,7 +31,7 @@
 
 package io.grpc.benchmarks;
 
-import static io.grpc.testing.TestUtils.pickUnusedPort;
+import static io.grpc.benchmarks.Utils.pickUnusedPort;
 
 import com.google.protobuf.ByteString;
 
@@ -50,6 +50,9 @@ import io.grpc.netty.NegotiationType;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.okhttp.OkHttpChannelBuilder;
+import io.netty.channel.Channel;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.ServerChannel;
 import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
 import io.netty.channel.local.LocalServerChannel;
@@ -71,7 +74,7 @@ import java.util.concurrent.TimeUnit;
 @State(Scope.Benchmark)
 public class TransportBenchmark {
   public enum Transport {
-    INPROCESS, NETTY, NETTY_LOCAL, OKHTTP
+    INPROCESS, NETTY, NETTY_LOCAL, NETTY_EPOLL, OKHTTP
   }
 
   @Param({"INPROCESS", "NETTY", "NETTY_LOCAL", "OKHTTP"})
@@ -82,6 +85,7 @@ public class TransportBenchmark {
   private ManagedChannel channel;
   private Server server;
   private BenchmarkServiceGrpc.BenchmarkServiceBlockingStub stub;
+  private volatile EventLoopGroup groupToShutdown;
 
   @Setup
   public void setUp() throws Exception {
@@ -114,6 +118,31 @@ public class TransportBenchmark {
             .negotiationType(NegotiationType.PLAINTEXT);
         break;
       }
+      case NETTY_EPOLL:
+      {
+        InetSocketAddress address = new InetSocketAddress("localhost", pickUnusedPort());
+
+        // Reflection used since they are only available on linux.
+        Class<?> groupClass = Class.forName("io.netty.channel.epoll.EpollEventLoopGroup");
+        EventLoopGroup group = (EventLoopGroup) groupClass.getConstructor().newInstance();
+
+        @SuppressWarnings("unchecked")
+        Class<? extends ServerChannel> serverChannelClass = (Class<? extends ServerChannel>)
+            Class.forName("io.netty.channel.epoll.EpollServerSocketChannel");
+        serverBuilder = NettyServerBuilder.forAddress(address)
+            .bossEventLoopGroup(group)
+            .workerEventLoopGroup(group)
+            .channelType(serverChannelClass);
+        @SuppressWarnings("unchecked")
+        Class<? extends Channel> channelClass = (Class<? extends Channel>)
+            Class.forName("io.netty.channel.epoll.EpollSocketChannel");
+        channelBuilder = NettyChannelBuilder.forAddress(address)
+            .eventLoopGroup(group)
+            .channelType(channelClass)
+            .negotiationType(NegotiationType.PLAINTEXT);
+        groupToShutdown = group;
+        break;
+      }
       case OKHTTP:
       {
         int port = pickUnusedPort();
@@ -134,7 +163,7 @@ public class TransportBenchmark {
     }
 
     server = serverBuilder
-        .addService(BenchmarkServiceGrpc.bindService(new AsyncServer.BenchmarkServiceImpl()))
+        .addService(new AsyncServer.BenchmarkServiceImpl())
         .build();
     server.start();
     channel = channelBuilder.build();
@@ -154,6 +183,13 @@ public class TransportBenchmark {
     }
     if (!server.isTerminated()) {
       throw new Exception("failed to shut down server");
+    }
+    if (groupToShutdown != null) {
+      groupToShutdown.shutdownGracefully(0, 1, TimeUnit.SECONDS);
+      groupToShutdown.awaitTermination(1, TimeUnit.SECONDS);
+      if (!groupToShutdown.isTerminated()) {
+        throw new Exception("failed to shut down event loop group.");
+      }
     }
   }
 

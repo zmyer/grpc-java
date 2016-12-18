@@ -46,16 +46,16 @@ import io.grpc.DecompressorRegistry;
 import io.grpc.ForwardingClientCall;
 import io.grpc.ForwardingClientCallListener;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
-import io.grpc.ServerBuilder;
 import io.grpc.ServerCall;
 import io.grpc.ServerCall.Listener;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
 import io.grpc.internal.GrpcUtil;
-import io.grpc.testing.TestUtils;
+import io.grpc.netty.NettyChannelBuilder;
+import io.grpc.netty.NettyServerBuilder;
+import io.grpc.testing.integration.Messages.CompressionType;
 import io.grpc.testing.integration.Messages.Payload;
 import io.grpc.testing.integration.Messages.PayloadType;
 import io.grpc.testing.integration.Messages.SimpleRequest;
@@ -80,35 +80,41 @@ import java.io.OutputStream;
 @RunWith(JUnit4.class)
 public class TransportCompressionTest extends AbstractInteropTest {
 
-  private static int serverPort = TestUtils.pickUnusedPort();
+  // Masquerade as identity.
+  private static final Fzip FZIPPER = new Fzip("gzip", new Codec.Gzip());
+  private volatile boolean expectFzip;
 
-  private static final DecompressorRegistry decompressors = DecompressorRegistry.newEmptyInstance();
+  private static final DecompressorRegistry decompressors = DecompressorRegistry.emptyInstance()
+      .with(Codec.Identity.NONE, false)
+      .with(FZIPPER, true);
   private static final CompressorRegistry compressors = CompressorRegistry.newEmptyInstance();
 
   @Before
   public void beforeTests() {
-    Fzip.INSTANCE.anyRead = false;
-    Fzip.INSTANCE.anyWritten = false;
+    FZIPPER.anyRead = false;
+    FZIPPER.anyWritten = false;
   }
 
   /** Start server. */
   @BeforeClass
   public static void startServer() {
-    decompressors.register(Fzip.INSTANCE, true);
-    compressors.register(Fzip.INSTANCE);
+    compressors.register(FZIPPER);
+    compressors.register(Codec.Identity.NONE);
     startStaticServer(
-        ServerBuilder.forPort(serverPort)
+        NettyServerBuilder.forPort(0)
+            .maxMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
             .compressorRegistry(compressors)
             .decompressorRegistry(decompressors),
         new ServerInterceptor() {
           @Override
-          public <ReqT, RespT> Listener<ReqT> interceptCall(MethodDescriptor<ReqT, RespT> method,
-              ServerCall<RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
-            Listener<ReqT> listener = next.startCall(method, call, headers);
+          public <ReqT, RespT> Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call,
+              Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+            Listener<ReqT> listener = next.startCall(call, headers);
             // TODO(carl-mastrangelo): check that encoding was set.
             call.setMessageCompression(true);
             return listener;
-          }});
+          }
+        });
   }
 
   /** Stop server. */
@@ -119,8 +125,10 @@ public class TransportCompressionTest extends AbstractInteropTest {
 
   @Test
   public void compresses() {
+    expectFzip = true;
     final SimpleRequest request = SimpleRequest.newBuilder()
         .setResponseSize(314159)
+        .setResponseCompression(CompressionType.GZIP)
         .setResponseType(PayloadType.COMPRESSABLE)
         .setPayload(Payload.newBuilder()
             .setBody(ByteString.copyFrom(new byte[271828])))
@@ -131,17 +139,20 @@ public class TransportCompressionTest extends AbstractInteropTest {
             .setBody(ByteString.copyFrom(new byte[314159])))
         .build();
 
+
     assertEquals(goldenResponse, blockingStub.unaryCall(request));
     // Assert that compression took place
-    assertTrue(Fzip.INSTANCE.anyRead);
-    assertTrue(Fzip.INSTANCE.anyWritten);
+    assertTrue(FZIPPER.anyRead);
+    assertTrue(FZIPPER.anyWritten);
   }
 
   @Override
   protected ManagedChannel createChannel() {
-    return ManagedChannelBuilder.forAddress("localhost", serverPort)
+    return NettyChannelBuilder.forAddress("localhost", getPort())
+        .maxInboundMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
         .decompressorRegistry(decompressors)
         .compressorRegistry(compressors)
+        .censusContextFactory(getClientCensusFactory())
         .intercept(new ClientInterceptor() {
           @Override
           public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
@@ -167,8 +178,10 @@ public class TransportCompressionTest extends AbstractInteropTest {
                   @Override
                   public void onHeaders(Metadata headers) {
                     super.onHeaders(headers);
-                    String encoding = headers.get(GrpcUtil.MESSAGE_ENCODING_KEY);
-                    assertEquals(encoding, Fzip.INSTANCE.getMessageEncoding());
+                    if (expectFzip) {
+                      String encoding = headers.get(GrpcUtil.MESSAGE_ENCODING_KEY);
+                      assertEquals(encoding, FZIPPER.getMessageEncoding());
+                    }
                   }
                 };
                 super.start(listener, headers);
@@ -181,20 +194,29 @@ public class TransportCompressionTest extends AbstractInteropTest {
         .build();
   }
 
-  static final class Fzip implements Codec {
-    static final Fzip INSTANCE = new Fzip();
-
+  /**
+   * Fzip is a custom compressor.
+   */
+  static class Fzip implements Codec {
     volatile boolean anyRead;
     volatile boolean anyWritten;
+    volatile Codec delegate;
+
+    private final String actualName;
+
+    public Fzip(String actualName, Codec delegate) {
+      this.actualName = actualName;
+      this.delegate = delegate;
+    }
 
     @Override
     public String getMessageEncoding() {
-      return "fzip";
+      return actualName;
     }
 
     @Override
     public OutputStream compress(OutputStream os) throws IOException {
-      return new FilterOutputStream(os) {
+      return new FilterOutputStream(delegate.compress(os)) {
         @Override
         public void write(int b) throws IOException {
           super.write(b);
@@ -205,7 +227,7 @@ public class TransportCompressionTest extends AbstractInteropTest {
 
     @Override
     public InputStream decompress(InputStream is) throws IOException {
-      return new FilterInputStream(is) {
+      return new FilterInputStream(delegate.decompress(is)) {
         @Override
         public int read() throws IOException {
           int val = super.read();

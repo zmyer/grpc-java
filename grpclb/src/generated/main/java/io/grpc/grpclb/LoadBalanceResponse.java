@@ -7,11 +7,11 @@ package io.grpc.grpclb;
  * Protobuf type {@code grpc.lb.v1.LoadBalanceResponse}
  */
 public  final class LoadBalanceResponse extends
-    com.google.protobuf.GeneratedMessage implements
+    com.google.protobuf.GeneratedMessageV3 implements
     // @@protoc_insertion_point(message_implements:grpc.lb.v1.LoadBalanceResponse)
     LoadBalanceResponseOrBuilder {
   // Use LoadBalanceResponse.newBuilder() to construct.
-  private LoadBalanceResponse(com.google.protobuf.GeneratedMessage.Builder<?> builder) {
+  private LoadBalanceResponse(com.google.protobuf.GeneratedMessageV3.Builder<?> builder) {
     super(builder);
   }
   private LoadBalanceResponse() {
@@ -24,7 +24,8 @@ public  final class LoadBalanceResponse extends
   }
   private LoadBalanceResponse(
       com.google.protobuf.CodedInputStream input,
-      com.google.protobuf.ExtensionRegistryLite extensionRegistry) {
+      com.google.protobuf.ExtensionRegistryLite extensionRegistry)
+      throws com.google.protobuf.InvalidProtocolBufferException {
     this();
     int mutable_bitField0_ = 0;
     try {
@@ -72,11 +73,10 @@ public  final class LoadBalanceResponse extends
         }
       }
     } catch (com.google.protobuf.InvalidProtocolBufferException e) {
-      throw new RuntimeException(e.setUnfinishedMessage(this));
+      throw e.setUnfinishedMessage(this);
     } catch (java.io.IOException e) {
-      throw new RuntimeException(
-          new com.google.protobuf.InvalidProtocolBufferException(
-              e.getMessage()).setUnfinishedMessage(this));
+      throw new com.google.protobuf.InvalidProtocolBufferException(
+          e).setUnfinishedMessage(this);
     } finally {
       makeExtensionsImmutable();
     }
@@ -86,7 +86,7 @@ public  final class LoadBalanceResponse extends
     return io.grpc.grpclb.LoadBalancerProto.internal_static_grpc_lb_v1_LoadBalanceResponse_descriptor;
   }
 
-  protected com.google.protobuf.GeneratedMessage.FieldAccessorTable
+  protected com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
       internalGetFieldAccessorTable() {
     return io.grpc.grpclb.LoadBalancerProto.internal_static_grpc_lb_v1_LoadBalanceResponse_fieldAccessorTable
         .ensureFieldAccessorsInitialized(
@@ -100,17 +100,24 @@ public  final class LoadBalanceResponse extends
     INITIAL_RESPONSE(1),
     SERVER_LIST(2),
     LOADBALANCERESPONSETYPE_NOT_SET(0);
-    private int value = 0;
+    private final int value;
     private LoadBalanceResponseTypeCase(int value) {
       this.value = value;
     }
+    /**
+     * @deprecated Use {@link #forNumber(int)} instead.
+     */
+    @java.lang.Deprecated
     public static LoadBalanceResponseTypeCase valueOf(int value) {
+      return forNumber(value);
+    }
+
+    public static LoadBalanceResponseTypeCase forNumber(int value) {
       switch (value) {
         case 1: return INITIAL_RESPONSE;
         case 2: return SERVER_LIST;
         case 0: return LOADBALANCERESPONSETYPE_NOT_SET;
-        default: throw new java.lang.IllegalArgumentException(
-          "Value is undefined for this oneof enum.");
+        default: return null;
       }
     }
     public int getNumber() {
@@ -120,17 +127,17 @@ public  final class LoadBalanceResponse extends
 
   public LoadBalanceResponseTypeCase
   getLoadBalanceResponseTypeCase() {
-    return LoadBalanceResponseTypeCase.valueOf(
+    return LoadBalanceResponseTypeCase.forNumber(
         loadBalanceResponseTypeCase_);
   }
 
   public static final int INITIAL_RESPONSE_FIELD_NUMBER = 1;
   /**
-   * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
-   *
    * <pre>
    * This message should be sent on the first response to the client.
    * </pre>
+   *
+   * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
    */
   public io.grpc.grpclb.InitialLoadBalanceResponse getInitialResponse() {
     if (loadBalanceResponseTypeCase_ == 1) {
@@ -139,11 +146,11 @@ public  final class LoadBalanceResponse extends
     return io.grpc.grpclb.InitialLoadBalanceResponse.getDefaultInstance();
   }
   /**
-   * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
-   *
    * <pre>
    * This message should be sent on the first response to the client.
    * </pre>
+   *
+   * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
    */
   public io.grpc.grpclb.InitialLoadBalanceResponseOrBuilder getInitialResponseOrBuilder() {
     if (loadBalanceResponseTypeCase_ == 1) {
@@ -154,12 +161,12 @@ public  final class LoadBalanceResponse extends
 
   public static final int SERVER_LIST_FIELD_NUMBER = 2;
   /**
-   * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
-   *
    * <pre>
    * Contains the list of servers selected by the load balancer. The client
    * should send requests to these servers in the specified order.
    * </pre>
+   *
+   * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
    */
   public io.grpc.grpclb.ServerList getServerList() {
     if (loadBalanceResponseTypeCase_ == 2) {
@@ -168,12 +175,12 @@ public  final class LoadBalanceResponse extends
     return io.grpc.grpclb.ServerList.getDefaultInstance();
   }
   /**
-   * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
-   *
    * <pre>
    * Contains the list of servers selected by the load balancer. The client
    * should send requests to these servers in the specified order.
    * </pre>
+   *
+   * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
    */
   public io.grpc.grpclb.ServerListOrBuilder getServerListOrBuilder() {
     if (loadBalanceResponseTypeCase_ == 2) {
@@ -220,6 +227,59 @@ public  final class LoadBalanceResponse extends
   }
 
   private static final long serialVersionUID = 0L;
+  @java.lang.Override
+  public boolean equals(final java.lang.Object obj) {
+    if (obj == this) {
+     return true;
+    }
+    if (!(obj instanceof io.grpc.grpclb.LoadBalanceResponse)) {
+      return super.equals(obj);
+    }
+    io.grpc.grpclb.LoadBalanceResponse other = (io.grpc.grpclb.LoadBalanceResponse) obj;
+
+    boolean result = true;
+    result = result && getLoadBalanceResponseTypeCase().equals(
+        other.getLoadBalanceResponseTypeCase());
+    if (!result) return false;
+    switch (loadBalanceResponseTypeCase_) {
+      case 1:
+        result = result && getInitialResponse()
+            .equals(other.getInitialResponse());
+        break;
+      case 2:
+        result = result && getServerList()
+            .equals(other.getServerList());
+        break;
+      case 0:
+      default:
+    }
+    return result;
+  }
+
+  @java.lang.Override
+  public int hashCode() {
+    if (memoizedHashCode != 0) {
+      return memoizedHashCode;
+    }
+    int hash = 41;
+    hash = (19 * hash) + getDescriptorForType().hashCode();
+    switch (loadBalanceResponseTypeCase_) {
+      case 1:
+        hash = (37 * hash) + INITIAL_RESPONSE_FIELD_NUMBER;
+        hash = (53 * hash) + getInitialResponse().hashCode();
+        break;
+      case 2:
+        hash = (37 * hash) + SERVER_LIST_FIELD_NUMBER;
+        hash = (53 * hash) + getServerList().hashCode();
+        break;
+      case 0:
+      default:
+    }
+    hash = (29 * hash) + unknownFields.hashCode();
+    memoizedHashCode = hash;
+    return hash;
+  }
+
   public static io.grpc.grpclb.LoadBalanceResponse parseFrom(
       com.google.protobuf.ByteString data)
       throws com.google.protobuf.InvalidProtocolBufferException {
@@ -243,34 +303,40 @@ public  final class LoadBalanceResponse extends
   }
   public static io.grpc.grpclb.LoadBalanceResponse parseFrom(java.io.InputStream input)
       throws java.io.IOException {
-    return PARSER.parseFrom(input);
+    return com.google.protobuf.GeneratedMessageV3
+        .parseWithIOException(PARSER, input);
   }
   public static io.grpc.grpclb.LoadBalanceResponse parseFrom(
       java.io.InputStream input,
       com.google.protobuf.ExtensionRegistryLite extensionRegistry)
       throws java.io.IOException {
-    return PARSER.parseFrom(input, extensionRegistry);
+    return com.google.protobuf.GeneratedMessageV3
+        .parseWithIOException(PARSER, input, extensionRegistry);
   }
   public static io.grpc.grpclb.LoadBalanceResponse parseDelimitedFrom(java.io.InputStream input)
       throws java.io.IOException {
-    return PARSER.parseDelimitedFrom(input);
+    return com.google.protobuf.GeneratedMessageV3
+        .parseDelimitedWithIOException(PARSER, input);
   }
   public static io.grpc.grpclb.LoadBalanceResponse parseDelimitedFrom(
       java.io.InputStream input,
       com.google.protobuf.ExtensionRegistryLite extensionRegistry)
       throws java.io.IOException {
-    return PARSER.parseDelimitedFrom(input, extensionRegistry);
+    return com.google.protobuf.GeneratedMessageV3
+        .parseDelimitedWithIOException(PARSER, input, extensionRegistry);
   }
   public static io.grpc.grpclb.LoadBalanceResponse parseFrom(
       com.google.protobuf.CodedInputStream input)
       throws java.io.IOException {
-    return PARSER.parseFrom(input);
+    return com.google.protobuf.GeneratedMessageV3
+        .parseWithIOException(PARSER, input);
   }
   public static io.grpc.grpclb.LoadBalanceResponse parseFrom(
       com.google.protobuf.CodedInputStream input,
       com.google.protobuf.ExtensionRegistryLite extensionRegistry)
       throws java.io.IOException {
-    return PARSER.parseFrom(input, extensionRegistry);
+    return com.google.protobuf.GeneratedMessageV3
+        .parseWithIOException(PARSER, input, extensionRegistry);
   }
 
   public Builder newBuilderForType() { return newBuilder(); }
@@ -287,7 +353,7 @@ public  final class LoadBalanceResponse extends
 
   @java.lang.Override
   protected Builder newBuilderForType(
-      com.google.protobuf.GeneratedMessage.BuilderParent parent) {
+      com.google.protobuf.GeneratedMessageV3.BuilderParent parent) {
     Builder builder = new Builder(parent);
     return builder;
   }
@@ -295,7 +361,7 @@ public  final class LoadBalanceResponse extends
    * Protobuf type {@code grpc.lb.v1.LoadBalanceResponse}
    */
   public static final class Builder extends
-      com.google.protobuf.GeneratedMessage.Builder<Builder> implements
+      com.google.protobuf.GeneratedMessageV3.Builder<Builder> implements
       // @@protoc_insertion_point(builder_implements:grpc.lb.v1.LoadBalanceResponse)
       io.grpc.grpclb.LoadBalanceResponseOrBuilder {
     public static final com.google.protobuf.Descriptors.Descriptor
@@ -303,7 +369,7 @@ public  final class LoadBalanceResponse extends
       return io.grpc.grpclb.LoadBalancerProto.internal_static_grpc_lb_v1_LoadBalanceResponse_descriptor;
     }
 
-    protected com.google.protobuf.GeneratedMessage.FieldAccessorTable
+    protected com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
         internalGetFieldAccessorTable() {
       return io.grpc.grpclb.LoadBalancerProto.internal_static_grpc_lb_v1_LoadBalanceResponse_fieldAccessorTable
           .ensureFieldAccessorsInitialized(
@@ -316,12 +382,13 @@ public  final class LoadBalanceResponse extends
     }
 
     private Builder(
-        com.google.protobuf.GeneratedMessage.BuilderParent parent) {
+        com.google.protobuf.GeneratedMessageV3.BuilderParent parent) {
       super(parent);
       maybeForceBuilderInitialization();
     }
     private void maybeForceBuilderInitialization() {
-      if (com.google.protobuf.GeneratedMessage.alwaysUseFieldBuilders) {
+      if (com.google.protobuf.GeneratedMessageV3
+              .alwaysUseFieldBuilders) {
       }
     }
     public Builder clear() {
@@ -369,6 +436,32 @@ public  final class LoadBalanceResponse extends
       return result;
     }
 
+    public Builder clone() {
+      return (Builder) super.clone();
+    }
+    public Builder setField(
+        com.google.protobuf.Descriptors.FieldDescriptor field,
+        Object value) {
+      return (Builder) super.setField(field, value);
+    }
+    public Builder clearField(
+        com.google.protobuf.Descriptors.FieldDescriptor field) {
+      return (Builder) super.clearField(field);
+    }
+    public Builder clearOneof(
+        com.google.protobuf.Descriptors.OneofDescriptor oneof) {
+      return (Builder) super.clearOneof(oneof);
+    }
+    public Builder setRepeatedField(
+        com.google.protobuf.Descriptors.FieldDescriptor field,
+        int index, Object value) {
+      return (Builder) super.setRepeatedField(field, index, value);
+    }
+    public Builder addRepeatedField(
+        com.google.protobuf.Descriptors.FieldDescriptor field,
+        Object value) {
+      return (Builder) super.addRepeatedField(field, value);
+    }
     public Builder mergeFrom(com.google.protobuf.Message other) {
       if (other instanceof io.grpc.grpclb.LoadBalanceResponse) {
         return mergeFrom((io.grpc.grpclb.LoadBalanceResponse)other);
@@ -410,7 +503,7 @@ public  final class LoadBalanceResponse extends
         parsedMessage = PARSER.parsePartialFrom(input, extensionRegistry);
       } catch (com.google.protobuf.InvalidProtocolBufferException e) {
         parsedMessage = (io.grpc.grpclb.LoadBalanceResponse) e.getUnfinishedMessage();
-        throw e;
+        throw e.unwrapIOException();
       } finally {
         if (parsedMessage != null) {
           mergeFrom(parsedMessage);
@@ -422,7 +515,7 @@ public  final class LoadBalanceResponse extends
     private java.lang.Object loadBalanceResponseType_;
     public LoadBalanceResponseTypeCase
         getLoadBalanceResponseTypeCase() {
-      return LoadBalanceResponseTypeCase.valueOf(
+      return LoadBalanceResponseTypeCase.forNumber(
           loadBalanceResponseTypeCase_);
     }
 
@@ -434,14 +527,14 @@ public  final class LoadBalanceResponse extends
     }
 
 
-    private com.google.protobuf.SingleFieldBuilder<
+    private com.google.protobuf.SingleFieldBuilderV3<
         io.grpc.grpclb.InitialLoadBalanceResponse, io.grpc.grpclb.InitialLoadBalanceResponse.Builder, io.grpc.grpclb.InitialLoadBalanceResponseOrBuilder> initialResponseBuilder_;
     /**
-     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
-     *
      * <pre>
      * This message should be sent on the first response to the client.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
      */
     public io.grpc.grpclb.InitialLoadBalanceResponse getInitialResponse() {
       if (initialResponseBuilder_ == null) {
@@ -457,11 +550,11 @@ public  final class LoadBalanceResponse extends
       }
     }
     /**
-     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
-     *
      * <pre>
      * This message should be sent on the first response to the client.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
      */
     public Builder setInitialResponse(io.grpc.grpclb.InitialLoadBalanceResponse value) {
       if (initialResponseBuilder_ == null) {
@@ -477,11 +570,11 @@ public  final class LoadBalanceResponse extends
       return this;
     }
     /**
-     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
-     *
      * <pre>
      * This message should be sent on the first response to the client.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
      */
     public Builder setInitialResponse(
         io.grpc.grpclb.InitialLoadBalanceResponse.Builder builderForValue) {
@@ -495,11 +588,11 @@ public  final class LoadBalanceResponse extends
       return this;
     }
     /**
-     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
-     *
      * <pre>
      * This message should be sent on the first response to the client.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
      */
     public Builder mergeInitialResponse(io.grpc.grpclb.InitialLoadBalanceResponse value) {
       if (initialResponseBuilder_ == null) {
@@ -521,11 +614,11 @@ public  final class LoadBalanceResponse extends
       return this;
     }
     /**
-     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
-     *
      * <pre>
      * This message should be sent on the first response to the client.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
      */
     public Builder clearInitialResponse() {
       if (initialResponseBuilder_ == null) {
@@ -544,21 +637,21 @@ public  final class LoadBalanceResponse extends
       return this;
     }
     /**
-     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
-     *
      * <pre>
      * This message should be sent on the first response to the client.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
      */
     public io.grpc.grpclb.InitialLoadBalanceResponse.Builder getInitialResponseBuilder() {
       return getInitialResponseFieldBuilder().getBuilder();
     }
     /**
-     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
-     *
      * <pre>
      * This message should be sent on the first response to the client.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
      */
     public io.grpc.grpclb.InitialLoadBalanceResponseOrBuilder getInitialResponseOrBuilder() {
       if ((loadBalanceResponseTypeCase_ == 1) && (initialResponseBuilder_ != null)) {
@@ -571,20 +664,20 @@ public  final class LoadBalanceResponse extends
       }
     }
     /**
-     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
-     *
      * <pre>
      * This message should be sent on the first response to the client.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.InitialLoadBalanceResponse initial_response = 1;</code>
      */
-    private com.google.protobuf.SingleFieldBuilder<
+    private com.google.protobuf.SingleFieldBuilderV3<
         io.grpc.grpclb.InitialLoadBalanceResponse, io.grpc.grpclb.InitialLoadBalanceResponse.Builder, io.grpc.grpclb.InitialLoadBalanceResponseOrBuilder> 
         getInitialResponseFieldBuilder() {
       if (initialResponseBuilder_ == null) {
         if (!(loadBalanceResponseTypeCase_ == 1)) {
           loadBalanceResponseType_ = io.grpc.grpclb.InitialLoadBalanceResponse.getDefaultInstance();
         }
-        initialResponseBuilder_ = new com.google.protobuf.SingleFieldBuilder<
+        initialResponseBuilder_ = new com.google.protobuf.SingleFieldBuilderV3<
             io.grpc.grpclb.InitialLoadBalanceResponse, io.grpc.grpclb.InitialLoadBalanceResponse.Builder, io.grpc.grpclb.InitialLoadBalanceResponseOrBuilder>(
                 (io.grpc.grpclb.InitialLoadBalanceResponse) loadBalanceResponseType_,
                 getParentForChildren(),
@@ -596,15 +689,15 @@ public  final class LoadBalanceResponse extends
       return initialResponseBuilder_;
     }
 
-    private com.google.protobuf.SingleFieldBuilder<
+    private com.google.protobuf.SingleFieldBuilderV3<
         io.grpc.grpclb.ServerList, io.grpc.grpclb.ServerList.Builder, io.grpc.grpclb.ServerListOrBuilder> serverListBuilder_;
     /**
-     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
-     *
      * <pre>
      * Contains the list of servers selected by the load balancer. The client
      * should send requests to these servers in the specified order.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
      */
     public io.grpc.grpclb.ServerList getServerList() {
       if (serverListBuilder_ == null) {
@@ -620,12 +713,12 @@ public  final class LoadBalanceResponse extends
       }
     }
     /**
-     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
-     *
      * <pre>
      * Contains the list of servers selected by the load balancer. The client
      * should send requests to these servers in the specified order.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
      */
     public Builder setServerList(io.grpc.grpclb.ServerList value) {
       if (serverListBuilder_ == null) {
@@ -641,12 +734,12 @@ public  final class LoadBalanceResponse extends
       return this;
     }
     /**
-     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
-     *
      * <pre>
      * Contains the list of servers selected by the load balancer. The client
      * should send requests to these servers in the specified order.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
      */
     public Builder setServerList(
         io.grpc.grpclb.ServerList.Builder builderForValue) {
@@ -660,12 +753,12 @@ public  final class LoadBalanceResponse extends
       return this;
     }
     /**
-     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
-     *
      * <pre>
      * Contains the list of servers selected by the load balancer. The client
      * should send requests to these servers in the specified order.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
      */
     public Builder mergeServerList(io.grpc.grpclb.ServerList value) {
       if (serverListBuilder_ == null) {
@@ -687,12 +780,12 @@ public  final class LoadBalanceResponse extends
       return this;
     }
     /**
-     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
-     *
      * <pre>
      * Contains the list of servers selected by the load balancer. The client
      * should send requests to these servers in the specified order.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
      */
     public Builder clearServerList() {
       if (serverListBuilder_ == null) {
@@ -711,23 +804,23 @@ public  final class LoadBalanceResponse extends
       return this;
     }
     /**
-     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
-     *
      * <pre>
      * Contains the list of servers selected by the load balancer. The client
      * should send requests to these servers in the specified order.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
      */
     public io.grpc.grpclb.ServerList.Builder getServerListBuilder() {
       return getServerListFieldBuilder().getBuilder();
     }
     /**
-     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
-     *
      * <pre>
      * Contains the list of servers selected by the load balancer. The client
      * should send requests to these servers in the specified order.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
      */
     public io.grpc.grpclb.ServerListOrBuilder getServerListOrBuilder() {
       if ((loadBalanceResponseTypeCase_ == 2) && (serverListBuilder_ != null)) {
@@ -740,21 +833,21 @@ public  final class LoadBalanceResponse extends
       }
     }
     /**
-     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
-     *
      * <pre>
      * Contains the list of servers selected by the load balancer. The client
      * should send requests to these servers in the specified order.
      * </pre>
+     *
+     * <code>optional .grpc.lb.v1.ServerList server_list = 2;</code>
      */
-    private com.google.protobuf.SingleFieldBuilder<
+    private com.google.protobuf.SingleFieldBuilderV3<
         io.grpc.grpclb.ServerList, io.grpc.grpclb.ServerList.Builder, io.grpc.grpclb.ServerListOrBuilder> 
         getServerListFieldBuilder() {
       if (serverListBuilder_ == null) {
         if (!(loadBalanceResponseTypeCase_ == 2)) {
           loadBalanceResponseType_ = io.grpc.grpclb.ServerList.getDefaultInstance();
         }
-        serverListBuilder_ = new com.google.protobuf.SingleFieldBuilder<
+        serverListBuilder_ = new com.google.protobuf.SingleFieldBuilderV3<
             io.grpc.grpclb.ServerList, io.grpc.grpclb.ServerList.Builder, io.grpc.grpclb.ServerListOrBuilder>(
                 (io.grpc.grpclb.ServerList) loadBalanceResponseType_,
                 getParentForChildren(),
@@ -795,16 +888,7 @@ public  final class LoadBalanceResponse extends
         com.google.protobuf.CodedInputStream input,
         com.google.protobuf.ExtensionRegistryLite extensionRegistry)
         throws com.google.protobuf.InvalidProtocolBufferException {
-      try {
         return new LoadBalanceResponse(input, extensionRegistry);
-      } catch (RuntimeException e) {
-        if (e.getCause() instanceof
-            com.google.protobuf.InvalidProtocolBufferException) {
-          throw (com.google.protobuf.InvalidProtocolBufferException)
-              e.getCause();
-        }
-        throw e;
-      }
     }
   };
 

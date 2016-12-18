@@ -66,19 +66,27 @@ would be used to create all `v0.7` tags (e.g. `v0.7.0`, `v0.7.1`).
 
    ```bash
    $ MAJOR=0 MINOR=7 PATCH=0 # Set appropriately for new release
+   $ VERSION_FILES=(
+     build.gradle
+     android-interop-testing/app/build.gradle
+     examples/build.gradle
+     examples/pom.xml
+     examples/android/helloworld/app/build.gradle
+     examples/android/routeguide/app/build.gradle
+     examples/thrift/build.gradle
+     )
    $ git checkout -b v$MAJOR.$MINOR.x master
    $ git push upstream v$MAJOR.$MINOR.x
    ```
-2. For `master`, change `build.gradle` and
-   `android-interop-testing/app/build.gradle` to the next minor snapshot (e.g.
+2. For `master`, change root build files to the next minor snapshot (e.g.
    ``0.8.0-SNAPSHOT``).
 
    ```bash
    $ git checkout -b bump-version master
    # Change version to next minor (and keep -SNAPSHOT)
    $ sed -i 's/[0-9]\+\.[0-9]\+\.[0-9]\+\(.*CURRENT_GRPC_VERSION\)/'$MAJOR.$((MINOR+1)).0'\1/' \
-     build.gradle android-interop-testing/app/build.gradle \
-     examples/android/app/build.gradle
+     "${VERSION_FILES[@]}"
+   $ ./gradlew build
    $ git commit -a -m "Start $MAJOR.$((MINOR+1)).0 development cycle"
    ```
 3. Go through PR review and push the master branch to GitHub:
@@ -88,28 +96,37 @@ would be used to create all `v0.7` tags (e.g. `v0.7.0`, `v0.7.1`).
    $ git merge --ff-only bump-version
    $ git push upstream master
    ```
-4. For vMajor.Minor.x branch, change `build.gradle` and
-   `android-interop-testing/app/build.gradle` to remove "-SNAPSHOT" for the next
-   release version (e.g. `0.7.0`). Commit the result and make a tag:
+4. For vMajor.Minor.x branch, change `README.md` to refer to the next release
+   version. _Also_ update the version numbers for protoc if the protobuf library
+   version was updated since the last release.
 
    ```bash
    $ git checkout -b release v$MAJOR.$MINOR.x
+   # Bump documented versions. Don't forget protobuf version
+   $ ${EDITOR:-nano -w} README.md
+   $ git commit -a -m "Update README to reference $MAJOR.$MINOR.$PATCH"
+   ```
+5. Change root build files to remove "-SNAPSHOT" for the next release version
+   (e.g. `0.7.0`). Commit the result and make a tag:
+
+   ```bash
    # Change version to remove -SNAPSHOT
-   $ sed -i 's/-SNAPSHOT\(.*CURRENT_GRPC_VERSION\)/\1/' \
-     build.gradle android-interop-testing/app/build.gradle
+   $ sed -i 's/-SNAPSHOT\(.*CURRENT_GRPC_VERSION\)/\1/' "${VERSION_FILES[@]}"
+   $ ./gradlew build
    $ git commit -a -m "Bump version to $MAJOR.$MINOR.$PATCH"
    $ git tag -a v$MAJOR.$MINOR.$PATCH -m "Version $MAJOR.$MINOR.$PATCH"
    ```
-5. Change `build.gradle` and `android-interop-testing/app/build.gradle` to the
-   next snapshot version (e.g. `0.7.1-SNAPSHOT`). Commit the result:
+6. Change root build files to the next snapshot version (e.g. `0.7.1-SNAPSHOT`).
+   Commit the result:
 
    ```bash
    # Change version to next patch and add -SNAPSHOT
    $ sed -i 's/[0-9]\+\.[0-9]\+\.[0-9]\+\(.*CURRENT_GRPC_VERSION\)/'$MAJOR.$MINOR.$((PATCH+1))-SNAPSHOT'\1/' \
-     build.gradle android-interop-testing/app/build.gradle
+     "${VERSION_FILES[@]}"
+   $ ./gradlew build
    $ git commit -a -m "Bump version to $MAJOR.$MINOR.$((PATCH+1))-SNAPSHOT"
    ```
-6. Go through PR review and push the release tag and updated release branch to
+7. Go through PR review and push the release tag and updated release branch to
    GitHub:
 
    ```bash
@@ -261,9 +278,10 @@ the grpc-java source directory._**
 
 As stated above, this only needs to be done once for one of the selected OS/architectures.
 The following command will build the whole project and upload it to Maven
-Central.
+Central. Parallel building [is not safe during
+uploadArchives](https://issues.gradle.org/browse/GRADLE-3420).
 ```bash
-grpc-java$ ./gradlew clean build && ./gradlew uploadArchives
+grpc-java$ ./gradlew clean build && ./gradlew -Dorg.gradle.parallel=false uploadArchives
 ```
 
 If the version has the `-SNAPSHOT` suffix, the artifacts will automatically
@@ -281,7 +299,8 @@ commands on that OS and specify the architecture by the flag `-PtargetArch=<arch
 If you are doing a snapshot deployment:
 
 ```bash
-grpc-java$ ./gradlew clean grpc-compiler:build grpc-compiler:uploadArchives -PtargetArch=<arch>
+grpc-java$ ./gradlew clean grpc-compiler:build grpc-compiler:uploadArchives \
+    -PtargetArch=<arch> -Dorg.gradle.parallel=false
 ```
 
 When deploying a Release, the first deployment will create
@@ -292,7 +311,7 @@ ensure that the artifacts are pushed to the same staging repository.
 
 ```bash
 grpc-java$ ./gradlew clean grpc-compiler:build grpc-compiler:uploadArchives -PtargetArch=<arch> \
-    -PrepositoryId=<repository-id>
+    -PrepositoryId=<repository-id> -Dorg.gradle.parallel=false
 ```
 
 Releasing on Maven Central
@@ -305,10 +324,20 @@ Maven Central (the staging repository will be destroyed in the process). You can
 see the complete process for releasing to Maven Central on the [OSSRH site]
 (http://central.sonatype.org/pages/releasing-the-deployment.html).
 
+Update README.md
+----------------
+After waiting ~1 day and verifying that the release appears on [Maven Central]
+(http://mvnrepository.com/), cherry-pick the commit that updated the README into
+the master branch and go through review process.
+
+```
+$ git checkout -b bump-readme master
+$ git cherry-pick v$MAJOR.$MINOR.$PATCH^
+```
+
 Notify the Community
 --------------------
-After waiting ~1 day and verifying that the release appears on [Maven Central]
-(http://mvnrepository.com/), the last step is to document and publicize the release.
+Finally, document and publicize the release.
 
 1. Add [Release Notes](https://github.com/grpc/grpc-java/releases) for the new tag.
    The description should include any major fixes or features since the last release.
@@ -316,14 +345,6 @@ After waiting ~1 day and verifying that the release appears on [Maven Central]
 2. Post a release announcement to [grpc-io](https://groups.google.com/forum/#!forum/grpc-io)
    (`grpc-io@googlegroups.com`). The title should be something that clearly identifies
    the release (e.g.`GRPC-Java <tag> Released`).
-
-Update README.md
-----------------
-
-Update the version numbers in README.md to the new grpc-java version. _Also_
-update the version numbers for protoc if the protobuf library version was
-updated since last release. Make a new commit with description similar to
-"Update README to reference \<VERSION\>" and have it reviewed before submitting.
 
 Update Hosted Javadoc
 ---------------------

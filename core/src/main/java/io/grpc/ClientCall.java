@@ -31,8 +31,12 @@
 
 package io.grpc;
 
+import com.google.errorprone.annotations.DoNotMock;
+
+import javax.annotation.Nullable;
+
 /**
- * An instance of a call to to a remote method. A call will send zero or more
+ * An instance of a call to a remote method. A call will send zero or more
  * request messages to the server and receive zero or more response messages back.
  *
  * <p>Instances are created
@@ -42,9 +46,9 @@ package io.grpc;
  * reasons for doing so would be the need to interact with flow-control or when acting as a generic
  * proxy for arbitrary operations.
  *
- * <p>{@link #start start()} must be called prior to calling any other methods. {@link #cancel} must
- * not be followed by any other methods, but can be called more than once, while only the first one
- * has effect.
+ * <p>{@link #start} must be called prior to calling any other methods, with the exception of
+ * {@link #cancel}. Whereas {@link #cancel} must not be followed by any other methods,
+ * but can be called more than once, while only the first one has effect.
  *
  * <p>No generic method for determining message receipt or providing acknowledgement is provided.
  * Applications are expected to utilize normal payload messages for such signals, as a response
@@ -61,9 +65,10 @@ package io.grpc;
  * {@link Status#CANCELLED CANCELLED}. Otherwise, {@link Listener#onClose Listener.onClose()} is
  * called with whatever status the RPC was finished. We ensure that at most one is called.
  *
- * <p>Example: A simple Unary (1 request, 1 response) RPC would look like this:
+ * <h3>Usage examples</h3>
+ * <h4>Simple Unary (1 request, 1 response) RPC</h4>
  * <pre>
- *   call = channel.newCall(method, callOptions);
+ *   call = channel.newCall(unaryMethod, callOptions);
  *   call.start(listener, headers);
  *   call.sendMessage(message);
  *   call.halfClose();
@@ -71,9 +76,44 @@ package io.grpc;
  *   // wait for listener.onMessage()
  * </pre>
  *
+ * <h4>Flow-control in Streaming RPC</h4>
+ *
+ * <p>The following snippet demonstrates a bi-directional streaming case, where the client sends
+ * requests produced by a fictional <code>makeNextRequest()</code> in a flow-control-compliant
+ * manner, and notifies gRPC library to receive additional response after one is consumed by
+ * a fictional <code>processResponse()</code>.
+ *
+ * <p><pre>
+ *   call = channel.newCall(bidiStreamingMethod, callOptions);
+ *   listener = new ClientCall.Listener&lt;FooResponse&gt;() {
+ *     &#64;Override
+ *     public void onMessage(FooResponse response) {
+ *       processResponse(response);
+ *       // Notify gRPC to receive one additional response.
+ *       call.request(1);
+ *     }
+ *
+ *     &#64;Override
+ *     public void onReady() {
+ *       while (call.isReady()) {
+ *         FooRequest nextRequest = makeNextRequest();
+ *         if (nextRequest == null) {  // No more requests to send
+ *           call.halfClose();
+ *           return;
+ *         }
+ *         call.sendMessage(nextRequest);
+ *       }
+ *     }
+ *   }
+ *   call.start(listener, headers);
+ *   // Notify gRPC to receive one response. Without this line, onMessage() would never be called.
+ *   call.request(1);
+ * </pre>
+ *
  * @param <ReqT> type of message sent one or more times to the server.
  * @param <RespT> type of message received one or more times from the server.
  */
+@DoNotMock("Use InProcessTransport and make a fake server instead")
 public abstract class ClientCall<ReqT, RespT> {
   /**
    * Callbacks for receiving metadata, response messages and completion status from the server.
@@ -124,8 +164,9 @@ public abstract class ClientCall<ReqT, RespT> {
   /**
    * Start a call, using {@code responseListener} for processing response messages.
    *
-   * <p>It must be called prior to any other method on this class. Since {@link Metadata} is not
-   * thread-safe, the caller must not access {@code headers} after this point.
+   * <p>It must be called prior to any other method on this class, except for {@link #cancel} which
+   * may be called at any time. Since {@link Metadata} is not thread-safe, the caller must not
+   * access {@code headers} after this point.
    *
    * @param responseListener receives response messages
    * @param headers which can contain extra call metadata, e.g. authentication credentials.
@@ -162,10 +203,16 @@ public abstract class ClientCall<ReqT, RespT> {
    * call. Cancellation is permitted if previously {@link #halfClose}d. Cancelling an already {@code
    * cancel()}ed {@code ClientCall} has no effect.
    *
-   *
    * <p>No other methods on this class can be called after this method has been called.
+   *
+   * <p>It is recommended that at least one of the arguments to be non-{@code null}, to provide
+   * useful debug information. Both argument being null may log warnings and result in suboptimal
+   * performance. Also note that the provided information will not be sent to the server.
+   *
+   * @param message if not {@code null}, will appear as the description of the CANCELLED status
+   * @param cause if not {@code null}, will appear as the cause of the CANCELLED status
    */
-  public abstract void cancel();
+  public abstract void cancel(@Nullable String message, @Nullable Throwable cause);
 
   /**
    * Close the call for request message sending. Incoming response messages are unaffected.  This
@@ -198,9 +245,10 @@ public abstract class ClientCall<ReqT, RespT> {
 
   /**
    * Enables per-message compression, if an encoding type has been negotiated.  If no message
-   * encoding has been negotiated, this is a no-op.
+   * encoding has been negotiated, this is a no-op. By default per-message compression is enabled,
+   * but may not have any effect if compression is not enabled on the call.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1703")
   public void setMessageCompression(boolean enabled) {
     // noop
   }

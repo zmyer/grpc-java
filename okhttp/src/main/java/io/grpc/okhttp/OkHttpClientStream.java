@@ -35,11 +35,12 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
 import io.grpc.Metadata;
-import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
 import io.grpc.internal.ClientStreamListener;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.Http2ClientStream;
+import io.grpc.internal.StatsTraceContext;
 import io.grpc.internal.WritableBuffer;
 import io.grpc.okhttp.internal.framed.ErrorCode;
 import io.grpc.okhttp.internal.framed.Header;
@@ -50,7 +51,6 @@ import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Queue;
 
-import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 
 /**
@@ -73,14 +73,15 @@ class OkHttpClientStream extends Http2ClientStream {
   private final OutboundFlowController outboundFlow;
   private final OkHttpClientTransport transport;
   private final Object lock;
+  private final String userAgent;
   private String authority;
   private Object outboundFlowState;
-  private volatile Integer id;
+  private volatile int id = ABSENT_ID;
   @GuardedBy("lock")
   private List<Header> requestHeaders;
   /**
    * Null iff {@link #requestHeaders} is null.  Non-null iff neither {@link #sendCancel} nor
-   * {@link #start(Integer)} have been called.
+   * {@link #start(int)} have been called.
    */
   @GuardedBy("lock")
   private Queue<PendingData> pendingData = new ArrayDeque<PendingData>();
@@ -95,8 +96,10 @@ class OkHttpClientStream extends Http2ClientStream {
       OutboundFlowController outboundFlow,
       Object lock,
       int maxMessageSize,
-      String authority) {
-    super(new OkHttpWritableBufferAllocator(), maxMessageSize);
+      String authority,
+      String userAgent,
+      StatsTraceContext statsTraceCtx) {
+    super(new OkHttpWritableBufferAllocator(), maxMessageSize, statsTraceCtx);
     this.method = method;
     this.headers = headers;
     this.frameWriter = frameWriter;
@@ -104,6 +107,7 @@ class OkHttpClientStream extends Http2ClientStream {
     this.outboundFlow = outboundFlow;
     this.lock = lock;
     this.authority = authority;
+    this.userAgent = userAgent;
   }
 
   /**
@@ -121,8 +125,7 @@ class OkHttpClientStream extends Http2ClientStream {
   }
 
   @Override
-  @Nullable
-  public Integer id() {
+  public int id() {
     return id;
   }
 
@@ -136,7 +139,9 @@ class OkHttpClientStream extends Http2ClientStream {
   public void start(ClientStreamListener listener) {
     super.start(listener);
     String defaultPath = "/" + method.getFullMethodName();
-    List<Header> requestHeaders = Headers.createRequestHeaders(headers, defaultPath, authority);
+    headers.discardAll(GrpcUtil.USER_AGENT_KEY);
+    List<Header> requestHeaders =
+        Headers.createRequestHeaders(headers, defaultPath, authority, userAgent);
     headers = null;
     synchronized (lock) {
       this.requestHeaders = requestHeaders;
@@ -145,9 +150,8 @@ class OkHttpClientStream extends Http2ClientStream {
   }
 
   @GuardedBy("lock")
-  public void start(Integer id) {
-    checkNotNull(id, "id");
-    checkState(this.id == null, "the stream has been started with id %s", this.id);
+  public void start(int id) {
+    checkState(this.id == ABSENT_ID, "the stream has been started with id %s", this.id);
     this.id = id;
 
     if (pendingData != null) {
@@ -233,7 +237,7 @@ class OkHttpClientStream extends Http2ClientStream {
         // Stream is pending start, queue the data.
         pendingData.add(new PendingData(buffer, endOfStream, flush));
       } else {
-        checkState(id() != null, "streamId should be set");
+        checkState(id() != ABSENT_ID, "streamId should be set");
         // If buffer > frameWriter.maxDataLength() the flow-controller will ensure that it is
         // properly chunked.
         outboundFlow.data(endOfStream, id(), buffer, flush);

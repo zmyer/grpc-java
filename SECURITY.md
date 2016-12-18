@@ -1,6 +1,6 @@
 # Authentication
 
-As outlined in <a href="https://github.com/grpc/grpc/blob/master/doc/grpc-auth-support.md">gRPC Authentication Support</a>, gRPC supports a number of different mechanisms for asserting identity between an client and server. This document provides code samples demonstrating how to provide SSL/TLS encryption support and identity assertions in Java, as well as passing OAuth2 tokens to services that support it.
+gRPC supports a number of different mechanisms for asserting identity between an client and server. This document provides code samples demonstrating how to provide SSL/TLS encryption support and identity assertions in Java, as well as passing OAuth2 tokens to services that support it.
 
 # Transport Security (TLS)
 
@@ -32,7 +32,9 @@ Support for OpenSSL is only provided for the Netty transport via [netty-tcnative
 
 As of version `1.1.33.Fork14`, netty-tcnative provides two options for usage: statically or dynamically linked. For simplification of initial setup,
 we recommend that users first look at `netty-tcnative-boringssl-static`, which is statically linked against BoringSSL and Apache APR. Using this artifact requires no extra installation and guarantees that ALPN and the ciphers required for
-HTTP/2 are available.
+HTTP/2 are available. In addition, starting with `1.1.33.Fork16` binaries for
+all supported platforms can be included at compile time and the correct binary
+for the platform can be selected at runtime.
 
 Production systems, however, may require an easy upgrade path for OpenSSL security patches. In this case, relying on the statically linked artifact also implies waiting for the Netty team
 to release the new artifact to Maven Central, which can take some time. A better solution in this case is to use the dynamically linked `netty-tcnative` artifact, which allows the site administrator
@@ -60,21 +62,9 @@ In Maven, you can use the [os-maven-plugin](https://github.com/trustin/os-maven-
     <dependency>
       <groupId>io.netty</groupId>
       <artifactId>netty-tcnative-boringssl-static</artifactId>
-      <version>1.1.33.Fork14</version>
-      <classifier>${os.detected.classifier}</classifier>
+      <version>1.1.33.Fork23</version>
     </dependency>
   </dependencies>
-
-  <build>
-    <extensions>
-      <!-- Use os-maven-plugin to initialize the "os.detected" properties -->
-      <extension>
-        <groupId>kr.motd.maven</groupId>
-        <artifactId>os-maven-plugin</artifactId>
-        <version>1.4.0.Final</version>
-      </extension>
-    </extensions>
-  </build>
 </project>
 ```
 
@@ -87,16 +77,10 @@ buildscript {
   repositories {
     mavenCentral()
   }
-  dependencies {
-    classpath 'com.google.gradle:osdetector-gradle-plugin:1.4.0'
-  }
 }
 
-// Use the osdetector-gradle-plugin
-apply plugin: "com.google.osdetector"
-
 dependencies {
-    compile 'io.netty:netty-tcnative-boringssl-static:1.1.33.Fork14:' + osdetector.classifier
+    compile 'io.netty:netty-tcnative-boringssl-static:1.1.33.Fork23'
 }
 ```
 
@@ -131,7 +115,7 @@ In Maven, you can use the [os-maven-plugin](https://github.com/trustin/os-maven-
     <dependency>
       <groupId>io.netty</groupId>
       <artifactId>netty-tcnative</artifactId>
-      <version>1.1.33.Fork14</version>
+      <version>1.1.33.Fork23</version>
       <classifier>${tcnative.classifier}</classifier>
     </dependency>
   </dependencies>
@@ -199,7 +183,7 @@ if (osdetector.os == "linux" && osdetector.release.isLike("fedora")) {
 }
 
 dependencies {
-    compile 'io.netty:netty-tcnative:1.1.33.Fork14:' + tcnative_classifier
+    compile 'io.netty:netty-tcnative:1.1.33.Fork23:' + tcnative_classifier
 }
 ```
 
@@ -217,13 +201,17 @@ dependencies {
 
 If not using the Netty transport (or you are unable to use OpenSSL for some reason) another alternative is to use the JDK for TLS.
 
-No standard Java release has built-in support for ALPN today ([there is a tracking issue](https://bugs.openjdk.java.net/browse/JDK-8051498) so go upvote it!) so we need to use the [Jetty-ALPN](https://github.com/jetty-project/jetty-alpn") (or [Jetty-NPN](https://github.com/jetty-project/jetty-npn) if on Java < 8) bootclasspath extension for OpenJDK. To do this, add a `Xbootclasspath` JVM option referencing the path to the Jetty `alpn-boot` jar.
+No standard Java release has built-in support for ALPN today ([there is a tracking issue](https://bugs.openjdk.java.net/browse/JDK-8051498) so go upvote it!) so we need to use the [Jetty-ALPN](https://github.com/jetty-project/jetty-alpn) (or [Jetty-NPN](https://github.com/jetty-project/jetty-npn) if on Java < 8) bootclasspath extension for OpenJDK. To do this, add an `Xbootclasspath` JVM option referencing the path to the Jetty `alpn-boot` jar.
 
 ```sh
 java -Xbootclasspath/p:/path/to/jetty/alpn/extension.jar ...
 ```
 
-Note that you must use the [release of the Jetty-ALPN jar](http://www.eclipse.org/jetty/documentation/current/alpn-chapter.html#alpn-versions) specific to the version of Java you are using.
+Note that you must use the [release of the Jetty-ALPN jar](http://www.eclipse.org/jetty/documentation/current/alpn-chapter.html#alpn-versions) specific to the version of Java you are using. However, you can use the JVM agent [Jeety-ALPN-Agent](https://github.com/jetty-project/jetty-alpn-agent) to load the correct Jetty `alpn-boot` jar file for the current Java version. To do this, instead of adding an `Xbootclasspath` option, add a `javaagent` JVM option referencing the path to the Jetty `alpn-agent` jar.
+
+```sh
+java -javaagent:/path/to/jetty-alpn-agent.jar ...
+```
 
 ### JDK Ciphers
 
@@ -257,15 +245,44 @@ avoid needing extra permissions from the OS.
 Server server = ServerBuilder.forPort(8443)
     // Enable TLS
     .useTransportSecurity(certChainFile, privateKeyFile)
-    .addService(TestServiceGrpc.bindService(serviceImplementation))
+    .addService(serviceImplementation)
     .build();
 server.start();
 ```
 
 If the issuing certificate authority is not known to the client then a properly
 configured SslContext or SSLSocketFactory should be provided to the
-NettyChannelBuilder or OkHttpChannelBuilder, respectively. [Mutual
-authentication][] can be configured similarly.
+NettyChannelBuilder or OkHttpChannelBuilder, respectively.
+
+## Mutual TLS
+
+[Mutual authentication][] (or "client-side authentication") configuration is similar to the server by providing truststores, a client certificate and private key to the client channel.  The server must also be configured to request a certificate from clients, as well as truststores for which client certificates it should allow.
+
+```java
+Server server = NettyServerBuilder.forPort(8443)
+    .sslContext(GrpcSslContexts.forServer(certChainFile, privateKeyFile)
+        .trustManager(clientCertChainFile)
+        .clientAuth(ClientAuth.OPTIONAL)
+        .build());
+```
+
+Negotiated client certificates are available in the SSLSession, which is found in the SSL_SESSION_KEY attribute of <a href="https://github.com/grpc/grpc-java/blob/master/core/src/main/java/io/grpc/ServerCall.java">ServerCall</a>.  A server interceptor can provide details in the current Context.
+
+```java
+public final static Context.Key<SSLSession> SSL_SESSION_CONTEXT = Context.key("SSLSession");
+
+@Override
+public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(MethodDescriptor<ReqT, RespT> method,
+    ServerCall<RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+    SSLSession sslSession = call.attributes().get(ServerCall.SSL_SESSION_KEY);
+    if (sslSession == null) {
+        return next.startCall(method, call, headers)
+    }
+    return Contexts.interceptCall(
+        Context.current().withValue(SSL_SESSION_CONTEXT, clientContext),
+        method, call, headers, next);
+}
+```
 
 [Mutual authentication]: http://en.wikipedia.org/wiki/Transport_Layer_Security#Client-authenticated_TLS_handshake
 
@@ -285,10 +302,10 @@ ManagedChannel channel = ManagedChannelBuilder.forTarget("pubsub.googleapis.com"
 GoogleCredentials creds = GoogleCredentials.getApplicationDefault();
 // Down-scope the credential to just the scopes required by the service
 creds = creds.createScoped(Arrays.asList("https://www.googleapis.com/auth/pubsub"));
-// Intercept the channel to bind the credential
-ClientAuthInterceptor interceptor = new ClientAuthInterceptor(creds, someExecutor);
-Channel channel = ClientInterceptors.intercept(channelImpl, interceptor);
-// Create a stub using the channel that has the bound credential
-PublisherGrpc.PublisherBlockingStub publisherStub = PublisherGrpc.newBlockingStub(channel);
+// Create an instance of {@link io.grpc.CallCredentials}
+CallCredentials callCreds = MoreCallCredentials.from(creds);
+// Create a stub with credential
+PublisherGrpc.PublisherBlockingStub publisherStub =
+    PublisherGrpc.newBlockingStub(channel).withCallCredentials(callCreds);
 publisherStub.publish(someMessage);
 ```

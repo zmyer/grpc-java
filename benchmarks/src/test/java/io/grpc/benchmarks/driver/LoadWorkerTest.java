@@ -34,13 +34,13 @@ package io.grpc.benchmarks.driver;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import io.grpc.ManagedChannel;
+import io.grpc.benchmarks.Utils;
 import io.grpc.benchmarks.proto.Control;
 import io.grpc.benchmarks.proto.Stats;
 import io.grpc.benchmarks.proto.WorkerServiceGrpc;
-import io.grpc.internal.ManagedChannelImpl;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.StreamObserver;
-import io.grpc.testing.TestUtils;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -65,13 +65,13 @@ public class LoadWorkerTest {
       .build();
 
   private LoadWorker worker;
-  private ManagedChannelImpl channel;
+  private ManagedChannel channel;
   private WorkerServiceGrpc.WorkerServiceStub workerServiceStub;
   private LinkedBlockingQueue<Stats.ClientStats> marksQueue;
 
   @Before
   public void setup() throws Exception {
-    int port = TestUtils.pickUnusedPort();
+    int port = Utils.pickUnusedPort();
     worker = new LoadWorker(port, 0);
     worker.start();
     channel = NettyChannelBuilder.forAddress("localhost", port).usePlaintext(true).build();

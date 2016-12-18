@@ -47,6 +47,7 @@ import com.google.protobuf.Type;
 import io.grpc.Drainable;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor.Marshaller;
+import io.grpc.MethodDescriptor.PrototypeMarshaller;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 
@@ -87,7 +88,7 @@ public class ProtoLiteUtilsTest {
   public void testInvalidatedMessage() throws Exception {
     InputStream is = marshaller.stream(proto);
     // Invalidates message, and drains all bytes
-    ByteStreams.toByteArray(is);
+    byte[] unused = ByteStreams.toByteArray(is);
     try {
       ((ProtoInputStream) is).message();
       fail("Expected exception");
@@ -116,6 +117,14 @@ public class ProtoLiteUtilsTest {
     // Enum's name and Type's name are both strings with tag 1.
     Enum altProto = Enum.newBuilder().setName(proto.getName()).build();
     assertEquals(proto, marshaller.parse(enumMarshaller.stream(altProto)));
+  }
+
+  @Test
+  public void introspection() throws Exception {
+    Marshaller<Enum> enumMarshaller = ProtoLiteUtils.marshaller(Enum.getDefaultInstance());
+    PrototypeMarshaller<Enum> prototypeMarshaller = (PrototypeMarshaller<Enum>) enumMarshaller;
+    assertSame(Enum.getDefaultInstance(), prototypeMarshaller.getMessagePrototype());
+    assertSame(Enum.class, prototypeMarshaller.getMessageClass());
   }
 
   @Test
@@ -190,7 +199,7 @@ public class ProtoLiteUtilsTest {
   public void testDrainTo_none() throws Exception {
     byte[] golden = ByteStreams.toByteArray(marshaller.stream(proto));
     InputStream is = marshaller.stream(proto);
-    ByteStreams.toByteArray(is);
+    byte[] unused = ByteStreams.toByteArray(is);
     Drainable d = (Drainable) is;
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     assertEquals(0, d.drainTo(baos));

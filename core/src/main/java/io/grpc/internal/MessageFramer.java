@@ -51,6 +51,8 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
+import javax.annotation.Nullable;
+
 /**
  * Encodes gRPC messages to be delivered via the transport layer which implements {@link
  * MessageFramer.Sink}.
@@ -69,7 +71,7 @@ public class MessageFramer {
      * @param endOfStream whether the frame is the last one for the GRPC stream
      * @param flush {@code true} if more data may not be arriving soon
      */
-    void deliverFrame(WritableBuffer frame, boolean endOfStream, boolean flush);
+    void deliverFrame(@Nullable WritableBuffer frame, boolean endOfStream, boolean flush);
   }
 
   private static final int HEADER_LENGTH = 5;
@@ -79,10 +81,11 @@ public class MessageFramer {
   private final Sink sink;
   private WritableBuffer buffer;
   private Compressor compressor = Codec.Identity.NONE;
-  private boolean messageCompression;
+  private boolean messageCompression = true;
   private final OutputStreamAdapter outputStreamAdapter = new OutputStreamAdapter();
   private final byte[] headerScratch = new byte[HEADER_LENGTH];
   private final WritableBufferAllocator bufferAllocator;
+  private final StatsTraceContext statsTraceCtx;
   private boolean closed;
 
   /**
@@ -91,9 +94,11 @@ public class MessageFramer {
    * @param sink the sink used to deliver frames to the transport
    * @param bufferAllocator allocates buffers that the transport can commit to the wire.
    */
-  public MessageFramer(Sink sink, WritableBufferAllocator bufferAllocator) {
+  public MessageFramer(Sink sink, WritableBufferAllocator bufferAllocator,
+      StatsTraceContext statsTraceCtx) {
     this.sink = checkNotNull(sink, "sink");
     this.bufferAllocator = checkNotNull(bufferAllocator, "bufferAllocator");
+    this.statsTraceCtx = checkNotNull(statsTraceCtx, "statsTraceCtx");
   }
 
   MessageFramer setCompressor(Compressor compressor) {
@@ -140,11 +145,13 @@ public class MessageFramer {
       String err = String.format("Message length inaccurate %s != %s", written, messageLength);
       throw Status.INTERNAL.withDescription(err).asRuntimeException();
     }
+    statsTraceCtx.uncompressedBytesSent(written);
   }
 
   private int writeUncompressed(InputStream message, int messageLength) throws IOException {
     if (messageLength != -1) {
-      return writeKnownLength(message, messageLength, false);
+      statsTraceCtx.wireBytesSent(messageLength);
+      return writeKnownLengthUncompressed(message, messageLength);
     }
     BufferChainOutputStream bufferChain = new BufferChainOutputStream();
     int written = writeToOutputStream(message, bufferChain);
@@ -175,12 +182,12 @@ public class MessageFramer {
   }
 
   /**
-   * Write an unserialized message with a known length.
+   * Write an unserialized message with a known length, uncompressed.
    */
-  private int writeKnownLength(InputStream message, int messageLength, boolean compressed)
+  private int writeKnownLengthUncompressed(InputStream message, int messageLength)
       throws IOException {
     ByteBuffer header = ByteBuffer.wrap(headerScratch);
-    header.put(compressed ? COMPRESSED : UNCOMPRESSED);
+    header.put(UNCOMPRESSED);
     header.putInt(messageLength);
     // Allocate the initial buffer chunk based on frame header + payload length.
     // Note that the allocator may allocate a buffer larger or smaller than this length
@@ -218,6 +225,7 @@ public class MessageFramer {
     // Assign the current buffer to the last in the chain so it can be used
     // for future writes or written with end-of-stream=true on close.
     buffer = bufferList.get(bufferList.size() - 1);
+    statsTraceCtx.wireBytesSent(messageLength);
   }
 
   private static int writeToOutputStream(InputStream message, OutputStream outputStream)
@@ -312,11 +320,14 @@ public class MessageFramer {
 
   /** OutputStream whose write()s are passed to the framer. */
   private class OutputStreamAdapter extends OutputStream {
-    private final byte[] singleByte = new byte[1];
-
+    /**
+     * This is slow, don't call it.  If you care about write overhead, use a BufferedOutputStream.
+     * Better yet, you can use your own single byte buffer and call
+     * {@link #write(byte[], int, int)}.
+     */
     @Override
     public void write(int b) {
-      singleByte[0] = (byte) b;
+      byte[] singleByte = new byte[]{(byte)b};
       write(singleByte, 0, 1);
     }
 
@@ -330,24 +341,27 @@ public class MessageFramer {
    * Produce a collection of {@link WritableBuffer} instances from the data written to an
    * {@link OutputStream}.
    */
-  private class BufferChainOutputStream extends OutputStream {
-
-    private final byte[] singleByte = new byte[1];
-    private List<WritableBuffer> bufferList;
+  private final class BufferChainOutputStream extends OutputStream {
+    private final List<WritableBuffer> bufferList = new ArrayList<WritableBuffer>();
     private WritableBuffer current;
 
-    private BufferChainOutputStream() {
-      bufferList = new ArrayList<WritableBuffer>();
-    }
-
+    /**
+     * This is slow, don't call it.  If you care about write overhead, use a BufferedOutputStream.
+     * Better yet, you can use your own single byte buffer and call
+     * {@link #write(byte[], int, int)}.
+     */
     @Override
     public void write(int b) throws IOException {
-      singleByte[0] = (byte) b;
+      if (current != null && current.writableBytes() > 0) {
+        current.write((byte)b);
+        return;
+      }
+      byte[] singleByte = new byte[]{(byte)b};
       write(singleByte, 0, 1);
     }
 
     @Override
-    public void write(byte[] b, int off, int len) throws IOException {
+    public void write(byte[] b, int off, int len) {
       if (current == null) {
         // Request len bytes initially from the allocator, it may give us more.
         current = bufferAllocator.allocate(len);
@@ -358,7 +372,8 @@ public class MessageFramer {
         if (canWrite == 0) {
           // Assume message is twice as large as previous assumption if were still not done,
           // the allocator may allocate more or less than this amount.
-          current = bufferAllocator.allocate(current.readableBytes() * 2);
+          int needed = Math.max(len, current.readableBytes() * 2);
+          current = bufferAllocator.allocate(needed);
           bufferList.add(current);
         } else {
           current.write(b, off, canWrite);

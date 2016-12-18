@@ -31,13 +31,13 @@
 
 package io.grpc.netty;
 
+import static com.google.common.truth.Truth.assertThat;
 import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
 import static io.grpc.netty.NettyTestUtil.messageFrame;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyBoolean;
 import static org.mockito.Matchers.eq;
+import static org.mockito.Matchers.isA;
 import static org.mockito.Matchers.same;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
@@ -48,20 +48,26 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verifyZeroInteractions;
 import static org.mockito.Mockito.when;
 
+import com.google.common.collect.ImmutableListMultimap;
+import com.google.common.collect.ListMultimap;
+
+import io.grpc.Attributes;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.internal.ServerStreamListener;
+import io.grpc.internal.StatsTraceContext;
+import io.grpc.netty.WriteQueue.QueuedCommand;
 import io.netty.buffer.EmptyByteBuf;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
-import io.netty.handler.codec.http2.Http2Headers;
 import io.netty.util.AsciiString;
 
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
@@ -91,113 +97,141 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
 
   @Test
   public void writeMessageShouldSendResponse() throws Exception {
+    ListMultimap<CharSequence, CharSequence> expectedHeaders =
+        ImmutableListMultimap.copyOf(new DefaultHttp2Headers()
+            .status(Utils.STATUS_OK)
+            .set(Utils.CONTENT_TYPE_HEADER, Utils.CONTENT_TYPE_GRPC));
+
     stream.writeHeaders(new Metadata());
-    Http2Headers headers = new DefaultHttp2Headers()
-        .status(Utils.STATUS_OK)
-        .set(Utils.CONTENT_TYPE_HEADER, Utils.CONTENT_TYPE_GRPC);
-    verify(writeQueue).enqueue(new SendResponseHeadersCommand(STREAM_ID, headers, false), true);
+
+    ArgumentCaptor<SendResponseHeadersCommand> sendHeadersCap =
+        ArgumentCaptor.forClass(SendResponseHeadersCommand.class);
+    verify(writeQueue).enqueue(sendHeadersCap.capture(), eq(true));
+    SendResponseHeadersCommand sendHeaders = sendHeadersCap.getValue();
+    assertThat(sendHeaders.stream()).isSameAs(stream.transportState());
+    assertThat(ImmutableListMultimap.copyOf(sendHeaders.headers()))
+        .containsExactlyEntriesIn(expectedHeaders);
+    assertThat(sendHeaders.endOfStream()).isFalse();
+
     byte[] msg = smallMessage();
     stream.writeMessage(new ByteArrayInputStream(msg));
     stream.flush();
-    verify(writeQueue).enqueue(eq(new SendGrpcFrameCommand(stream, messageFrame(MESSAGE), false)),
-        any(ChannelPromise.class),
+
+    verify(writeQueue).enqueue(
+        eq(new SendGrpcFrameCommand(stream.transportState(), messageFrame(MESSAGE), false)),
+        isA(ChannelPromise.class),
         eq(true));
   }
 
   @Test
   public void writeHeadersShouldSendHeaders() throws Exception {
     Metadata headers = new Metadata();
-    stream().writeHeaders(headers);
-    verify(writeQueue).enqueue(new SendResponseHeadersCommand(STREAM_ID,
-        Utils.convertServerHeaders(headers), false), true);
-  }
+    ListMultimap<CharSequence, CharSequence> expectedHeaders =
+        ImmutableListMultimap.copyOf(Utils.convertServerHeaders(headers));
 
-  @Test
-  public void duplicateWriteHeadersShouldFail() throws Exception {
-    Metadata headers = new Metadata();
     stream().writeHeaders(headers);
-    verify(writeQueue).enqueue(new SendResponseHeadersCommand(STREAM_ID,
-        Utils.convertServerHeaders(headers), false), true);
-    try {
-      stream().writeHeaders(headers);
-      fail("Can only write response headers once");
-    } catch (IllegalStateException ise) {
-      // Success
-    }
+
+    ArgumentCaptor<SendResponseHeadersCommand> sendHeadersCap =
+        ArgumentCaptor.forClass(SendResponseHeadersCommand.class);
+    verify(writeQueue).enqueue(sendHeadersCap.capture(), eq(true));
+    SendResponseHeadersCommand sendHeaders = sendHeadersCap.getValue();
+    assertThat(sendHeaders.stream()).isSameAs(stream.transportState());
+    assertThat(ImmutableListMultimap.copyOf(sendHeaders.headers()))
+        .containsExactlyEntriesIn(expectedHeaders);
+    assertThat(sendHeaders.endOfStream()).isFalse();
   }
 
   @Test
   public void closeBeforeClientHalfCloseShouldSucceed() throws Exception {
-    stream().close(Status.OK, new Metadata());
-    verify(writeQueue).enqueue(
-        new SendResponseHeadersCommand(STREAM_ID, new DefaultHttp2Headers()
+    ListMultimap<CharSequence, CharSequence> expectedHeaders =
+        ImmutableListMultimap.copyOf(new DefaultHttp2Headers()
             .status(new AsciiString("200"))
             .set(new AsciiString("content-type"), new AsciiString("application/grpc"))
-            .set(new AsciiString("grpc-status"), new AsciiString("0")), true),
-        true);
+            .set(new AsciiString("grpc-status"), new AsciiString("0")));
+
+    stream().close(Status.OK, new Metadata());
+
+    ArgumentCaptor<SendResponseHeadersCommand> sendHeadersCap =
+        ArgumentCaptor.forClass(SendResponseHeadersCommand.class);
+    verify(writeQueue).enqueue(sendHeadersCap.capture(), eq(true));
+    SendResponseHeadersCommand sendHeaders = sendHeadersCap.getValue();
+    assertThat(sendHeaders.stream()).isSameAs(stream.transportState());
+    assertThat(ImmutableListMultimap.copyOf(sendHeaders.headers()))
+        .containsExactlyEntriesIn(expectedHeaders);
+    assertThat(sendHeaders.endOfStream()).isTrue();
     verifyZeroInteractions(serverListener);
+
     // Sending complete. Listener gets closed()
-    stream().complete();
+    stream().transportState().complete();
+
     verify(serverListener).closed(Status.OK);
-    assertTrue(stream().isClosed());
     verifyZeroInteractions(serverListener);
   }
 
   @Test
   public void closeWithErrorBeforeClientHalfCloseShouldSucceed() throws Exception {
-    // Error is sent on wire and ends the stream
-    stream().close(Status.CANCELLED, trailers);
-    verify(writeQueue).enqueue(
-        new SendResponseHeadersCommand(STREAM_ID, new DefaultHttp2Headers()
+    ListMultimap<CharSequence, CharSequence> expectedHeaders =
+        ImmutableListMultimap.copyOf(new DefaultHttp2Headers()
             .status(new AsciiString("200"))
             .set(new AsciiString("content-type"), new AsciiString("application/grpc"))
-            .set(new AsciiString("grpc-status"), new AsciiString("1")), true),
-        true);
+            .set(new AsciiString("grpc-status"), new AsciiString("1")));
+
+    // Error is sent on wire and ends the stream
+    stream().close(Status.CANCELLED, trailers);
+
+    ArgumentCaptor<SendResponseHeadersCommand> sendHeadersCap =
+        ArgumentCaptor.forClass(SendResponseHeadersCommand.class);
+    verify(writeQueue).enqueue(sendHeadersCap.capture(), eq(true));
+    SendResponseHeadersCommand sendHeaders = sendHeadersCap.getValue();
+    assertThat(sendHeaders.stream()).isSameAs(stream.transportState());
+    assertThat(ImmutableListMultimap.copyOf(sendHeaders.headers()))
+        .containsExactlyEntriesIn(expectedHeaders);
+    assertThat(sendHeaders.endOfStream()).isTrue();
     verifyZeroInteractions(serverListener);
+
     // Sending complete. Listener gets closed()
-    stream().complete();
+    stream().transportState().complete();
     verify(serverListener).closed(Status.OK);
-    assertTrue(stream().isClosed());
     verifyZeroInteractions(serverListener);
   }
 
   @Test
   public void closeAfterClientHalfCloseShouldSucceed() throws Exception {
-    // Client half-closes. Listener gets halfClosed()
-    stream().inboundDataReceived(new EmptyByteBuf(UnpooledByteBufAllocator.DEFAULT), true);
-    assertTrue(stream().canSend());
-    verify(serverListener).halfClosed();
-    // Server closes. Status sent
-    stream().close(Status.OK, trailers);
-    assertTrue(stream().isClosed());
-    verifyNoMoreInteractions(serverListener);
-    verify(writeQueue).enqueue(
-        new SendResponseHeadersCommand(STREAM_ID, new DefaultHttp2Headers()
+    ListMultimap<CharSequence, CharSequence> expectedHeaders =
+        ImmutableListMultimap.copyOf(new DefaultHttp2Headers()
             .status(new AsciiString("200"))
             .set(new AsciiString("content-type"), new AsciiString("application/grpc"))
-            .set(new AsciiString("grpc-status"), new AsciiString("0")), true),
-        true);
-    // Sending and receiving complete. Listener gets closed()
-    stream().complete();
-    verify(serverListener).closed(Status.OK);
-    verifyNoMoreInteractions(serverListener);
-  }
+            .set(new AsciiString("grpc-status"), new AsciiString("0")));
 
-  @Test
-  public void abortStreamAndSendStatus() throws Exception {
-    Status status = Status.INTERNAL.withCause(new Throwable());
-    stream().abortStream(status, true);
-    assertTrue(stream().isClosed());
-    verify(serverListener).closed(same(status));
-    verify(writeQueue).enqueue(new CancelServerStreamCommand(stream(), status), true);
+    // Client half-closes. Listener gets halfClosed()
+    stream().transportState()
+        .inboundDataReceived(new EmptyByteBuf(UnpooledByteBufAllocator.DEFAULT), true);
+
+    verify(serverListener).halfClosed();
+
+    // Server closes. Status sent
+    stream().close(Status.OK, trailers);
+    verifyNoMoreInteractions(serverListener);
+
+    ArgumentCaptor<SendResponseHeadersCommand> cmdCap =
+        ArgumentCaptor.forClass(SendResponseHeadersCommand.class);
+    verify(writeQueue).enqueue(cmdCap.capture(), eq(true));
+    SendResponseHeadersCommand cmd = cmdCap.getValue();
+    assertThat(cmd.stream()).isSameAs(stream.transportState());
+    assertThat(ImmutableListMultimap.copyOf(cmd.headers()))
+        .containsExactlyEntriesIn(expectedHeaders);
+    assertThat(cmd.endOfStream()).isTrue();
+
+    // Sending and receiving complete. Listener gets closed()
+    stream().transportState().complete();
+    verify(serverListener).closed(Status.OK);
     verifyNoMoreInteractions(serverListener);
   }
 
   @Test
   public void abortStreamAndNotSendStatus() throws Exception {
     Status status = Status.INTERNAL.withCause(new Throwable());
-    stream().abortStream(status, false);
-    assertTrue(stream().isClosed());
+    stream().transportState().transportReportStatus(status);
     verify(serverListener).closed(same(status));
     verify(channel, never()).writeAndFlush(any(SendResponseHeadersCommand.class));
     verify(channel, never()).writeAndFlush(any(SendGrpcFrameCommand.class));
@@ -208,32 +242,40 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
   public void abortStreamAfterClientHalfCloseShouldCallClose() {
     Status status = Status.INTERNAL.withCause(new Throwable());
     // Client half-closes. Listener gets halfClosed()
-    stream().inboundDataReceived(new EmptyByteBuf(UnpooledByteBufAllocator.DEFAULT), true);
-    assertTrue(stream().canSend());
+    stream().transportState().inboundDataReceived(
+        new EmptyByteBuf(UnpooledByteBufAllocator.DEFAULT), true);
     verify(serverListener).halfClosed();
     // Abort from the transport layer
-    stream().abortStream(status, true);
+    stream().transportState().transportReportStatus(status);
     verify(serverListener).closed(same(status));
     verifyNoMoreInteractions(serverListener);
-    assertTrue(stream().isClosed());
   }
 
   @Test
-  public void emptyFramerShouldSendNoPayload() throws Exception {
-    stream().close(Status.OK, new Metadata());
-    verify(writeQueue).enqueue(
-        new SendResponseHeadersCommand(STREAM_ID, new DefaultHttp2Headers()
+  public void emptyFramerShouldSendNoPayload() {
+    ListMultimap<CharSequence, CharSequence> expectedHeaders =
+        ImmutableListMultimap.copyOf(new DefaultHttp2Headers()
             .status(new AsciiString("200"))
             .set(new AsciiString("content-type"), new AsciiString("application/grpc"))
-            .set(new AsciiString("grpc-status"), new AsciiString("0")), true),
-        true);
+            .set(new AsciiString("grpc-status"), new AsciiString("0")));
+    ArgumentCaptor<SendResponseHeadersCommand> cmdCap =
+        ArgumentCaptor.forClass(SendResponseHeadersCommand.class);
+
+    stream().close(Status.OK, new Metadata());
+
+    verify(writeQueue).enqueue(cmdCap.capture(), eq(true));
+    SendResponseHeadersCommand cmd = cmdCap.getValue();
+    assertThat(cmd.stream()).isSameAs(stream.transportState());
+    assertThat(ImmutableListMultimap.copyOf(cmd.headers()))
+        .containsExactlyEntriesIn(expectedHeaders);
+    assertThat(cmd.endOfStream()).isTrue();
   }
 
   @Test
   public void cancelStreamShouldSucceed() {
     stream().cancel(Status.DEADLINE_EXCEEDED);
     verify(writeQueue).enqueue(
-        new CancelServerStreamCommand(stream(), Status.DEADLINE_EXCEEDED),
+        new CancelServerStreamCommand(stream().transportState(), Status.DEADLINE_EXCEEDED),
         true);
   }
 
@@ -248,13 +290,15 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
         }
         return null;
       }
-    }).when(writeQueue).enqueue(any(), any(ChannelPromise.class), anyBoolean());
-    when(writeQueue.enqueue(any(), anyBoolean())).thenReturn(future);
-    NettyServerStream stream = new NettyServerStream(channel, http2Stream, handler,
-            DEFAULT_MAX_MESSAGE_SIZE);
-    stream.setListener(serverListener);
-    assertTrue(stream.canReceive());
-    assertTrue(stream.canSend());
+    }).when(writeQueue).enqueue(any(QueuedCommand.class), any(ChannelPromise.class), anyBoolean());
+    when(writeQueue.enqueue(any(QueuedCommand.class), anyBoolean())).thenReturn(future);
+    StatsTraceContext statsTraceCtx = StatsTraceContext.NOOP;
+    NettyServerStream.TransportState state = new NettyServerStream.TransportState(
+        handler, http2Stream, DEFAULT_MAX_MESSAGE_SIZE, statsTraceCtx);
+    NettyServerStream stream = new NettyServerStream(channel, state, Attributes.EMPTY,
+        statsTraceCtx);
+    stream.transportState().setListener(serverListener);
+    state.onStreamAllocated();
     verify(serverListener, atLeastOnce()).onReady();
     verifyNoMoreInteractions(serverListener);
     return stream;

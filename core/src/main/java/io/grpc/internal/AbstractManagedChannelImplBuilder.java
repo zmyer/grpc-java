@@ -32,7 +32,11 @@
 package io.grpc.internal;
 
 import static com.google.common.base.MoreObjects.firstNonNull;
+import static com.google.common.base.Preconditions.checkArgument;
 
+import com.google.census.Census;
+import com.google.census.CensusContextFactory;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.MoreExecutors;
 
@@ -40,22 +44,25 @@ import io.grpc.Attributes;
 import io.grpc.ClientInterceptor;
 import io.grpc.CompressorRegistry;
 import io.grpc.DecompressorRegistry;
-import io.grpc.ExperimentalApi;
+import io.grpc.Internal;
 import io.grpc.LoadBalancer;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.NameResolver;
-import io.grpc.NameResolverRegistry;
+import io.grpc.NameResolverProvider;
+import io.grpc.PickFirstBalancerFactory;
 import io.grpc.ResolvedServerInfo;
-import io.grpc.SimpleLoadBalancerFactory;
+import io.grpc.ResolvedServerInfoGroup;
 
 import java.net.SocketAddress;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Executor;
 
+import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 
 /**
@@ -66,6 +73,24 @@ import javax.annotation.Nullable;
 public abstract class AbstractManagedChannelImplBuilder
         <T extends AbstractManagedChannelImplBuilder<T>> extends ManagedChannelBuilder<T> {
   private static final String DIRECT_ADDRESS_SCHEME = "directaddress";
+
+  /**
+   * An idle timeout larger than this would disable idle mode.
+   */
+  @VisibleForTesting
+  static final long IDLE_MODE_MAX_TIMEOUT_DAYS = 30;
+
+  /**
+   * The default idle timeout.
+   */
+  @VisibleForTesting
+  static final long IDLE_MODE_DEFAULT_TIMEOUT_MILLIS = TimeUnit.MINUTES.toMillis(30);
+
+  /**
+   * An idle timeout smaller than this would be capped to it.
+   */
+  @VisibleForTesting
+  static final long IDLE_MODE_MIN_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(1);
 
   @Nullable
   private Executor executor;
@@ -94,13 +119,47 @@ public abstract class AbstractManagedChannelImplBuilder
   @Nullable
   private CompressorRegistry compressorRegistry;
 
+  private long idleTimeoutMillis = IDLE_MODE_DEFAULT_TIMEOUT_MILLIS;
+
+  private int maxInboundMessageSize = GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
+
+  // Can be overriden by subclasses.
+  @Override
+  public T maxInboundMessageSize(int max) {
+    checkArgument(max >= 0, "negative max");
+    maxInboundMessageSize = max;
+    return thisT();
+  }
+
+  protected final int maxInboundMessageSize() {
+    return maxInboundMessageSize;
+  }
+
+  @Nullable
+  private CensusContextFactory censusFactory;
+
   protected AbstractManagedChannelImplBuilder(String target) {
-    this.target = Preconditions.checkNotNull(target);
+    this.target = Preconditions.checkNotNull(target, "target");
     this.directServerAddress = null;
   }
 
+  /**
+   * Returns a target string for the SocketAddress. It is only used as a placeholder, because
+   * DirectAddressNameResolverFactory will not actually try to use it. However, it must be a valid
+   * URI.
+   */
+  @VisibleForTesting
+  static String makeTargetStringForDirectAddress(SocketAddress address) {
+    try {
+      return new URI(DIRECT_ADDRESS_SCHEME, "", "/" + address, null).toString();
+    } catch (URISyntaxException e) {
+      // It should not happen.
+      throw new RuntimeException(e);
+    }
+  }
+
   protected AbstractManagedChannelImplBuilder(SocketAddress directServerAddress, String authority) {
-    this.target = DIRECT_ADDRESS_SCHEME + ":///" + directServerAddress;
+    this.target = makeTargetStringForDirectAddress(directServerAddress);
     this.directServerAddress = directServerAddress;
     this.nameResolverFactory = new DirectAddressNameResolverFactory(directServerAddress, authority);
   }
@@ -146,27 +205,19 @@ public abstract class AbstractManagedChannelImplBuilder
   }
 
   @Override
-  @ExperimentalApi
   public final T decompressorRegistry(DecompressorRegistry registry) {
     this.decompressorRegistry = registry;
     return thisT();
   }
 
   @Override
-  @ExperimentalApi
   public final T compressorRegistry(CompressorRegistry registry) {
     this.compressorRegistry = registry;
     return thisT();
   }
 
-  private T thisT() {
-    @SuppressWarnings("unchecked")
-    T thisT = (T) this;
-    return thisT;
-  }
-
   @Override
-  public final T userAgent(String userAgent) {
+  public final T userAgent(@Nullable String userAgent) {
     this.userAgent = userAgent;
     return thisT();
   }
@@ -175,6 +226,34 @@ public abstract class AbstractManagedChannelImplBuilder
   public final T overrideAuthority(String authority) {
     this.authorityOverride = checkAuthority(authority);
     return thisT();
+  }
+
+  @Override
+  public final T idleTimeout(long value, TimeUnit unit) {
+    checkArgument(value > 0, "idle timeout is %s, but must be positive", value);
+    // We convert to the largest unit to avoid overflow
+    if (unit.toDays(value) >= IDLE_MODE_MAX_TIMEOUT_DAYS) {
+      // This disables idle mode
+      this.idleTimeoutMillis = ManagedChannelImpl.IDLE_TIMEOUT_MILLIS_DISABLE;
+    } else {
+      this.idleTimeoutMillis = Math.max(unit.toMillis(value), IDLE_MODE_MIN_TIMEOUT_MILLIS);
+    }
+    return thisT();
+  }
+
+  /**
+   * Override the default Census implementation.  This is meant to be used in tests.
+   */
+  @VisibleForTesting
+  @Internal
+  public T censusContextFactory(CensusContextFactory censusFactory) {
+    this.censusFactory = censusFactory;
+    return thisT();
+  }
+
+  @VisibleForTesting
+  final long getIdleTimeoutMillis() {
+    return idleTimeoutMillis;
   }
 
   /**
@@ -188,19 +267,32 @@ public abstract class AbstractManagedChannelImplBuilder
 
   @Override
   public ManagedChannelImpl build() {
-    ClientTransportFactory transportFactory = new AuthorityOverridingTransportFactory(
-        buildTransportFactory(), authorityOverride);
+    ClientTransportFactory transportFactory = buildTransportFactory();
+    if (authorityOverride != null) {
+      transportFactory = new AuthorityOverridingTransportFactory(
+        transportFactory, authorityOverride);
+    }
+    NameResolver.Factory nameResolverFactory = this.nameResolverFactory;
+    if (nameResolverFactory == null) {
+      // Avoid loading the provider unless necessary, as a way to workaround a possibly-costly
+      // and poorly optimized getResource() call on Android. If any other piece of code calls
+      // getResource(), then this shouldn't be a problem unless called on the UI thread.
+      nameResolverFactory = NameResolverProvider.asFactory();
+    }
     return new ManagedChannelImpl(
         target,
         // TODO(carl-mastrangelo): Allow clients to pass this in
         new ExponentialBackoffPolicy.Provider(),
-        firstNonNull(nameResolverFactory, NameResolverRegistry.getDefaultRegistry()),
+        nameResolverFactory,
         getNameResolverParams(),
-        firstNonNull(loadBalancerFactory, SimpleLoadBalancerFactory.getInstance()),
+        firstNonNull(loadBalancerFactory, PickFirstBalancerFactory.getInstance()),
         transportFactory,
         firstNonNull(decompressorRegistry, DecompressorRegistry.getDefaultInstance()),
         firstNonNull(compressorRegistry, CompressorRegistry.getDefaultInstance()),
-        executor, userAgent, interceptors);
+        GrpcUtil.TIMER_SERVICE, GrpcUtil.STOPWATCH_SUPPLIER, idleTimeoutMillis,
+        executor, userAgent, interceptors,
+        firstNonNull(censusFactory,
+            firstNonNull(Census.getCensusContextFactory(), NoopCensusContextFactory.INSTANCE)));
   }
 
   /**
@@ -221,19 +313,19 @@ public abstract class AbstractManagedChannelImplBuilder
 
   private static class AuthorityOverridingTransportFactory implements ClientTransportFactory {
     final ClientTransportFactory factory;
-    @Nullable final String authorityOverride;
+    final String authorityOverride;
 
     AuthorityOverridingTransportFactory(
-        ClientTransportFactory factory, @Nullable String authorityOverride) {
-      this.factory = factory;
-      this.authorityOverride = authorityOverride;
+        ClientTransportFactory factory, String authorityOverride) {
+      this.factory = Preconditions.checkNotNull(factory, "factory should not be null");
+      this.authorityOverride = Preconditions.checkNotNull(
+        authorityOverride, "authorityOverride should not be null");
     }
 
     @Override
-    public ManagedClientTransport newClientTransport(SocketAddress serverAddress,
-        String authority) {
-      return factory.newClientTransport(
-          serverAddress, authorityOverride != null ? authorityOverride : authority);
+    public ConnectionClientTransport newClientTransport(SocketAddress serverAddress,
+        String authority, @Nullable String userAgent) {
+      return factory.newClientTransport(serverAddress, authorityOverride, userAgent);
     }
 
     @Override
@@ -261,8 +353,8 @@ public abstract class AbstractManagedChannelImplBuilder
 
         @Override
         public void start(final Listener listener) {
-          listener.onUpdate(
-              Collections.singletonList(new ResolvedServerInfo(address, Attributes.EMPTY)),
+          listener.onUpdate(Collections.singletonList(
+              ResolvedServerInfoGroup.builder().add(new ResolvedServerInfo(address)).build()),
               Attributes.EMPTY);
         }
 

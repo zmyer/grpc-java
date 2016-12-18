@@ -31,15 +31,18 @@
 
 package io.grpc.internal;
 
+import com.google.common.base.Stopwatch;
+import com.google.common.base.Supplier;
 import com.google.common.base.Ticker;
 import com.google.common.util.concurrent.AbstractFuture;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.PriorityQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.Future;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -54,19 +57,30 @@ import java.util.concurrent.TimeUnit;
  */
 public final class FakeClock {
 
-  public final ScheduledExecutorService scheduledExecutorService = new ScheduledExecutorImpl();
-  final Ticker ticker = new Ticker() {
-      @Override public long read() {
-        return TimeUnit.MILLISECONDS.toNanos(currentTimeNanos);
-      }
-    };
+  private final ScheduledExecutorService scheduledExecutorService = new ScheduledExecutorImpl();
 
-  private final PriorityQueue<ScheduledTask> tasks = new PriorityQueue<ScheduledTask>();
+  private final PriorityBlockingQueue<ScheduledTask> tasks =
+      new PriorityBlockingQueue<ScheduledTask>();
+
+  private final Ticker ticker =
+      new Ticker() {
+        @Override public long read() {
+          return currentTimeNanos;
+        }
+      };
+
+  private final Supplier<Stopwatch> stopwatchSupplier =
+      new Supplier<Stopwatch>() {
+        @Override public Stopwatch get() {
+          return Stopwatch.createUnstarted(ticker);
+        }
+      };
+
   private long currentTimeNanos;
 
-  private class ScheduledTask extends AbstractFuture<Void> implements ScheduledFuture<Void> {
-    final Runnable command;
-    final long dueTimeNanos;
+  public class ScheduledTask extends AbstractFuture<Void> implements ScheduledFuture<Void> {
+    public final Runnable command;
+    public final long dueTimeNanos;
 
     ScheduledTask(long dueTimeNanos, Runnable command) {
       this.dueTimeNanos = dueTimeNanos;
@@ -95,6 +109,11 @@ public final class FakeClock {
 
     void complete() {
       set(null);
+    }
+
+    @Override
+    public String toString() {
+      return "[due=" + dueTimeNanos + ", task=" + command + "]";
     }
   }
 
@@ -176,6 +195,21 @@ public final class FakeClock {
   }
 
   /**
+   * Provides a partially implemented instance of {@link ScheduledExecutorService} that uses the
+   * fake clock ticker for testing.
+   */
+  public ScheduledExecutorService getScheduledExecutorService() {
+    return scheduledExecutorService;
+  }
+
+  /**
+   * Provides a stopwatch instance that uses the fake clock ticker.
+   */
+  public Supplier<Stopwatch> getStopwatchSupplier() {
+    return stopwatchSupplier;
+  }
+
+  /**
    * Run all due tasks.
    *
    * @return the number of tasks run by this call
@@ -187,12 +221,34 @@ public final class FakeClock {
       if (task == null || task.dueTimeNanos > currentTimeNanos) {
         break;
       }
-      tasks.poll();
-      task.command.run();
-      task.complete();
-      count++;
+      if (tasks.remove(task)) {
+        task.command.run();
+        task.complete();
+        count++;
+      }
     }
     return count;
+  }
+
+  /**
+   * Return all due tasks.
+   */
+  public Collection<ScheduledTask> getDueTasks() {
+    ArrayList<ScheduledTask> result = new ArrayList<ScheduledTask>();
+    for (ScheduledTask task : tasks) {
+      if (task.dueTimeNanos > currentTimeNanos) {
+        continue;
+      }
+      result.add(task);
+    }
+    return result;
+  }
+
+  /**
+   * Return all unrun tasks.
+   */
+  public Collection<ScheduledTask> getPendingTasks() {
+    return new ArrayList<ScheduledTask>(tasks);
   }
 
   /**

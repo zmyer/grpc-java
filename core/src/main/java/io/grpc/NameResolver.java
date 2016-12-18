@@ -46,13 +46,15 @@ import javax.annotation.concurrent.ThreadSafe;
  * <p>The addresses and attributes of a target may be changed over time, thus the caller registers a
  * {@link Listener} to receive continuous updates.
  */
-@ExperimentalApi
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1770")
 @ThreadSafe
 public abstract class NameResolver {
   /**
    * Returns the authority, which is also the name of the service.
    *
-   * <p>An implementation must generate it locally and must keep it unchanged.
+   * <p>An implementation must generate it locally and <string>must</strong> keep it
+   * unchanged. {@code NameResolver}s created from the same factory with the same argument must
+   * return the same authority.
    */
   public abstract String getServiceAuthority();
 
@@ -74,7 +76,7 @@ public abstract class NameResolver {
    * <p>Can only be called after {@link #start} has been called.
    *
    * <p>This is only a hint. Implementation takes it as a signal but may not start resolution
-   * immediately.
+   * immediately. It should never throw.
    *
    * <p>The default implementation is no-op.
    */
@@ -116,14 +118,15 @@ public abstract class NameResolver {
   @ThreadSafe
   public interface Listener {
     /**
-     * Handles updates on resolved addresses and config.
+     * Handles updates on resolved addresses and attributes.
      *
      * <p>Implementations will not modify the given {@code servers}.
      *
-     * @param servers the resolved server addresses. An empty list will trigger {@link #onError}
-     * @param config extra configuration data from naming system
+     * @param servers the resolved server groups, containing {@link ResolvedServerInfo} objects. An
+     *                empty list will trigger {@link #onError}
+     * @param attributes extra metadata from naming system
      */
-    void onUpdate(List<ResolvedServerInfo> servers, Attributes config);
+    void onUpdate(List<ResolvedServerInfoGroup> servers, Attributes attributes);
 
     /**
      * Handles an error from the resolver.

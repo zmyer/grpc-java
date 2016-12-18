@@ -33,8 +33,9 @@ package io.grpc.netty;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
 
-import io.grpc.internal.ClientTransportFactory;
+import io.grpc.netty.InternalNettyChannelBuilder.OverrideAuthorityChecker;
 import io.grpc.netty.ProtocolNegotiators.TlsNegotiator;
 import io.netty.handler.ssl.SslContext;
 
@@ -57,14 +58,14 @@ public class NettyChannelBuilderTest {
 
   @Test
   public void overrideAllowsInvalidAuthority() {
-    NettyChannelBuilder builder = new NettyChannelBuilder(new SocketAddress(){}) {
+    NettyChannelBuilder builder = new NettyChannelBuilder(new SocketAddress(){});
+    InternalNettyChannelBuilder.overrideAuthorityChecker(builder, new OverrideAuthorityChecker() {
       @Override
-      protected String checkAuthority(String authority) {
+      public String checkAuthority(String authority) {
         return authority;
       }
-    };
-
-    ClientTransportFactory factory = builder.overrideAuthority("[invalidauthority")
+    });
+    builder.overrideAuthority("[invalidauthority")
         .negotiationType(NegotiationType.PLAINTEXT)
         .buildTransportFactory();
   }
@@ -76,7 +77,7 @@ public class NettyChannelBuilderTest {
 
     NettyChannelBuilder builder = new NettyChannelBuilder(new SocketAddress(){});
 
-    ClientTransportFactory factory = builder.overrideAuthority("[invalidauthority")
+    builder.overrideAuthority("[invalidauthority")
         .negotiationType(NegotiationType.PLAINTEXT)
         .buildTransportFactory();
   }
@@ -87,6 +88,23 @@ public class NettyChannelBuilderTest {
     thrown.expectMessage("Invalid host or port");
 
     NettyChannelBuilder.forAddress(new InetSocketAddress("invalid_authority", 1234));
+  }
+
+  @Test
+  public void sslContextCanBeNull() {
+    NettyChannelBuilder builder = new NettyChannelBuilder(new SocketAddress(){});
+    builder.sslContext(null);
+  }
+
+  @Test
+  public void failIfSslContextIsNotClient() {
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("Server SSL context can not be used for client channel");
+
+    SslContext sslContext = mock(SslContext.class);
+
+    NettyChannelBuilder builder = new NettyChannelBuilder(new SocketAddress(){});
+    builder.sslContext(sslContext);
   }
 
   @Test

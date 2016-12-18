@@ -44,8 +44,8 @@ import io.grpc.Status;
  * Utility functions for adapting {@link ServerCallHandler}s to application service implementation,
  * meant to be used by the generated code.
  */
-@ExperimentalApi
-public class ServerCalls {
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1790")
+public final class ServerCalls {
 
   private ServerCalls() {
   }
@@ -127,11 +127,10 @@ public class ServerCalls {
     return new ServerCallHandler<ReqT, RespT>() {
       @Override
       public ServerCall.Listener<ReqT> startCall(
-          MethodDescriptor<ReqT, RespT> methodDescriptor,
-          final ServerCall<RespT> call,
+          final ServerCall<ReqT, RespT> call,
           Metadata headers) {
-        final ServerCallStreamObserverImpl<RespT> responseObserver =
-            new ServerCallStreamObserverImpl<RespT>(call);
+        final ServerCallStreamObserverImpl<ReqT, RespT> responseObserver =
+            new ServerCallStreamObserverImpl<ReqT, RespT>(call);
         // We expect only 1 request, but we ask for 2 requests here so that if a misbehaving client
         // sends more than 1 requests, ServerCall will catch it. Note that disabling auto
         // inbound flow control has no effect on unary calls.
@@ -156,7 +155,7 @@ public class ServerCalls {
                 onReady();
               }
             } else {
-              call.close(Status.INVALID_ARGUMENT.withDescription("Half-closed without a request"),
+              call.close(Status.INTERNAL.withDescription("Half-closed without a request"),
                   new Metadata());
             }
           }
@@ -190,11 +189,10 @@ public class ServerCalls {
     return new ServerCallHandler<ReqT, RespT>() {
       @Override
       public ServerCall.Listener<ReqT> startCall(
-          MethodDescriptor<ReqT, RespT> methodDescriptor,
-          final ServerCall<RespT> call,
+          final ServerCall<ReqT, RespT> call,
           Metadata headers) {
-        final ServerCallStreamObserverImpl<RespT> responseObserver =
-            new ServerCallStreamObserverImpl<RespT>(call);
+        final ServerCallStreamObserverImpl<ReqT, RespT> responseObserver =
+            new ServerCallStreamObserverImpl<ReqT, RespT>(call);
         final StreamObserver<ReqT> requestObserver = method.invoke(responseObserver);
         responseObserver.freeze();
         if (responseObserver.autoFlowControlEnabled) {
@@ -249,9 +247,9 @@ public class ServerCalls {
     StreamObserver<ReqT> invoke(StreamObserver<RespT> responseObserver);
   }
 
-  private static class ServerCallStreamObserverImpl<RespT>
+  private static final class ServerCallStreamObserverImpl<ReqT, RespT>
       extends ServerCallStreamObserver<RespT> {
-    final ServerCall<RespT> call;
+    final ServerCall<ReqT, RespT> call;
     volatile boolean cancelled;
     private boolean frozen;
     private boolean autoFlowControlEnabled = true;
@@ -259,12 +257,22 @@ public class ServerCalls {
     private Runnable onReadyHandler;
     private Runnable onCancelHandler;
 
-    ServerCallStreamObserverImpl(ServerCall<RespT> call) {
+    ServerCallStreamObserverImpl(ServerCall<ReqT, RespT> call) {
       this.call = call;
     }
 
-    private final void freeze() {
+    private void freeze() {
       this.frozen = true;
+    }
+
+    @Override
+    public void setMessageCompression(boolean enable) {
+      call.setMessageCompression(enable);
+    }
+
+    @Override
+    public void setCompression(String compression) {
+      call.setCompression(compression);
     }
 
     @Override
@@ -281,7 +289,11 @@ public class ServerCalls {
 
     @Override
     public void onError(Throwable t) {
-      call.close(Status.fromThrowable(t), new Metadata());
+      Metadata metadata = Status.trailersFromThrowable(t);
+      if (metadata == null) {
+        metadata = new Metadata();
+      }
+      call.close(Status.fromThrowable(t), metadata);
     }
 
     @Override
@@ -360,8 +372,8 @@ public class ServerCalls {
    */
   public static void asyncUnimplementedUnaryCall(MethodDescriptor<?, ?> methodDescriptor,
       StreamObserver<?> responseObserver) {
-    checkNotNull(methodDescriptor);
-    checkNotNull(responseObserver);
+    checkNotNull(methodDescriptor, "methodDescriptor");
+    checkNotNull(responseObserver, "responseObserver");
     responseObserver.onError(Status.UNIMPLEMENTED
         .withDescription(String.format("Method %s is unimplemented",
             methodDescriptor.getFullMethodName()))

@@ -32,6 +32,7 @@
 package io.grpc.netty;
 
 import static com.google.common.base.Charsets.UTF_8;
+import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
 import static io.grpc.netty.Utils.CONTENT_TYPE_GRPC;
 import static io.grpc.netty.Utils.CONTENT_TYPE_HEADER;
 import static io.grpc.netty.Utils.HTTPS;
@@ -41,27 +42,35 @@ import static io.grpc.netty.Utils.TE_HEADER;
 import static io.grpc.netty.Utils.TE_TRAILERS;
 import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_PRIORITY_WEIGHT;
 import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_WINDOW_SIZE;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Matchers.notNull;
-import static org.mockito.Mockito.calls;
-import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import com.google.common.base.Ticker;
+import com.google.common.collect.ImmutableList;
+import com.google.common.io.ByteStreams;
 import com.google.common.util.concurrent.MoreExecutors;
 
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.StatusException;
+import io.grpc.internal.ClientStreamListener;
 import io.grpc.internal.ClientTransport;
 import io.grpc.internal.ClientTransport.PingCallback;
 import io.grpc.internal.GrpcUtil;
+import io.grpc.internal.KeepAliveManager;
+import io.grpc.internal.StatsTraceContext;
+import io.grpc.netty.GrpcHttp2HeadersDecoder.GrpcHttp2ClientHeadersDecoder;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
@@ -73,39 +82,48 @@ import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.Http2Connection;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
-import io.netty.handler.codec.http2.Http2FlowController;
 import io.netty.handler.codec.http2.Http2Headers;
+import io.netty.handler.codec.http2.Http2LocalFlowController;
 import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.Http2Stream;
 import io.netty.util.AsciiString;
 
 import org.junit.Before;
 import org.junit.Ignore;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
+
+import java.io.InputStream;
+import java.util.List;
 
 /**
  * Tests for {@link NettyClientHandler}.
  */
 @RunWith(JUnit4.class)
 public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHandler> {
-
-  // TODO(zhangkun83): mocking concrete classes is not safe. Consider making NettyClientStream an
-  // interface.
-  @Mock
-  private NettyClientStream stream;
+  private NettyClientStream.TransportState streamTransportState;
   private Http2Headers grpcHeaders;
   private long nanoTime; // backs a ticker, for testing ping round-trip time measurement
   private int flowControlWindow = DEFAULT_WINDOW_SIZE;
   private int streamId = 3;
+  private ClientTransportLifecycleManager lifecycleManager;
+  private KeepAliveManager mockKeepAliveManager = null;
+  private List<String> setKeepaliveManagerFor = ImmutableList.of("cancelShouldSucceed",
+      "sendFrameShouldSucceed", "channelShutdownShouldCancelBufferedStreams",
+      "createIncrementsIdsForActualAndBufferdStreams", "dataPingAckIsRecognized");
 
+  @Rule
+  public TestName testNameRule = new TestName();
   @Mock
   private NettyClientTransport.Listener listener;
+  @Mock
+  private ClientStreamListener streamListener;
 
   /**
    * Set up for test.
@@ -113,8 +131,16 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
   @Before
   public void setUp() throws Exception {
     MockitoAnnotations.initMocks(this);
+    lifecycleManager = new ClientTransportLifecycleManager(listener);
+    // This mocks the keepalive manager only for there's in which we verify it. For other tests
+    // it'll be null which will be testing if we behave correctly when it's not present.
+    if (setKeepaliveManagerFor.contains(testNameRule.getMethodName())) {
+      mockKeepAliveManager = mock(KeepAliveManager.class);
+    }
 
-    initChannel();
+    initChannel(new GrpcHttp2ClientHeadersDecoder(GrpcUtil.DEFAULT_MAX_HEADER_LIST_SIZE));
+    streamTransportState = new TransportStateImpl(handler(), DEFAULT_MAX_MESSAGE_SIZE);
+    streamTransportState.setListener(streamListener);
 
     grpcHeaders = new DefaultHttp2Headers()
         .scheme(HTTPS)
@@ -135,15 +161,14 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
     // Force the stream to be buffered.
     receiveMaxConcurrentStreams(0);
     // Create a new stream with id 3.
-    ChannelFuture createFuture = enqueue(new CreateStreamCommand(grpcHeaders, stream));
-    verify(stream).id(eq(3));
-    when(stream.id()).thenReturn(3);
+    ChannelFuture createFuture = enqueue(
+        new CreateStreamCommand(grpcHeaders, streamTransportState));
+    assertEquals(3, streamTransportState.id());
     // Cancel the stream.
     cancelStream(Status.CANCELLED);
 
     assertTrue(createFuture.isSuccess());
-    verify(stream).transportReportStatus(eq(Status.CANCELLED), eq(true),
-        any(Metadata.class));
+    verify(streamListener).closed(eq(Status.CANCELLED), any(Metadata.class));
   }
 
   @Test
@@ -160,6 +185,9 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
 
     verifyWrite().writeRstStream(eq(ctx()), eq(3), eq(Http2Error.CANCEL.code()),
         any(ChannelPromise.class));
+    verify(mockKeepAliveManager, times(1)).onTransportActive(); // onStreamActive
+    verify(mockKeepAliveManager, times(1)).onTransportIdle(); // onStreamClosed
+    verifyNoMoreInteractions(mockKeepAliveManager);
   }
 
   @Test
@@ -221,70 +249,72 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
     createStream();
 
     // Send a frame and verify that it was written.
-    ChannelFuture future = enqueue(new SendGrpcFrameCommand(stream, content(), true));
+    ChannelFuture future = enqueue(new SendGrpcFrameCommand(streamTransportState, content(), true));
 
     assertTrue(future.isSuccess());
     verifyWrite().writeData(eq(ctx()), eq(3), eq(content()), eq(0), eq(true),
         any(ChannelPromise.class));
+    verify(mockKeepAliveManager, times(1)).onTransportActive(); // onStreamActive
+    verifyNoMoreInteractions(mockKeepAliveManager);
   }
 
   @Test
   public void sendForUnknownStreamShouldFail() throws Exception {
-    when(stream.id()).thenReturn(3);
-    ChannelFuture future = enqueue(new SendGrpcFrameCommand(stream, content(), true));
+    ChannelFuture future = enqueue(new SendGrpcFrameCommand(streamTransportState, content(), true));
     assertTrue(future.isDone());
     assertFalse(future.isSuccess());
   }
 
   @Test
-  public void inboundHeadersShouldForwardToStream() throws Exception {
+  public void inboundShouldForwardToStream() throws Exception {
     createStream();
 
     // Read a headers frame first.
     Http2Headers headers = new DefaultHttp2Headers().status(STATUS_OK)
-        .set(CONTENT_TYPE_HEADER, CONTENT_TYPE_GRPC);
+        .set(CONTENT_TYPE_HEADER, CONTENT_TYPE_GRPC)
+        .set(as("magic"), as("value"));
     ByteBuf headersFrame = headersFrame(3, headers);
     channelRead(headersFrame);
-    verify(stream).transportHeadersReceived(headers, false);
-  }
+    ArgumentCaptor<Metadata> captor = ArgumentCaptor.forClass(Metadata.class);
+    verify(streamListener).headersRead(captor.capture());
+    assertEquals("value",
+        captor.getValue().get(Metadata.Key.of("magic", Metadata.ASCII_STRING_MARSHALLER)));
 
-  @Test
-  public void inboundDataShouldForwardToStream() throws Exception {
-    ByteBuf data = content().copy();
-    createStream();
+    streamTransportState.requestMessagesFromDeframer(1);
 
     // Create a data frame and then trigger the handler to read it.
-    // Need to retain to simulate what is done by the stream.
-    ByteBuf frame = dataFrame(3, false).retain();
+    ByteBuf frame = grpcDataFrame(3, false, contentAsArray());
     channelRead(frame);
-    ArgumentCaptor<ByteBuf> captor = ArgumentCaptor.forClass(ByteBuf.class);
-    verify(stream).transportDataReceived(captor.capture(), eq(false));
-    assertTrue(ByteBufUtil.equals(data, captor.getValue()));
+    ArgumentCaptor<InputStream> isCaptor = ArgumentCaptor.forClass(InputStream.class);
+    verify(streamListener).messageRead(isCaptor.capture());
+    assertArrayEquals(ByteBufUtil.getBytes(content()),
+        ByteStreams.toByteArray(isCaptor.getValue()));
+    isCaptor.getValue().close();
   }
 
   @Test
   public void receivedGoAwayShouldCancelBufferedStream() throws Exception {
     // Force the stream to be buffered.
     receiveMaxConcurrentStreams(0);
-    ChannelFuture future = enqueue(new CreateStreamCommand(grpcHeaders, stream));
+    ChannelFuture future = enqueue(new CreateStreamCommand(grpcHeaders, streamTransportState));
     channelRead(goAwayFrame(0));
     assertTrue(future.isDone());
     assertFalse(future.isSuccess());
     Status status = Status.fromThrowable(future.cause());
-    assertEquals(GrpcUtil.Http2Error.NO_ERROR.status(), status);
+    assertEquals(Status.Code.UNAVAILABLE, status.getCode());
+    assertEquals("HTTP/2 error code: NO_ERROR\nReceived Goaway", status.getDescription());
   }
 
   @Test
   public void receivedGoAwayShouldFailUnknownStreams() throws Exception {
-    enqueue(new CreateStreamCommand(grpcHeaders, stream));
+    enqueue(new CreateStreamCommand(grpcHeaders, streamTransportState));
 
     // Read a GOAWAY that indicates our stream was never processed by the server.
     channelRead(goAwayFrame(0, 8 /* Cancel */, Unpooled.copiedBuffer("this is a test", UTF_8)));
     ArgumentCaptor<Status> captor = ArgumentCaptor.forClass(Status.class);
-    verify(stream).transportReportStatus(captor.capture(), eq(false),
-        notNull(Metadata.class));
+    verify(streamListener).closed(captor.capture(), notNull(Metadata.class));
     assertEquals(Status.CANCELLED.getCode(), captor.getValue().getCode());
-    assertEquals("HTTP/2 error code: CANCEL\nthis is a test",
+    assertEquals("HTTP/2 error code: CANCEL\nReceived Goaway\nthis is a test",
         captor.getValue().getDescription());
   }
 
@@ -292,7 +322,7 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
   public void receivedGoAwayShouldFailUnknownBufferedStreams() throws Exception {
     receiveMaxConcurrentStreams(0);
 
-    ChannelFuture future = enqueue(new CreateStreamCommand(grpcHeaders, stream));
+    ChannelFuture future = enqueue(new CreateStreamCommand(grpcHeaders, streamTransportState));
 
     // Read a GOAWAY that indicates our stream was never processed by the server.
     channelRead(goAwayFrame(0, 8 /* Cancel */, Unpooled.copiedBuffer("this is a test", UTF_8)));
@@ -300,7 +330,8 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
     assertFalse(future.isSuccess());
     Status status = Status.fromThrowable(future.cause());
     assertEquals(Status.CANCELLED.getCode(), status.getCode());
-    assertEquals("HTTP/2 error code: CANCEL\nthis is a test", status.getDescription());
+    assertEquals("HTTP/2 error code: CANCEL\nReceived Goaway\nthis is a test",
+        status.getDescription());
   }
 
   @Test
@@ -309,34 +340,35 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
     channelRead(goAwayFrame(0, 8 /* Cancel */, Unpooled.copiedBuffer("this is a test", UTF_8)));
 
     // Now try to create a stream.
-    ChannelFuture future = enqueue(new CreateStreamCommand(grpcHeaders, stream));
+    ChannelFuture future = enqueue(new CreateStreamCommand(grpcHeaders, streamTransportState));
     assertTrue(future.isDone());
     assertFalse(future.isSuccess());
     Status status = Status.fromThrowable(future.cause());
     assertEquals(Status.CANCELLED.getCode(), status.getCode());
-    assertEquals("HTTP/2 error code: CANCEL\nthis is a test", status.getDescription());
+    assertEquals("HTTP/2 error code: CANCEL\nReceived Goaway\nthis is a test",
+        status.getDescription());
   }
 
   @Test
   public void cancelStreamShouldCreateAndThenFailBufferedStream() throws Exception {
     receiveMaxConcurrentStreams(0);
-    enqueue(new CreateStreamCommand(grpcHeaders, stream));
-    verify(stream).id(3);
-    when(stream.id()).thenReturn(3);
+    enqueue(new CreateStreamCommand(grpcHeaders, streamTransportState));
+    assertEquals(3, streamTransportState.id());
     cancelStream(Status.CANCELLED);
-    verify(stream).transportReportStatus(eq(Status.CANCELLED), eq(true),
-        any(Metadata.class));
+    verify(streamListener).closed(eq(Status.CANCELLED), any(Metadata.class));
   }
 
   @Test
   public void channelShutdownShouldCancelBufferedStreams() throws Exception {
     // Force a stream to get added to the pending queue.
     receiveMaxConcurrentStreams(0);
-    ChannelFuture future = enqueue(new CreateStreamCommand(grpcHeaders, stream));
+    ChannelFuture future = enqueue(new CreateStreamCommand(grpcHeaders, streamTransportState));
 
     handler().channelInactive(ctx());
     assertTrue(future.isDone());
     assertFalse(future.isSuccess());
+    verify(mockKeepAliveManager, times(1)).onTransportShutdown(); // channelInactive
+    verifyNoMoreInteractions(mockKeepAliveManager);
   }
 
   @Test
@@ -345,9 +377,7 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
 
     handler().channelInactive(ctx());
     ArgumentCaptor<Status> captor = ArgumentCaptor.forClass(Status.class);
-    InOrder inOrder = inOrder(stream);
-    inOrder.verify(stream, calls(1)).transportReportStatus(captor.capture(), eq(false),
-        notNull(Metadata.class));
+    verify(streamListener).closed(captor.capture(), notNull(Metadata.class));
     assertEquals(Status.UNAVAILABLE.getCode(), captor.getValue().getCode());
   }
 
@@ -358,23 +388,32 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
     setUp();
 
     Http2Stream connectionStream = connection().connectionStream();
-    Http2FlowController localFlowController = connection().local().flowController();
+    Http2LocalFlowController localFlowController = connection().local().flowController();
     int actualInitialWindowSize = localFlowController.initialWindowSize(connectionStream);
     int actualWindowSize = localFlowController.windowSize(connectionStream);
     assertEquals(flowControlWindow, actualWindowSize);
     assertEquals(flowControlWindow, actualInitialWindowSize);
+    assertEquals(1048576, actualWindowSize);
   }
 
   @Test
   public void createIncrementsIdsForActualAndBufferdStreams() throws Exception {
     receiveMaxConcurrentStreams(2);
-    CreateStreamCommand command = new CreateStreamCommand(grpcHeaders, stream);
-    enqueue(command);
-    verify(stream).id(eq(3));
-    enqueue(command);
-    verify(stream).id(eq(5));
-    enqueue(command);
-    verify(stream).id(eq(7));
+    enqueue(new CreateStreamCommand(grpcHeaders, streamTransportState));
+    assertEquals(3, streamTransportState.id());
+
+    streamTransportState = new TransportStateImpl(handler(), DEFAULT_MAX_MESSAGE_SIZE);
+    streamTransportState.setListener(streamListener);
+    enqueue(new CreateStreamCommand(grpcHeaders, streamTransportState));
+    assertEquals(5, streamTransportState.id());
+
+    streamTransportState = new TransportStateImpl(handler(), DEFAULT_MAX_MESSAGE_SIZE);
+    streamTransportState.setListener(streamListener);
+    enqueue(new CreateStreamCommand(grpcHeaders, streamTransportState));
+    assertEquals(7, streamTransportState.id());
+
+    verify(mockKeepAliveManager, times(1)).onTransportActive(); // onStreamActive
+    verifyNoMoreInteractions(mockKeepAliveManager);
   }
 
   @Test
@@ -382,6 +421,7 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
     streamId = Integer.MAX_VALUE;
     setUp();
 
+    assertNull(lifecycleManager.getShutdownStatus());
     // Create the MAX_INT stream.
     ChannelFuture future = createStream();
     assertTrue(future.isSuccess());
@@ -390,6 +430,10 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
     future = createStream();
     assertTrue(future.isDone());
     assertFalse(future.isSuccess());
+    Status status = lifecycleManager.getShutdownStatus();
+    assertNotNull(status);
+    assertTrue("status does not reference 'exhausted': " + status,
+        status.getDescription().contains("exhausted"));
   }
 
   @Test
@@ -447,6 +491,39 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
   }
 
   @Test
+  public void oustandingUserPingShouldNotInteractWithDataPing() throws Exception {
+    createStream();
+    handler().setAutoTuneFlowControl(true);
+
+    PingCallbackImpl callback = new PingCallbackImpl();
+    sendPing(callback);
+    ArgumentCaptor<ByteBuf> captor = ArgumentCaptor.forClass(ByteBuf.class);
+    verifyWrite().writePing(eq(ctx()), eq(false), captor.capture(), any(ChannelPromise.class));
+    ByteBuf payload = captor.getValue();
+    channelRead(grpcDataFrame(3, false, contentAsArray()));
+    long pingData = handler().flowControlPing().payload();
+    ByteBuf buffer = handler().ctx().alloc().buffer(8);
+    buffer.writeLong(pingData);
+    channelRead(pingFrame(true, buffer));
+
+    assertEquals(1, handler().flowControlPing().getPingReturn());
+    assertEquals(0, callback.invocationCount);
+
+    channelRead(pingFrame(true, payload));
+
+    assertEquals(1, handler().flowControlPing().getPingReturn());
+    assertEquals(1, callback.invocationCount);
+  }
+
+  @Override
+  public void dataPingAckIsRecognized() throws Exception {
+    super.dataPingAckIsRecognized();
+    verify(mockKeepAliveManager, times(1)).onTransportActive(); // onStreamActive
+    verify(mockKeepAliveManager, times(2)).onDataReceived(); // onDataRead, onPingAckRead
+    verifyNoMoreInteractions(mockKeepAliveManager);
+  }
+
+  @Test
   public void exceptionCaughtShouldCloseConnection() throws Exception {
     handler().exceptionCaught(ctx(), new RuntimeException("fake exception"));
 
@@ -455,6 +532,11 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
     // Once https://github.com/netty/netty/issues/4316 is resolved, we should also verify that
     // any open streams are closed properly.
     assertFalse(channel().isOpen());
+  }
+
+  @Override
+  protected void makeStream() throws Exception {
+    createStream();
   }
 
   private ChannelFuture sendPing(PingCallback callback) {
@@ -466,18 +548,13 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
     channelRead(serializedSettings);
   }
 
-  private ByteBuf dataFrame(int streamId, boolean endStream) {
-    return dataFrame(streamId, endStream, content());
-  }
-
   private ChannelFuture createStream() throws Exception {
-    ChannelFuture future = enqueue(new CreateStreamCommand(grpcHeaders, stream));
-    when(stream.id()).thenReturn(3);
+    ChannelFuture future = enqueue(new CreateStreamCommand(grpcHeaders, streamTransportState));
     return future;
   }
 
   private ChannelFuture cancelStream(Status status) throws Exception {
-    return enqueue(new CancelClientStreamCommand(stream, status));
+    return enqueue(new CancelClientStreamCommand(streamTransportState, status));
   }
 
   @Override
@@ -496,7 +573,7 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
     };
 
     return NettyClientHandler.newHandler(connection, frameReader(), frameWriter(),
-        new ClientTransportLifecycleManager(listener), flowControlWindow, ticker);
+        lifecycleManager, mockKeepAliveManager, flowControlWindow, ticker);
   }
 
   @Override
@@ -524,6 +601,17 @@ public class NettyClientHandlerTest extends NettyHandlerTestBase<NettyClientHand
     public void onFailure(Throwable cause) {
       invocationCount++;
       this.failureCause = cause;
+    }
+  }
+
+  private static class TransportStateImpl extends NettyClientStream.TransportState {
+    public TransportStateImpl(NettyClientHandler handler, int maxMessageSize) {
+      super(handler, maxMessageSize, StatsTraceContext.NOOP);
+    }
+
+    @Override
+    protected Status statusFromFailedFuture(ChannelFuture f) {
+      return Utils.statusFromThrowable(f.cause());
     }
   }
 }

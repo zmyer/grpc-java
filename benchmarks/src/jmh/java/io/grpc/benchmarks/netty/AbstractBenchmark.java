@@ -41,6 +41,7 @@ import io.grpc.Server;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerServiceDefinition;
+import io.grpc.ServiceDescriptor;
 import io.grpc.Status;
 import io.grpc.benchmarks.ByteBufOutputMarshaller;
 import io.grpc.netty.NegotiationType;
@@ -54,6 +55,7 @@ import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
 import io.netty.channel.local.LocalServerChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.util.concurrent.DefaultThreadFactory;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -63,15 +65,21 @@ import java.net.SocketAddress;
 import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.util.Enumeration;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Abstract base class for Netty end-to-end benchmarks.
  */
 public abstract class AbstractBenchmark {
+
+  private static final Logger logger = Logger.getLogger(AbstractBenchmark.class.getName());
 
   /**
    * Standard message sizes.
@@ -226,7 +234,8 @@ public abstract class AbstractBenchmark {
     }
 
     // Always use a different worker group from the client.
-    serverBuilder.workerEventLoopGroup(new NioEventLoopGroup());
+    ThreadFactory serverThreadFactory = new DefaultThreadFactory("STF pool", true /* daemon */);
+    serverBuilder.workerEventLoopGroup(new NioEventLoopGroup(0, serverThreadFactory));
 
     // Always set connection and stream window size to same value
     serverBuilder.flowControlWindow(windowSize.bytes());
@@ -237,9 +246,13 @@ public abstract class AbstractBenchmark {
 
     // Create buffers of the desired size for requests and responses.
     PooledByteBufAllocator alloc = PooledByteBufAllocator.DEFAULT;
-    request = alloc.buffer(requestSize.bytes());
+    // Use a heap buffer for now, since MessageFramer doesn't know how to directly convert this
+    // into a WritableBuffer
+    // TODO(carl-mastrangelo): convert this into a regular buffer() call.  See
+    // https://github.com/grpc/grpc-java/issues/2062#issuecomment-234646216
+    request = alloc.heapBuffer(requestSize.bytes());
     request.writerIndex(request.capacity() - 1);
-    response = alloc.buffer(responseSize.bytes());
+    response = alloc.heapBuffer(responseSize.bytes());
     response.writerIndex(response.capacity() - 1);
 
     // Simple method that sends and receives NettyByteBuf
@@ -258,13 +271,15 @@ public abstract class AbstractBenchmark {
 
     // Server implementation of unary & streaming methods
     serverBuilder.addService(
-        ServerServiceDefinition.builder("benchmark")
-            .addMethod(unaryMethod,
-                new ServerCallHandler<ByteBuf, ByteBuf>() {
+        ServerServiceDefinition.builder(
+            new ServiceDescriptor("benchmark",
+                unaryMethod,
+                pingPongMethod,
+                flowControlledStreaming))
+            .addMethod(unaryMethod, new ServerCallHandler<ByteBuf, ByteBuf>() {
                   @Override
                   public ServerCall.Listener<ByteBuf> startCall(
-                      MethodDescriptor<ByteBuf, ByteBuf> method,
-                      final ServerCall<ByteBuf> call,
+                      final ServerCall<ByteBuf, ByteBuf> call,
                       Metadata headers) {
                     call.sendHeaders(new Metadata());
                     call.request(1);
@@ -292,12 +307,10 @@ public abstract class AbstractBenchmark {
                     };
                   }
                 })
-            .addMethod(pingPongMethod,
-                new ServerCallHandler<ByteBuf, ByteBuf>() {
+            .addMethod(pingPongMethod, new ServerCallHandler<ByteBuf, ByteBuf>() {
                   @Override
                   public ServerCall.Listener<ByteBuf> startCall(
-                      MethodDescriptor<ByteBuf, ByteBuf> method,
-                      final ServerCall<ByteBuf> call,
+                      final ServerCall<ByteBuf, ByteBuf> call,
                       Metadata headers) {
                     call.sendHeaders(new Metadata());
                     call.request(1);
@@ -327,12 +340,10 @@ public abstract class AbstractBenchmark {
                     };
                   }
                 })
-            .addMethod(flowControlledStreaming,
-                new ServerCallHandler<ByteBuf, ByteBuf>() {
+            .addMethod(flowControlledStreaming, new ServerCallHandler<ByteBuf, ByteBuf>() {
                   @Override
                   public ServerCall.Listener<ByteBuf> startCall(
-                      MethodDescriptor<ByteBuf, ByteBuf> method,
-                      final ServerCall<ByteBuf> call,
+                      final ServerCall<ByteBuf, ByteBuf> call,
                       Metadata headers) {
                     call.sendHeaders(new Metadata());
                     call.request(1);
@@ -377,10 +388,11 @@ public abstract class AbstractBenchmark {
     server = serverBuilder.build();
     server.start();
     channels = new ManagedChannel[channelCount];
+    ThreadFactory clientThreadFactory = new DefaultThreadFactory("CTF pool", true /* daemon */);
     for (int i = 0; i < channelCount; i++) {
       // Use a dedicated event-loop for each channel
       channels[i] = channelBuilder
-          .eventLoopGroup(new NioEventLoopGroup(1))
+          .eventLoopGroup(new NioEventLoopGroup(1, clientThreadFactory))
           .build();
     }
   }
@@ -426,35 +438,44 @@ public abstract class AbstractBenchmark {
    * {@code done.get()} is true. Each completed call will increment the counter by the specified
    * delta which benchmarks can use to measure messages per second or bandwidth.
    */
-  protected void startStreamingCalls(int callsPerChannel,
-                                     final AtomicLong counter,
-                                     final AtomicBoolean done,
-                                     final long counterDelta) {
+  protected CountDownLatch startStreamingCalls(int callsPerChannel, final AtomicLong counter,
+      final AtomicBoolean record, final AtomicBoolean done, final long counterDelta) {
+    final CountDownLatch latch = new CountDownLatch(callsPerChannel * channels.length);
     for (final ManagedChannel channel : channels) {
       for (int i = 0; i < callsPerChannel; i++) {
         final ClientCall<ByteBuf, ByteBuf> streamingCall =
             channel.newCall(pingPongMethod, CALL_OPTIONS);
         final AtomicReference<StreamObserver<ByteBuf>> requestObserverRef =
             new AtomicReference<StreamObserver<ByteBuf>>();
+        final AtomicBoolean ignoreMessages = new AtomicBoolean();
         StreamObserver<ByteBuf> requestObserver = ClientCalls.asyncBidiStreamingCall(
             streamingCall,
             new StreamObserver<ByteBuf>() {
               @Override
               public void onNext(ByteBuf value) {
-                if (!done.get()) {
-                  counter.addAndGet(counterDelta);
-                  requestObserverRef.get().onNext(request.slice());
-                  streamingCall.request(1);
+                if (done.get()) {
+                  if (!ignoreMessages.getAndSet(true)) {
+                    requestObserverRef.get().onCompleted();
+                  }
+                  return;
                 }
+                requestObserverRef.get().onNext(request.slice());
+                if (record.get()) {
+                  counter.addAndGet(counterDelta);
+                }
+                // request is called automatically because the observer implicitly has auto
+                // inbound flow control
               }
 
               @Override
               public void onError(Throwable t) {
-                done.set(true);
+                logger.log(Level.WARNING, "call error", t);
+                latch.countDown();
               }
 
               @Override
               public void onCompleted() {
+                latch.countDown();
               }
             });
         requestObserverRef.set(requestObserver);
@@ -462,6 +483,7 @@ public abstract class AbstractBenchmark {
         requestObserver.onNext(request.slice());
       }
     }
+    return latch;
   }
 
   /**
@@ -469,50 +491,76 @@ public abstract class AbstractBenchmark {
    * {@code done.get()} is true. Each completed call will increment the counter by the specified
    * delta which benchmarks can use to measure messages per second or bandwidth.
    */
-  protected void startFlowControlledStreamingCalls(int callsPerChannel,
-                                                   final AtomicLong counter,
-                                                   final AtomicBoolean done,
-                                                   final long counterDelta) {
+  protected CountDownLatch startFlowControlledStreamingCalls(int callsPerChannel,
+      final AtomicLong counter, final AtomicBoolean record, final AtomicBoolean done,
+      final long counterDelta) {
+    final CountDownLatch latch = new CountDownLatch(callsPerChannel * channels.length);
     for (final ManagedChannel channel : channels) {
       for (int i = 0; i < callsPerChannel; i++) {
         final ClientCall<ByteBuf, ByteBuf> streamingCall =
             channel.newCall(flowControlledStreaming, CALL_OPTIONS);
         final AtomicReference<StreamObserver<ByteBuf>> requestObserverRef =
             new AtomicReference<StreamObserver<ByteBuf>>();
+        final AtomicBoolean ignoreMessages = new AtomicBoolean();
         StreamObserver<ByteBuf> requestObserver = ClientCalls.asyncBidiStreamingCall(
             streamingCall,
             new StreamObserver<ByteBuf>() {
               @Override
               public void onNext(ByteBuf value) {
-                if (!done.get()) {
-                  counter.addAndGet(counterDelta);
-                  streamingCall.request(1);
+                StreamObserver<ByteBuf> obs = requestObserverRef.get();
+                if (done.get()) {
+                  if (!ignoreMessages.getAndSet(true)) {
+                    obs.onCompleted();
+                  }
+                  return;
                 }
+                if (record.get()) {
+                  counter.addAndGet(counterDelta);
+                }
+                // request is called automatically because the observer implicitly has auto
+                // inbound flow control
               }
 
               @Override
               public void onError(Throwable t) {
-                done.set(true);
+                logger.log(Level.WARNING, "call error", t);
+                latch.countDown();
               }
 
               @Override
               public void onCompleted() {
+                latch.countDown();
               }
             });
         requestObserverRef.set(requestObserver);
+
+        // Add some outstanding requests to ensure the server is filling the connection
+        streamingCall.request(5);
         requestObserver.onNext(request.slice());
       }
     }
+    return latch;
   }
 
   /**
    * Shutdown all the client channels and then shutdown the server.
    */
   protected void teardown() throws Exception {
+    logger.fine("shutting down channels");
     for (ManagedChannel channel : channels) {
       channel.shutdown();
     }
-    server.shutdown().awaitTermination(5, TimeUnit.SECONDS);
+    logger.fine("shutting down server");
+    server.shutdown();
+    if (!server.awaitTermination(5, TimeUnit.SECONDS)) {
+      logger.warning("Failed to shutdown server");
+    }
+    logger.fine("server shut down");
+    for (ManagedChannel channel : channels) {
+      if (!channel.awaitTermination(1, TimeUnit.SECONDS)) {
+        logger.warning("Failed to shutdown client");
+      }
+    }
+    logger.fine("channels shut down");
   }
-
 }

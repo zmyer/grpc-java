@@ -43,7 +43,6 @@ import io.grpc.Decompressor;
 
 import java.io.InputStream;
 
-import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 
 /**
@@ -51,12 +50,14 @@ import javax.annotation.concurrent.GuardedBy;
  *
  * @param <IdT> type of the unique identifier of this stream.
  */
-public abstract class AbstractStream<IdT> implements Stream {
+public abstract class AbstractStream implements Stream {
   /**
    * The default number of queued bytes for a given stream, below which
    * {@link StreamListener#onReady()} will be called.
    */
   public static final int DEFAULT_ONREADY_THRESHOLD = 32 * 1024;
+
+  public static final int ABSENT_ID = -1;
 
   /**
    * Indicates the phase of the GRPC stream in one direction.
@@ -130,9 +131,11 @@ public abstract class AbstractStream<IdT> implements Stream {
     }
   }
 
-  AbstractStream(WritableBufferAllocator bufferAllocator, int maxMessageSize) {
-    framer = new MessageFramer(new FramerSink(), bufferAllocator);
-    deframer = new MessageDeframer(new DeframerListener(), Codec.Identity.NONE, maxMessageSize);
+  AbstractStream(WritableBufferAllocator bufferAllocator, int maxMessageSize,
+      StatsTraceContext statsTraceCtx) {
+    framer = new MessageFramer(new FramerSink(), bufferAllocator, statsTraceCtx);
+    deframer = new MessageDeframer(new DeframerListener(), Codec.Identity.NONE, maxMessageSize,
+        statsTraceCtx);
   }
 
   @VisibleForTesting
@@ -147,12 +150,11 @@ public abstract class AbstractStream<IdT> implements Stream {
   protected abstract StreamListener listener();
 
   /**
-   * Returns the internal ID for this stream. Note that ID can be {@code null} for client streams
-   * as the transport may defer creating the stream to the remote side until it has a payload or
-   * metadata to send.
+   * Returns the internal ID for this stream. Note that ID can be {@link #ABSENT_ID} for client
+   * streams as the transport may defer creating the stream to the remote side until it has a
+   * payload or metadata to send.
    */
-  @Nullable
-  public abstract IdT id();
+  public abstract int id();
 
   /**
    * The number of queued bytes for a given stream, below which {@link StreamListener#onReady()}
@@ -166,7 +168,7 @@ public abstract class AbstractStream<IdT> implements Stream {
 
   @Override
   public void writeMessage(InputStream message) {
-    checkNotNull(message);
+    checkNotNull(message, "message");
     outboundPhase(Phase.MESSAGE);
     if (!framer.isClosed()) {
       framer.writePayload(message);
@@ -210,7 +212,7 @@ public abstract class AbstractStream<IdT> implements Stream {
    * Frees any resources associated with this stream. Subclass implementations must call this
    * version.
    *
-   * <p> NOTE: Can be called by both the transport thread and the application thread. Transport
+   * <p>NOTE: Can be called by both the transport thread and the application thread. Transport
    * threads need to dispose when the remote side has terminated the stream. Application threads
    * will dispose when the application decides to close the stream as part of normal processing.
    */

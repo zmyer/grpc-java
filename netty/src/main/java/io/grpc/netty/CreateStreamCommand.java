@@ -39,17 +39,17 @@ import io.netty.handler.codec.http2.Http2Headers;
  * A command to create a new stream. This is created by {@link NettyClientStream} and passed to the
  * {@link NettyClientHandler} for processing in the Channel thread.
  */
-class CreateStreamCommand {
+class CreateStreamCommand extends WriteQueue.AbstractQueuedCommand {
   private final Http2Headers headers;
-  private final NettyClientStream stream;
+  private final NettyClientStream.TransportState stream;
 
   CreateStreamCommand(Http2Headers headers,
-                      NettyClientStream stream) {
+                      NettyClientStream.TransportState stream) {
     this.stream = Preconditions.checkNotNull(stream, "stream");
     this.headers = Preconditions.checkNotNull(headers, "headers");
   }
 
-  NettyClientStream stream() {
+  NettyClientStream.TransportState stream() {
     return stream;
   }
 

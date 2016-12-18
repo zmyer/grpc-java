@@ -56,8 +56,6 @@ import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
-import java.io.InputStream;
-
 /**
  * Test for {@link AbstractClientStream}.  This class tries to test functionality in
  * AbstractClientStream, but not in any super classes.
@@ -85,8 +83,8 @@ public class AbstractClientStreamTest {
   @Test
   public void cancel_doNotAcceptOk() {
     for (Code code : Code.values()) {
-      ClientStreamListener listener = new BaseClientStreamListener();
-      AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator);
+      ClientStreamListener listener = new NoopClientStreamListener();
+      AbstractClientStream stream = new BaseAbstractClientStream(allocator);
       stream.start(listener);
       if (code != Code.OK) {
         stream.cancel(Status.fromCodeValue(code.value()));
@@ -103,8 +101,8 @@ public class AbstractClientStreamTest {
 
   @Test
   public void cancel_failsOnNull() {
-    ClientStreamListener listener = new BaseClientStreamListener();
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator);
+    ClientStreamListener listener = new NoopClientStreamListener();
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
     stream.start(listener);
     thrown.expect(NullPointerException.class);
 
@@ -113,7 +111,7 @@ public class AbstractClientStreamTest {
 
   @Test
   public void cancel_notifiesOnlyOnce() {
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator) {
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator) {
       @Override
       protected void sendCancel(Status errorStatus) {
         transportReportStatus(errorStatus, true/*stop delivery*/, new Metadata());
@@ -128,7 +126,7 @@ public class AbstractClientStreamTest {
 
   @Test
   public void startFailsOnNullListener() {
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator);
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
 
     thrown.expect(NullPointerException.class);
 
@@ -137,7 +135,7 @@ public class AbstractClientStreamTest {
 
   @Test
   public void cantCallStartTwice() {
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator);
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
     stream.start(mockListener);
     thrown.expect(IllegalStateException.class);
 
@@ -146,7 +144,7 @@ public class AbstractClientStreamTest {
 
   @Test
   public void deframeFailed_notifiesListener() {
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator) {
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator) {
       @Override
       protected void sendCancel(Status errorStatus) {
         transportReportStatus(errorStatus, true/*stop delivery*/, new Metadata());
@@ -162,8 +160,8 @@ public class AbstractClientStreamTest {
 
   @Test
   public void inboundDataReceived_failsOnNullFrame() {
-    ClientStreamListener listener = new BaseClientStreamListener();
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator);
+    ClientStreamListener listener = new NoopClientStreamListener();
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
     stream.start(listener);
     thrown.expect(NullPointerException.class);
 
@@ -172,7 +170,7 @@ public class AbstractClientStreamTest {
 
   @Test
   public void inboundDataReceived_failsOnNoHeaders() {
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator);
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
     stream.start(mockListener);
     stream.inboundPhase(Phase.HEADERS);
 
@@ -184,7 +182,7 @@ public class AbstractClientStreamTest {
 
   @Test
   public void inboundHeadersReceived_notifiesListener() {
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator);
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
     stream.start(mockListener);
     Metadata headers = new Metadata();
 
@@ -194,7 +192,7 @@ public class AbstractClientStreamTest {
 
   @Test
   public void inboundHeadersReceived_failsOnPhaseStatus() {
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator);
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
     stream.start(mockListener);
     Metadata headers = new Metadata();
     stream.inboundPhase(Phase.STATUS);
@@ -206,7 +204,7 @@ public class AbstractClientStreamTest {
 
   @Test
   public void inboundHeadersReceived_succeedsOnPhaseMessage() {
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator);
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
     stream.start(mockListener);
     Metadata headers = new Metadata();
     stream.inboundPhase(Phase.MESSAGE);
@@ -218,7 +216,7 @@ public class AbstractClientStreamTest {
 
   @Test
   public void inboundHeadersReceived_acceptsGzipEncoding() {
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator);
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
     stream.start(mockListener);
     Metadata headers = new Metadata();
     headers.put(GrpcUtil.MESSAGE_ENCODING_KEY, new Codec.Gzip().getMessageEncoding());
@@ -229,7 +227,7 @@ public class AbstractClientStreamTest {
 
   @Test
   public void inboundHeadersReceived_acceptsIdentityEncoding() {
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator);
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
     stream.start(mockListener);
     Metadata headers = new Metadata();
     headers.put(GrpcUtil.MESSAGE_ENCODING_KEY, Codec.Identity.NONE.getMessageEncoding());
@@ -240,7 +238,7 @@ public class AbstractClientStreamTest {
 
   @Test
   public void rstStreamClosesStream() {
-    AbstractClientStream<Integer> stream = new BaseAbstractClientStream<Integer>(allocator);
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
     stream.start(mockListener);
     // The application will call request when waiting for a message, which will in turn call this
     // on the transport thread.
@@ -257,9 +255,9 @@ public class AbstractClientStreamTest {
   /**
    * No-op base class for testing.
    */
-  private static class BaseAbstractClientStream<T> extends AbstractClientStream<T> {
+  private static class BaseAbstractClientStream extends AbstractClientStream {
     protected BaseAbstractClientStream(WritableBufferAllocator allocator) {
-      super(allocator, DEFAULT_MAX_MESSAGE_SIZE);
+      super(allocator, DEFAULT_MAX_MESSAGE_SIZE, StatsTraceContext.NOOP);
     }
 
     @Override
@@ -275,28 +273,11 @@ public class AbstractClientStreamTest {
     protected void sendCancel(Status reason) {}
 
     @Override
-    public T id() {
-      return null;
+    public int id() {
+      return ABSENT_ID;
     }
 
     @Override
     protected void returnProcessedBytes(int processedBytes) {}
-  }
-
-  /**
-   * No-op base class for testing.
-   */
-  static class BaseClientStreamListener implements ClientStreamListener {
-    @Override
-    public void messageRead(InputStream message) {}
-
-    @Override
-    public void onReady() {}
-
-    @Override
-    public void headersRead(Metadata headers) {}
-
-    @Override
-    public void closed(Status status, Metadata trailers) {}
   }
 }

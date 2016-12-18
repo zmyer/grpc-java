@@ -31,6 +31,8 @@
 
 package io.grpc.stub;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.AbstractFuture;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -41,6 +43,8 @@ import io.grpc.ClientCall;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
+import io.grpc.StatusException;
+import io.grpc.StatusRuntimeException;
 
 import java.util.Iterator;
 import java.util.NoSuchElementException;
@@ -60,7 +64,7 @@ import javax.annotation.Nullable;
  * between utilities in this class and the potential signatures in a generated stub class so
  * that the runtime can vary behavior without requiring regeneration of the stub.
  */
-public class ClientCalls {
+public final class ClientCalls {
   private static final Logger log = Logger.getLogger(ClientCalls.class.getName());
 
   // Prevent instantiation
@@ -113,7 +117,7 @@ public class ClientCalls {
     try {
       return getUnchecked(futureUnaryCall(call, param));
     } catch (Throwable t) {
-      call.cancel();
+      call.cancel(null, t);
       throw t instanceof RuntimeException ? (RuntimeException) t : new RuntimeException(t);
     }
   }
@@ -139,7 +143,7 @@ public class ClientCalls {
       }
       return getUnchecked(responseFuture);
     } catch (Throwable t) {
-      call.cancel();
+      call.cancel(null, t);
       throw t instanceof RuntimeException ? (RuntimeException) t : new RuntimeException(t);
     }
   }
@@ -204,15 +208,39 @@ public class ClientCalls {
       Thread.currentThread().interrupt();
       throw Status.CANCELLED.withCause(e).asRuntimeException();
     } catch (ExecutionException e) {
-      throw Status.fromThrowable(e).asRuntimeException();
+      throw toStatusRuntimeException(e);
     }
+  }
+
+  /**
+   * Wraps the given {@link Throwable} in a {@link StatusRuntimeException}. If it contains an
+   * embedded {@link StatusException} or {@link StatusRuntimeException}, the returned exception will
+   * contain the embedded trailers and status, with the given exception as the cause. Otherwise, an
+   * exception will be generated from an {@link Status#UNKNOWN} status.
+   */
+  private static StatusRuntimeException toStatusRuntimeException(Throwable t) {
+    Throwable cause = checkNotNull(t, "t");
+    while (cause != null) {
+      // If we have an embedded status, use it and replace the cause
+      if (cause instanceof StatusException) {
+        StatusException se = (StatusException) cause;
+        return new StatusRuntimeException(se.getStatus(), se.getTrailers());
+      } else if (cause instanceof StatusRuntimeException) {
+        StatusRuntimeException se = (StatusRuntimeException) cause;
+        return new StatusRuntimeException(se.getStatus(), se.getTrailers());
+      }
+      cause = cause.getCause();
+    }
+    return Status.UNKNOWN.withCause(t).asRuntimeException();
   }
 
   private static <ReqT, RespT> void asyncUnaryRequestCall(
       ClientCall<ReqT, RespT> call, ReqT param, StreamObserver<RespT> responseObserver,
       boolean streamingResponse) {
     asyncUnaryRequestCall(call, param,
-        new StreamObserverToCallListenerAdapter<RespT>(call, responseObserver, streamingResponse),
+        new StreamObserverToCallListenerAdapter<ReqT, RespT>(call, responseObserver,
+            new CallToStreamObserverAdapter<ReqT>(call),
+            streamingResponse),
         streamingResponse);
   }
 
@@ -226,7 +254,7 @@ public class ClientCalls {
       call.sendMessage(param);
       call.halfClose();
     } catch (Throwable t) {
-      call.cancel();
+      call.cancel(null, t);
       throw t instanceof RuntimeException ? (RuntimeException) t : new RuntimeException(t);
     }
   }
@@ -234,9 +262,10 @@ public class ClientCalls {
   private static <ReqT, RespT> StreamObserver<ReqT> asyncStreamingRequestCall(
       ClientCall<ReqT, RespT> call, StreamObserver<RespT> responseObserver,
       boolean streamingResponse) {
-    startCall(call, new StreamObserverToCallListenerAdapter<RespT>(
-        call, responseObserver, streamingResponse), streamingResponse);
-    return new CallToStreamObserverAdapter<ReqT>(call);
+    CallToStreamObserverAdapter<ReqT> adapter = new CallToStreamObserverAdapter<ReqT>(call);
+    startCall(call, new StreamObserverToCallListenerAdapter<ReqT, RespT>(
+        call, responseObserver, adapter, streamingResponse), streamingResponse);
+    return adapter;
   }
 
   private static <ReqT, RespT> void startCall(ClientCall<ReqT, RespT> call,
@@ -251,11 +280,18 @@ public class ClientCalls {
     }
   }
 
-  private static class CallToStreamObserverAdapter<T> implements StreamObserver<T> {
+  private static class CallToStreamObserverAdapter<T> extends ClientCallStreamObserver<T> {
+    private boolean frozen;
     private final ClientCall<T, ?> call;
+    private Runnable onReadyHandler;
+    private boolean autoFlowControlEnabled = true;
 
     public CallToStreamObserverAdapter(ClientCall<T, ?> call) {
       this.call = call;
+    }
+
+    private void freeze() {
+      this.frozen = true;
     }
 
     @Override
@@ -265,28 +301,70 @@ public class ClientCalls {
 
     @Override
     public void onError(Throwable t) {
-      // TODO(ejona86): log?
-      call.cancel();
+      call.cancel("Cancelled by client with StreamObserver.onError()", t);
     }
 
     @Override
     public void onCompleted() {
       call.halfClose();
     }
+
+    @Override
+    public boolean isReady() {
+      return call.isReady();
+    }
+
+    @Override
+    public void setOnReadyHandler(Runnable onReadyHandler) {
+      if (frozen) {
+        throw new IllegalStateException("Cannot alter onReadyHandler after call started");
+      }
+      this.onReadyHandler = onReadyHandler;
+    }
+
+    @Override
+    public void disableAutoInboundFlowControl() {
+      if (frozen) {
+        throw new IllegalStateException("Cannot disable auto flow control call started");
+      }
+      autoFlowControlEnabled = false;
+    }
+
+    @Override
+    public void request(int count) {
+      call.request(count);
+    }
+
+    @Override
+    public void setMessageCompression(boolean enable) {
+      call.setMessageCompression(enable);
+    }
   }
 
-  private static class StreamObserverToCallListenerAdapter<RespT>
+  private static class StreamObserverToCallListenerAdapter<ReqT, RespT>
       extends ClientCall.Listener<RespT> {
-    private final ClientCall<?, RespT> call;
+    private final ClientCall<ReqT, RespT> call;
     private final StreamObserver<RespT> observer;
+    private final CallToStreamObserverAdapter<ReqT> adapter;
     private final boolean streamingResponse;
     private boolean firstResponseReceived;
 
-    public StreamObserverToCallListenerAdapter(
-        ClientCall<?, RespT> call, StreamObserver<RespT> observer, boolean streamingResponse) {
+    StreamObserverToCallListenerAdapter(
+        ClientCall<ReqT, RespT> call,
+        StreamObserver<RespT> observer,
+        CallToStreamObserverAdapter<ReqT> adapter,
+        boolean streamingResponse) {
       this.call = call;
       this.observer = observer;
       this.streamingResponse = streamingResponse;
+      this.adapter = adapter;
+      if (observer instanceof ClientResponseObserver) {
+        @SuppressWarnings("unchecked")
+        ClientResponseObserver<ReqT, RespT> clientResponseObserver =
+            (ClientResponseObserver<ReqT, RespT>) observer;
+        clientResponseObserver.beforeStart(adapter);
+      }
+      adapter.freeze();
     }
 
     @Override
@@ -303,7 +381,7 @@ public class ClientCalls {
       firstResponseReceived = true;
       observer.onNext(message);
 
-      if (streamingResponse) {
+      if (streamingResponse && adapter.autoFlowControlEnabled) {
         // Request delivery of the next inbound message.
         call.request(1);
       }
@@ -314,7 +392,14 @@ public class ClientCalls {
       if (status.isOk()) {
         observer.onCompleted();
       } else {
-        observer.onError(status.asRuntimeException());
+        observer.onError(status.asRuntimeException(trailers));
+      }
+    }
+
+    @Override
+    public void onReady() {
+      if (adapter.onReadyHandler != null) {
+        adapter.onReadyHandler.run();
       }
     }
   }
@@ -350,11 +435,11 @@ public class ClientCalls {
           // No value received so mark the future as an error
           responseFuture.setException(
               Status.INTERNAL.withDescription("No value received for unary call")
-                  .asRuntimeException());
+                  .asRuntimeException(trailers));
         }
         responseFuture.set(value);
       } else {
-        responseFuture.setException(status.asRuntimeException());
+        responseFuture.setException(status.asRuntimeException(trailers));
       }
     }
   }
@@ -368,7 +453,7 @@ public class ClientCalls {
 
     @Override
     protected void interruptTask() {
-      call.cancel();
+      call.cancel("GrpcFuture was cancelled", null);
     }
 
     @Override
@@ -438,8 +523,10 @@ public class ClientCalls {
           throw Status.CANCELLED.withCause(ie).asRuntimeException();
         }
       }
-      if (last instanceof Status) {
-        throw ((Status) last).asRuntimeException();
+      if (last instanceof StatusRuntimeException) {
+        // Rethrow the exception with a new stacktrace.
+        StatusRuntimeException e = (StatusRuntimeException) last;
+        throw e.getStatus().asRuntimeException(e.getTrailers());
       }
       return last != this;
     }
@@ -483,7 +570,7 @@ public class ClientCalls {
         if (status.isOk()) {
           buffer.add(BlockingResponseStream.this);
         } else {
-          buffer.add(status);
+          buffer.add(status.asRuntimeException(trailers));
         }
         done = true;
       }

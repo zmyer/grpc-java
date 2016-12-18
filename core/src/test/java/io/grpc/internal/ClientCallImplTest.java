@@ -31,7 +31,8 @@
 
 package io.grpc.internal;
 
-import static io.grpc.internal.GrpcUtil.ACCEPT_ENCODING_SPLITER;
+import static com.google.common.truth.Truth.assertThat;
+import static io.grpc.internal.GrpcUtil.ACCEPT_ENCODING_SPLITTER;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -41,6 +42,8 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.eq;
+import static org.mockito.Matchers.same;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
@@ -48,6 +51,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyZeroInteractions;
 import static org.mockito.Mockito.when;
 
+import com.google.census.CensusContext;
+import com.google.census.RpcConstants;
+import com.google.census.TagValue;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
@@ -56,6 +62,7 @@ import io.grpc.CallOptions;
 import io.grpc.ClientCall;
 import io.grpc.Codec;
 import io.grpc.Context;
+import io.grpc.Deadline;
 import io.grpc.Decompressor;
 import io.grpc.DecompressorRegistry;
 import io.grpc.Metadata;
@@ -64,6 +71,8 @@ import io.grpc.MethodDescriptor.Marshaller;
 import io.grpc.MethodDescriptor.MethodType;
 import io.grpc.Status;
 import io.grpc.internal.ClientCallImpl.ClientTransportProvider;
+import io.grpc.internal.testing.CensusTestUtils.FakeCensusContextFactory;
+import io.grpc.internal.testing.CensusTestUtils;
 
 import org.junit.After;
 import org.junit.Before;
@@ -72,6 +81,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
+import org.mockito.Matchers;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
@@ -79,8 +89,11 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Set;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -99,14 +112,22 @@ public class ClientCallImplTest {
 
   private final FakeClock fakeClock = new FakeClock();
   private final ScheduledExecutorService deadlineCancellationExecutor =
-      fakeClock.scheduledExecutorService;
+      fakeClock.getScheduledExecutorService();
   private final DecompressorRegistry decompressorRegistry =
-      DecompressorRegistry.getDefaultInstance();
+      DecompressorRegistry.getDefaultInstance().with(new Codec.Gzip(), true);
   private final MethodDescriptor<Void, Void> method = MethodDescriptor.create(
       MethodType.UNARY,
       "service/method",
       new TestMarshaller<Void>(),
       new TestMarshaller<Void>());
+
+  private final FakeCensusContextFactory censusCtxFactory = new FakeCensusContextFactory();
+  private final CensusContext parentCensusContext = censusCtxFactory.getDefault().with(
+      CensusTestUtils.EXTRA_TAG, new TagValue("extra-tag-value"));
+  private final StatsTraceContext statsTraceCtx = StatsTraceContext.newClientContextForTesting(
+      method.getFullMethodName(), censusCtxFactory, parentCensusContext,
+      fakeClock.getStopwatchSupplier());
+  private final CensusContext censusCtx = censusCtxFactory.contexts.poll();
 
   @Mock private ClientStreamListener streamListener;
   @Mock private ClientTransport clientTransport;
@@ -133,10 +154,10 @@ public class ClientCallImplTest {
   @Before
   public void setUp() {
     MockitoAnnotations.initMocks(this);
+    assertNotNull(censusCtx);
     when(provider.get(any(CallOptions.class))).thenReturn(transport);
-    when(transport.newStream(any(MethodDescriptor.class), any(Metadata.class))).thenReturn(stream);
-
-    decompressorRegistry.register(new Codec.Gzip(), true);
+    when(transport.newStream(any(MethodDescriptor.class), any(Metadata.class),
+            any(CallOptions.class), any(StatsTraceContext.class))).thenReturn(stream);
   }
 
   @After
@@ -145,11 +166,138 @@ public class ClientCallImplTest {
   }
 
   @Test
+  public void statusPropagatedFromStreamToCallListener() {
+    DelayedExecutor executor = new DelayedExecutor();
+    ClientCallImpl<Void, Void> call = new ClientCallImpl<Void, Void>(
+        method,
+        executor,
+        CallOptions.DEFAULT,
+        statsTraceCtx,
+        provider,
+        deadlineCancellationExecutor);
+    call.start(callListener, new Metadata());
+    verify(stream).start(listenerArgumentCaptor.capture());
+    final ClientStreamListener streamListener = listenerArgumentCaptor.getValue();
+    streamListener.headersRead(new Metadata());
+    Status status = Status.RESOURCE_EXHAUSTED.withDescription("simulated");
+    streamListener.closed(status , new Metadata());
+    executor.release();
+
+    verify(callListener).onClose(statusArgumentCaptor.capture(), Matchers.isA(Metadata.class));
+    assertThat(statusArgumentCaptor.getValue()).isSameAs(status);
+    assertStatusInStats(status.getCode());
+  }
+
+  @Test
+  public void exceptionInOnMessageTakesPrecedenceOverServer() {
+    DelayedExecutor executor = new DelayedExecutor();
+    ClientCallImpl<Void, Void> call = new ClientCallImpl<Void, Void>(
+        method,
+        executor,
+        CallOptions.DEFAULT,
+        statsTraceCtx,
+        provider,
+        deadlineCancellationExecutor);
+    call.start(callListener, new Metadata());
+    verify(stream).start(listenerArgumentCaptor.capture());
+    final ClientStreamListener streamListener = listenerArgumentCaptor.getValue();
+    streamListener.headersRead(new Metadata());
+
+    RuntimeException failure = new RuntimeException("bad");
+    doThrow(failure).when(callListener).onMessage(any(Void.class));
+
+    /*
+     * In unary calls, the server closes the call right after responding, so the onClose call is
+     * queued to run.  When messageRead is called, an exception will occur and attempt to cancel the
+     * stream.  However, since the server closed it "first" the second exception is lost leading to
+     * the call being counted as successful.
+     */
+    streamListener.messageRead(new ByteArrayInputStream(new byte[]{}));
+    streamListener.closed(Status.OK, new Metadata());
+    executor.release();
+
+    verify(callListener).onClose(statusArgumentCaptor.capture(), Matchers.isA(Metadata.class));
+    assertThat(statusArgumentCaptor.getValue().getCode()).isEqualTo(Status.Code.CANCELLED);
+    assertThat(statusArgumentCaptor.getValue().getCause()).isSameAs(failure);
+    verify(stream).cancel(statusArgumentCaptor.getValue());
+    assertStatusInStats(Status.Code.CANCELLED);
+  }
+
+  @Test
+  public void exceptionInOnHeadersTakesPrecedenceOverServer() {
+    DelayedExecutor executor = new DelayedExecutor();
+    ClientCallImpl<Void, Void> call = new ClientCallImpl<Void, Void>(
+        method,
+        executor,
+        CallOptions.DEFAULT,
+        statsTraceCtx,
+        provider,
+        deadlineCancellationExecutor);
+    call.start(callListener, new Metadata());
+    verify(stream).start(listenerArgumentCaptor.capture());
+    final ClientStreamListener streamListener = listenerArgumentCaptor.getValue();
+
+    RuntimeException failure = new RuntimeException("bad");
+    doThrow(failure).when(callListener).onHeaders(any(Metadata.class));
+
+    /*
+     * In unary calls, the server closes the call right after responding, so the onClose call is
+     * queued to run.  When headersRead is called, an exception will occur and attempt to cancel the
+     * stream.  However, since the server closed it "first" the second exception is lost leading to
+     * the call being counted as successful.
+     */
+    streamListener.headersRead(new Metadata());
+    streamListener.closed(Status.OK, new Metadata());
+    executor.release();
+
+    verify(callListener).onClose(statusArgumentCaptor.capture(), Matchers.isA(Metadata.class));
+    assertThat(statusArgumentCaptor.getValue().getCode()).isEqualTo(Status.Code.CANCELLED);
+    assertThat(statusArgumentCaptor.getValue().getCause()).isSameAs(failure);
+    verify(stream).cancel(statusArgumentCaptor.getValue());
+    assertStatusInStats(Status.Code.CANCELLED);
+  }
+
+  @Test
+  public void exceptionInOnReadyTakesPrecedenceOverServer() {
+    DelayedExecutor executor = new DelayedExecutor();
+    ClientCallImpl<Void, Void> call = new ClientCallImpl<Void, Void>(
+        method,
+        executor,
+        CallOptions.DEFAULT,
+        statsTraceCtx,
+        provider,
+        deadlineCancellationExecutor);
+    call.start(callListener, new Metadata());
+    verify(stream).start(listenerArgumentCaptor.capture());
+    final ClientStreamListener streamListener = listenerArgumentCaptor.getValue();
+
+    RuntimeException failure = new RuntimeException("bad");
+    doThrow(failure).when(callListener).onReady();
+
+    /*
+     * In unary calls, the server closes the call right after responding, so the onClose call is
+     * queued to run.  When onReady is called, an exception will occur and attempt to cancel the
+     * stream.  However, since the server closed it "first" the second exception is lost leading to
+     * the call being counted as successful.
+     */
+    streamListener.onReady();
+    streamListener.closed(Status.OK, new Metadata());
+    executor.release();
+
+    verify(callListener).onClose(statusArgumentCaptor.capture(), Matchers.isA(Metadata.class));
+    assertThat(statusArgumentCaptor.getValue().getCode()).isEqualTo(Status.Code.CANCELLED);
+    assertThat(statusArgumentCaptor.getValue().getCause()).isSameAs(failure);
+    verify(stream).cancel(statusArgumentCaptor.getValue());
+    assertStatusInStats(Status.Code.CANCELLED);
+  }
+
+  @Test
   public void advertisedEncodingsAreSent() {
     ClientCallImpl<Void, Void> call = new ClientCallImpl<Void, Void>(
         method,
         MoreExecutors.directExecutor(),
         CallOptions.DEFAULT,
+        statsTraceCtx,
         provider,
         deadlineCancellationExecutor)
             .setDecompressorRegistry(decompressorRegistry);
@@ -157,7 +305,8 @@ public class ClientCallImplTest {
     call.start(callListener, new Metadata());
 
     ArgumentCaptor<Metadata> metadataCaptor = ArgumentCaptor.forClass(Metadata.class);
-    verify(transport).newStream(eq(method), metadataCaptor.capture());
+    verify(transport).newStream(eq(method), metadataCaptor.capture(), same(CallOptions.DEFAULT),
+        same(statsTraceCtx));
     Metadata actual = metadataCaptor.getValue();
 
     Set<String> acceptedEncodings =
@@ -171,6 +320,7 @@ public class ClientCallImplTest {
         method,
         MoreExecutors.directExecutor(),
         CallOptions.DEFAULT.withAuthority("overridden-authority"),
+        statsTraceCtx,
         provider,
         deadlineCancellationExecutor)
             .setDecompressorRegistry(decompressorRegistry);
@@ -180,12 +330,32 @@ public class ClientCallImplTest {
   }
 
   @Test
+  public void callOptionsPropagatedToTransport() {
+    final CallOptions callOptions = CallOptions.DEFAULT.withAuthority("dummy_value");
+    final ClientCallImpl<Void, Void> call = new ClientCallImpl<Void, Void>(
+        method,
+        MoreExecutors.directExecutor(),
+        callOptions,
+        statsTraceCtx,
+        provider,
+        deadlineCancellationExecutor)
+        .setDecompressorRegistry(decompressorRegistry);
+    final Metadata metadata = new Metadata();
+
+    call.start(callListener, metadata);
+
+    verify(transport).newStream(same(method), same(metadata), same(callOptions),
+        same(statsTraceCtx));
+  }
+
+  @Test
   public void authorityNotPropagatedToStream() {
     ClientCallImpl<Void, Void> call = new ClientCallImpl<Void, Void>(
         method,
         MoreExecutors.directExecutor(),
         // Don't provide an authority
         CallOptions.DEFAULT,
+        statsTraceCtx,
         provider,
         deadlineCancellationExecutor)
             .setDecompressorRegistry(decompressorRegistry);
@@ -195,19 +365,19 @@ public class ClientCallImplTest {
   }
 
   @Test
-  public void prepareHeaders_userAgentAdded() {
+  public void prepareHeaders_userAgentIgnored() {
     Metadata m = new Metadata();
-    ClientCallImpl.prepareHeaders(m, CallOptions.DEFAULT, "user agent", decompressorRegistry,
-        Codec.Identity.NONE);
+    m.put(GrpcUtil.USER_AGENT_KEY, "batmobile");
+    ClientCallImpl.prepareHeaders(m, decompressorRegistry, Codec.Identity.NONE, statsTraceCtx);
 
-    assertEquals(m.get(GrpcUtil.USER_AGENT_KEY), "user agent");
+    // User Agent is removed and set by the transport
+    assertThat(m.get(GrpcUtil.USER_AGENT_KEY)).isNotNull();
   }
 
   @Test
   public void prepareHeaders_ignoreIdentityEncoding() {
     Metadata m = new Metadata();
-    ClientCallImpl.prepareHeaders(m, CallOptions.DEFAULT, "user agent", decompressorRegistry,
-        Codec.Identity.NONE);
+    ClientCallImpl.prepareHeaders(m, decompressorRegistry, Codec.Identity.NONE, statsTraceCtx);
 
     assertNull(m.get(GrpcUtil.MESSAGE_ENCODING_KEY));
   }
@@ -215,46 +385,45 @@ public class ClientCallImplTest {
   @Test
   public void prepareHeaders_acceptedEncodingsAdded() {
     Metadata m = new Metadata();
-    DecompressorRegistry customRegistry = DecompressorRegistry.newEmptyInstance();
-    customRegistry.register(new Decompressor() {
-      @Override
-      public String getMessageEncoding() {
-        return "a";
-      }
+    DecompressorRegistry customRegistry = DecompressorRegistry.emptyInstance()
+        .with(new Decompressor() {
+          @Override
+          public String getMessageEncoding() {
+            return "a";
+          }
 
-      @Override
-      public InputStream decompress(InputStream is) throws IOException {
-        return null;
-      }
-    }, true);
-    customRegistry.register(new Decompressor() {
-      @Override
-      public String getMessageEncoding() {
-        return "b";
-      }
+          @Override
+          public InputStream decompress(InputStream is) throws IOException {
+            return null;
+          }
+        }, true)
+        .with(new Decompressor() {
+          @Override
+          public String getMessageEncoding() {
+            return "b";
+          }
 
-      @Override
-      public InputStream decompress(InputStream is) throws IOException {
-        return null;
-      }
-    }, true);
-    customRegistry.register(new Decompressor() {
-      @Override
-      public String getMessageEncoding() {
-        return "c";
-      }
+          @Override
+          public InputStream decompress(InputStream is) throws IOException {
+            return null;
+          }
+        }, true)
+        .with(new Decompressor() {
+          @Override
+          public String getMessageEncoding() {
+            return "c";
+          }
 
-      @Override
-      public InputStream decompress(InputStream is) throws IOException {
-        return null;
-      }
-    }, false); // not advertised
+          @Override
+          public InputStream decompress(InputStream is) throws IOException {
+            return null;
+          }
+        }, false); // not advertised
 
-    ClientCallImpl.prepareHeaders(m, CallOptions.DEFAULT, "user agent", customRegistry,
-        Codec.Identity.NONE);
+    ClientCallImpl.prepareHeaders(m, customRegistry, Codec.Identity.NONE, statsTraceCtx);
 
     Iterable<String> acceptedEncodings =
-        ACCEPT_ENCODING_SPLITER.split(m.get(GrpcUtil.MESSAGE_ACCEPT_ENCODING_KEY));
+        ACCEPT_ENCODING_SPLITTER.split(m.get(GrpcUtil.MESSAGE_ACCEPT_ENCODING_KEY));
 
     // Order may be different, since decoder priorities have not yet been implemented.
     assertEquals(ImmutableSet.of("b", "a"), ImmutableSet.copyOf(acceptedEncodings));
@@ -263,16 +432,21 @@ public class ClientCallImplTest {
   @Test
   public void prepareHeaders_removeReservedHeaders() {
     Metadata m = new Metadata();
-    m.put(GrpcUtil.USER_AGENT_KEY, "user agent");
     m.put(GrpcUtil.MESSAGE_ENCODING_KEY, "gzip");
     m.put(GrpcUtil.MESSAGE_ACCEPT_ENCODING_KEY, "gzip");
 
-    ClientCallImpl.prepareHeaders(m, CallOptions.DEFAULT, null,
-        DecompressorRegistry.newEmptyInstance(), Codec.Identity.NONE);
+    ClientCallImpl.prepareHeaders(m, DecompressorRegistry.emptyInstance(), Codec.Identity.NONE,
+        statsTraceCtx);
 
-    assertNull(m.get(GrpcUtil.USER_AGENT_KEY));
     assertNull(m.get(GrpcUtil.MESSAGE_ENCODING_KEY));
     assertNull(m.get(GrpcUtil.MESSAGE_ACCEPT_ENCODING_KEY));
+  }
+
+  @Test
+  public void prepareHeaders_censusCtxAdded() {
+    Metadata m = new Metadata();
+    ClientCallImpl.prepareHeaders(m, decompressorRegistry, Codec.Identity.NONE, statsTraceCtx);
+    assertEquals(parentCensusContext, m.get(statsTraceCtx.getCensusHeader()));
   }
 
   @Test
@@ -285,6 +459,7 @@ public class ClientCallImplTest {
         DESCRIPTOR,
         new SerializingExecutor(Executors.newSingleThreadExecutor()),
         CallOptions.DEFAULT,
+        statsTraceCtx,
         provider,
         deadlineCancellationExecutor)
             .setDecompressorRegistry(decompressorRegistry);
@@ -358,6 +533,7 @@ public class ClientCallImplTest {
         DESCRIPTOR,
         new SerializingExecutor(Executors.newSingleThreadExecutor()),
         CallOptions.DEFAULT,
+        statsTraceCtx,
         provider,
         deadlineCancellationExecutor)
             .setDecompressorRegistry(decompressorRegistry);
@@ -387,6 +563,7 @@ public class ClientCallImplTest {
         DESCRIPTOR,
         new SerializingExecutor(Executors.newSingleThreadExecutor()),
         CallOptions.DEFAULT,
+        statsTraceCtx,
         provider,
         deadlineCancellationExecutor)
         .setDecompressorRegistry(decompressorRegistry);
@@ -405,6 +582,7 @@ public class ClientCallImplTest {
     Status status = statusFuture.get(5, TimeUnit.SECONDS);
     assertEquals(Status.Code.CANCELLED, status.getCode());
     assertSame(cause, status.getCause());
+    assertStatusInStats(Status.Code.CANCELLED);
 
     // Following operations should be no-op.
     call.request(1);
@@ -430,6 +608,7 @@ public class ClientCallImplTest {
         DESCRIPTOR,
         new SerializingExecutor(Executors.newSingleThreadExecutor()),
         callOptions,
+        statsTraceCtx,
         provider,
         deadlineCancellationExecutor)
             .setDecompressorRegistry(decompressorRegistry);
@@ -437,6 +616,7 @@ public class ClientCallImplTest {
     verify(transport, times(0)).newStream(any(MethodDescriptor.class), any(Metadata.class));
     verify(callListener, timeout(1000)).onClose(statusCaptor.capture(), any(Metadata.class));
     assertEquals(Status.Code.DEADLINE_EXCEEDED, statusCaptor.getValue().getCode());
+    assertStatusInStats(Status.Code.DEADLINE_EXCEEDED);
     verifyZeroInteractions(provider);
   }
 
@@ -451,6 +631,7 @@ public class ClientCallImplTest {
         DESCRIPTOR,
         MoreExecutors.directExecutor(),
         CallOptions.DEFAULT,
+        statsTraceCtx,
         provider,
         deadlineCancellationExecutor);
 
@@ -478,6 +659,7 @@ public class ClientCallImplTest {
         DESCRIPTOR,
         MoreExecutors.directExecutor(),
         callOpts,
+        statsTraceCtx,
         provider,
         deadlineCancellationExecutor);
 
@@ -505,6 +687,7 @@ public class ClientCallImplTest {
         DESCRIPTOR,
         MoreExecutors.directExecutor(),
         callOpts,
+        statsTraceCtx,
         provider,
         deadlineCancellationExecutor);
 
@@ -521,6 +704,71 @@ public class ClientCallImplTest {
     assertTimeoutBetween(timeout, callOptsNanos - deltaNanos, callOptsNanos);
   }
 
+  @Test
+  public void expiredDeadlineCancelsStream_CallOptions() {
+    fakeClock.forwardTime(System.nanoTime(), TimeUnit.NANOSECONDS);
+    ClientCallImpl<Void, Void> call = new ClientCallImpl<Void, Void>(
+        DESCRIPTOR,
+        MoreExecutors.directExecutor(),
+        CallOptions.DEFAULT.withDeadline(Deadline.after(1000, TimeUnit.MILLISECONDS)),
+        statsTraceCtx,
+        provider,
+        deadlineCancellationExecutor);
+
+    call.start(callListener, new Metadata());
+
+    fakeClock.forwardMillis(1001);
+
+    verify(stream, times(1)).cancel(statusCaptor.capture());
+    assertEquals(Status.Code.DEADLINE_EXCEEDED, statusCaptor.getValue().getCode());
+  }
+
+  @Test
+  public void expiredDeadlineCancelsStream_Context() {
+    fakeClock.forwardTime(System.nanoTime(), TimeUnit.NANOSECONDS);
+
+    Context.current()
+        .withDeadlineAfter(1000, TimeUnit.MILLISECONDS, deadlineCancellationExecutor)
+        .attach();
+
+    ClientCallImpl<Void, Void> call = new ClientCallImpl<Void, Void>(
+        DESCRIPTOR,
+        MoreExecutors.directExecutor(),
+        CallOptions.DEFAULT,
+        statsTraceCtx,
+        provider,
+        deadlineCancellationExecutor);
+
+    call.start(callListener, new Metadata());
+
+    fakeClock.forwardMillis(TimeUnit.SECONDS.toMillis(1001));
+
+    verify(stream, times(1)).cancel(statusCaptor.capture());
+    assertEquals(Status.Code.DEADLINE_EXCEEDED, statusCaptor.getValue().getCode());
+  }
+
+  @Test
+  public void streamCancelAbortsDeadlineTimer() {
+    fakeClock.forwardTime(System.nanoTime(), TimeUnit.NANOSECONDS);
+
+    ClientCallImpl<Void, Void> call = new ClientCallImpl<Void, Void>(
+        DESCRIPTOR,
+        MoreExecutors.directExecutor(),
+        CallOptions.DEFAULT.withDeadline(Deadline.after(1000, TimeUnit.MILLISECONDS)),
+        statsTraceCtx,
+        provider,
+        deadlineCancellationExecutor);
+    call.start(callListener, new Metadata());
+    call.cancel("canceled", null);
+
+    // Run the deadline timer, which should have been cancelled by the previous call to cancel()
+    fakeClock.forwardMillis(1001);
+
+    verify(stream, times(1)).cancel(statusCaptor.capture());
+
+    assertEquals(Status.CANCELLED.getCode(), statusCaptor.getValue().getCode());
+  }
+
   /**
    * Without a context or call options deadline,
    * a timeout should not be set in metadata.
@@ -531,6 +779,7 @@ public class ClientCallImplTest {
         DESCRIPTOR,
         MoreExecutors.directExecutor(),
         CallOptions.DEFAULT,
+        statsTraceCtx,
         provider,
         deadlineCancellationExecutor);
 
@@ -539,6 +788,48 @@ public class ClientCallImplTest {
     call.start(callListener, headers);
 
     assertFalse(headers.containsKey(GrpcUtil.TIMEOUT_KEY));
+  }
+
+  @Test
+  public void cancelInOnMessageShouldInvokeStreamCancel() throws Exception {
+    final ClientCallImpl<Void, Void> call = new ClientCallImpl<Void, Void>(
+        DESCRIPTOR,
+        MoreExecutors.directExecutor(),
+        CallOptions.DEFAULT,
+        statsTraceCtx,
+        provider,
+        deadlineCancellationExecutor);
+    final Exception cause = new Exception();
+    ClientCall.Listener<Void> callListener =
+        new ClientCall.Listener<Void>() {
+          @Override
+          public void onMessage(Void message) {
+            call.cancel("foo", cause);
+          }
+        };
+
+    call.start(callListener, new Metadata());
+    call.halfClose();
+    call.request(1);
+
+    verify(stream).start(listenerArgumentCaptor.capture());
+    ClientStreamListener streamListener = listenerArgumentCaptor.getValue();
+    streamListener.onReady();
+    streamListener.headersRead(new Metadata());
+    streamListener.messageRead(new ByteArrayInputStream(new byte[0]));
+    verify(stream).cancel(statusCaptor.capture());
+    Status status = statusCaptor.getValue();
+    assertEquals(Status.CANCELLED.getCode(), status.getCode());
+    assertEquals("foo", status.getDescription());
+    assertSame(cause, status.getCause());
+  }
+
+  private void assertStatusInStats(Status.Code statusCode) {
+    CensusTestUtils.MetricsRecord record = censusCtxFactory.pollRecord();
+    assertNotNull(record);
+    TagValue statusTag = record.tags.get(RpcConstants.RPC_STATUS);
+    assertNotNull(statusTag);
+    assertEquals(statusCode.toString(), statusTag.toString());
   }
 
   private static class TestMarshaller<T> implements Marshaller<T> {
@@ -558,5 +849,19 @@ public class ClientCallImplTest {
     assertTrue("timeout: " + timeout + " ns", timeout >= from);
   }
 
+  private static final class DelayedExecutor implements Executor {
+    private final BlockingQueue<Runnable> commands = new LinkedBlockingQueue<Runnable>();
+
+    @Override
+    public void execute(Runnable command) {
+      commands.add(command);
+    }
+
+    void release() {
+      while (!commands.isEmpty()) {
+        commands.poll().run();
+      }
+    }
+  }
 }
 

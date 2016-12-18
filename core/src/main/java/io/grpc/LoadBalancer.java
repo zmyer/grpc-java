@@ -42,11 +42,11 @@ import javax.annotation.concurrent.ThreadSafe;
  * <p>Note to implementations: all methods are expected to return quickly. Any work that may block
  * should be done asynchronously.
  *
- * @param T the transport type to balance
+ * @param <T> the transport type to balance
  */
 // TODO(zhangkun83): since it's also used for non-loadbalancing cases like pick-first,
 // "RequestRouter" might be a better name.
-@ExperimentalApi
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1771")
 @ThreadSafe
 public abstract class LoadBalancer<T> {
   /**
@@ -57,6 +57,7 @@ public abstract class LoadBalancer<T> {
    *
    * @param affinity for affinity-based routing
    */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1766")
   public abstract T pickTransport(Attributes affinity);
 
   /**
@@ -65,14 +66,17 @@ public abstract class LoadBalancer<T> {
   public void shutdown() { }
 
   /**
-   * Handles newly resolved addresses and service config from name resolution system.
+   * Handles newly resolved server groups and metadata attributes from name resolution system.
+   * {@code servers} contained in {@link ResolvedServerInfoGroup} should be considered equivalent
+   * but may be flattened into a single list if needed.
    *
    * <p>Implementations should not modify the given {@code servers}.
    *
-   * @param servers the resolved server addresses. Never empty.
-   * @param config extra configuration data from naming system.
+   * @param servers the resolved server addresses, never empty.
+   * @param attributes extra metadata from naming system.
    */
-  public void handleResolvedAddresses(List<ResolvedServerInfo> servers, Attributes config) { }
+  public void handleResolvedAddresses(List<ResolvedServerInfoGroup> servers,
+      Attributes attributes) { }
 
   /**
    * Handles an error from the name resolution system.

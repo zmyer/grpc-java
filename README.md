@@ -16,34 +16,49 @@ Readme](SECURITY.md).
   </tr>
 </table>
 
+[![Join the chat at https://gitter.im/grpc/grpc](https://badges.gitter.im/grpc/grpc.svg)](https://gitter.im/grpc/grpc?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 [![Build Status](https://travis-ci.org/grpc/grpc-java.svg?branch=master)](https://travis-ci.org/grpc/grpc-java)
 [![Coverage Status](https://coveralls.io/repos/grpc/grpc-java/badge.svg?branch=master&service=github)](https://coveralls.io/github/grpc/grpc-java?branch=master)
 
 Download
 --------
 
-Download [the JAR][]. Or for Maven, add to your `pom.xml`:
+Download [the JARs][]. Or for Maven with non-Android, add to your `pom.xml`:
 ```xml
 <dependency>
   <groupId>io.grpc</groupId>
-  <artifactId>grpc-all</artifactId>
-  <version>0.13.2</version>
+  <artifactId>grpc-netty</artifactId>
+  <version>1.0.1</version>
+</dependency>
+<dependency>
+  <groupId>io.grpc</groupId>
+  <artifactId>grpc-protobuf</artifactId>
+  <version>1.0.1</version>
+</dependency>
+<dependency>
+  <groupId>io.grpc</groupId>
+  <artifactId>grpc-stub</artifactId>
+  <version>1.0.1</version>
 </dependency>
 ```
 
-Or for Gradle, add to your dependencies:
+Or for Gradle with non-Android, add to your dependencies:
 ```gradle
-compile 'io.grpc:grpc-all:0.13.2'
+compile 'io.grpc:grpc-netty:1.0.1'
+compile 'io.grpc:grpc-protobuf:1.0.1'
+compile 'io.grpc:grpc-stub:1.0.1'
 ```
 
-For Android client, you only need to depend on the needed sub-projects, such as:
+For Android client, use `grpc-okhttp` instead of `grpc-netty` and
+`grpc-protobuf-lite` or `grpc-protobuf-nano` instead of `grpc-protobuf`:
 ```gradle
-compile 'io.grpc:grpc-okhttp:0.13.2'
-compile 'io.grpc:grpc-protobuf-nano:0.13.2'
-compile 'io.grpc:grpc-stub:0.13.2'
+compile 'io.grpc:grpc-okhttp:1.0.1'
+compile 'io.grpc:grpc-protobuf-lite:1.0.1'
+compile 'io.grpc:grpc-stub:1.0.1'
 ```
 
-[the JAR]: https://search.maven.org/remote_content?g=io.grpc&a=grpc-all&v=0.13.2
+[the JARs]:
+http://search.maven.org/#search%7Cga%7C1%7Cg%3A%22io.grpc%22%20AND%20v%3A%221.0.1%22
 
 Development snapshots are available in [Sonatypes's snapshot
 repository](https://oss.sonatype.org/content/repositories/snapshots/).
@@ -52,7 +67,9 @@ For protobuf-based codegen, you can put your proto files in the `src/main/proto`
 and `src/test/proto` directories along with an appropriate plugin.
 
 For protobuf-based codegen integrated with the Maven build system, you can use
-[protobuf-maven-plugin][]:
+[protobuf-maven-plugin][] (Eclipse and NetBeans users should also look at
+`os-maven-plugin`'s
+[IDE documentation](https://github.com/trustin/os-maven-plugin#issues-with-eclipse-m2e-or-other-ides)):
 ```xml
 <build>
   <extensions>
@@ -68,14 +85,9 @@ For protobuf-based codegen integrated with the Maven build system, you can use
       <artifactId>protobuf-maven-plugin</artifactId>
       <version>0.5.0</version>
       <configuration>
-        <!--
-          The version of protoc must match protobuf-java. If you don't depend on
-          protobuf-java directly, you will be transitively depending on the
-          protobuf-java version that grpc depends on.
-        -->
-        <protocArtifact>com.google.protobuf:protoc:3.0.0-beta-2:exe:${os.detected.classifier}</protocArtifact>
+        <protocArtifact>com.google.protobuf:protoc:3.1.0:exe:${os.detected.classifier}</protocArtifact>
         <pluginId>grpc-java</pluginId>
-        <pluginArtifact>io.grpc:protoc-gen-grpc-java:0.13.2:exe:${os.detected.classifier}</pluginArtifact>
+        <pluginArtifact>io.grpc:protoc-gen-grpc-java:1.0.1:exe:${os.detected.classifier}</pluginArtifact>
       </configuration>
       <executions>
         <execution>
@@ -103,20 +115,19 @@ buildscript {
     mavenCentral()
   }
   dependencies {
-    classpath 'com.google.protobuf:protobuf-gradle-plugin:0.7.4'
+    // ASSUMES GRADLE 2.12 OR HIGHER. Use plugin version 0.7.5 with earlier
+    // gradle versions
+    classpath 'com.google.protobuf:protobuf-gradle-plugin:0.8.0'
   }
 }
 
 protobuf {
   protoc {
-    // The version of protoc must match protobuf-java. If you don't depend on
-    // protobuf-java directly, you will be transitively depending on the
-    // protobuf-java version that grpc depends on.
-    artifact = "com.google.protobuf:protoc:3.0.0-beta-2"
+    artifact = "com.google.protobuf:protoc:3.1.0"
   }
   plugins {
     grpc {
-      artifact = 'io.grpc:protoc-gen-grpc-java:0.13.2'
+      artifact = 'io.grpc:protoc-gen-grpc-java:1.0.1'
     }
   }
   generateProtoTasks {

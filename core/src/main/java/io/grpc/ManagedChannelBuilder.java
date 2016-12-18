@@ -33,6 +33,7 @@ package io.grpc;
 
 import java.util.List;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * A builder for {@link ManagedChannel} instances.
@@ -48,7 +49,7 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    * Creates a channel with a target string, which can be either a valid {@link
    * NameResolver}-compliant URI, or an authority string.
    *
-   * <p>A {@code NameResolver}-compliant URI is an aboslute hierarchical URI as defined by {@link
+   * <p>A {@code NameResolver}-compliant URI is an absolute hierarchical URI as defined by {@link
    * java.net.URI}. Example URIs:
    * <ul>
    *   <li>{@code "dns:///foo.googleapis.com:8080"}</li>
@@ -72,7 +73,6 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    *   <li>{@code "[2001:db8:85a3:8d3:1319:8a2e:370:7348]:443"}</li>
    * </ul>
    */
-  @ExperimentalApi
   public static ManagedChannelBuilder<?> forTarget(String target) {
     return ManagedChannelProvider.provider().builderForTarget(target);
   }
@@ -129,7 +129,7 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    *
    * <p>Should only used by tests.
    */
-  @ExperimentalApi("primarily for testing")
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1767")
   public abstract T overrideAuthority(String authority);
 
   /*
@@ -142,25 +142,25 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    * @param skipNegotiation @{code true} if there is a priori knowledge that the endpoint supports
    *                        plaintext, {@code false} if plaintext use must be negotiated.
    */
-  @ExperimentalApi("primarily for testing")
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1772")
   public abstract T usePlaintext(boolean skipNegotiation);
 
   /*
    * Provides a custom {@link NameResolver.Factory} for the channel.
    *
-   * <p>If this method is not called, the builder will look up in the global resolver registry for
-   * a factory for the provided target.
+   * <p>If this method is not called, the builder will try the providers listed by {@link
+   * NameResolverProvider#providers()} for the given target.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1770")
   public abstract T nameResolverFactory(NameResolver.Factory resolverFactory);
 
   /**
    * Provides a custom {@link LoadBalancer.Factory} for the channel.
    *
-   * <p>If this method is not called, the builder will use {@link SimpleLoadBalancerFactory} for the
-   * channel.
+   * <p>If this method is not called, the builder will use {@link PickFirstBalancerFactory}
+   * for the channel.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1771")
   public abstract T loadBalancerFactory(LoadBalancer.Factory loadBalancerFactory);
 
   /**
@@ -168,7 +168,7 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    * shouldn't be used unless you are using custom message encoding.   The default supported
    * decompressors are in {@code DecompressorRegistry.getDefaultInstance}.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   public abstract T decompressorRegistry(DecompressorRegistry registry);
 
   /**
@@ -176,11 +176,53 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    * shouldn't be used unless you are using custom message encoding.   The default supported
    * compressors are in {@code CompressorRegistry.getDefaultInstance}.
    */
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   public abstract T compressorRegistry(CompressorRegistry registry);
+
+  /**
+   * Set the duration without ongoing RPCs before going to idle mode.
+   *
+   * <p>In idle mode the channel shuts down all connections, the NameResolver and the
+   * LoadBalancer. A new RPC would take the channel out of idle mode. A channel starts in idle mode.
+   *
+   * <p>By default the channel will never go to idle mode after it leaves the initial idle
+   * mode.
+   *
+   * <p>This is an advisory option. Do not rely on any specific behavior related to this option.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2022")
+  public abstract T idleTimeout(long value, TimeUnit unit);
+
+  /**
+   * Sets the maximum message size allowed to be received on the channel. If not called,
+   * defaults to 4 MiB. The default provides protection to clients who haven't considered the
+   * possibility of receiving large messages while trying to be large enough to not be hit in normal
+   * usage.
+   *
+   * <p>This method is advisory, and implementations may decide to not enforce this.  Currently,
+   * the only known transport to not enforce this is {@code InProcessTransport}.
+   *
+   * @param max the maximum number of bytes a single message can be.
+   *
+   * @throws IllegalArgumentException if max is negative.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2307")
+  public T maxInboundMessageSize(int max) {
+    // intentional nop
+    return thisT();
+  }
 
   /**
    * Builds a channel using the given parameters.
    */
   public abstract ManagedChannel build();
+
+  /**
+   * Returns the correctly typed version of the builder.
+   */
+  protected final T thisT() {
+    @SuppressWarnings("unchecked")
+    T thisT = (T) this;
+    return thisT;
+  }
 }

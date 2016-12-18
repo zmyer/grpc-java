@@ -51,6 +51,7 @@ import com.google.protobuf.ByteString;
 import io.grpc.Attributes;
 import io.grpc.EquivalentAddressGroup;
 import io.grpc.ResolvedServerInfo;
+import io.grpc.ResolvedServerInfoGroup;
 import io.grpc.Status;
 import io.grpc.TransportManager.InterimTransport;
 import io.grpc.TransportManager;
@@ -430,7 +431,9 @@ public class GrpclbLoadBalancerTest {
     lbAddressGroup = buildAddressGroup(lbServerInfo);
     Transport lbTransport = new Transport();
     when(mockTransportManager.getTransport(eq(lbAddressGroup))).thenReturn(lbTransport);
-    loadBalancer.handleResolvedAddresses(Collections.singletonList(lbServerInfo), Attributes.EMPTY);
+    loadBalancer.handleResolvedAddresses(
+        Collections.singletonList(ResolvedServerInfoGroup.builder().add(lbServerInfo).build()),
+        Attributes.EMPTY);
     verify(mockTransportManager).getTransport(eq(lbAddressGroup));
     return lbTransport;
   }

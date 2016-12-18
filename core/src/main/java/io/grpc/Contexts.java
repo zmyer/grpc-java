@@ -40,6 +40,9 @@ import java.util.concurrent.TimeoutException;
  */
 public class Contexts {
 
+  private Contexts() {
+  }
+
   /**
    * Make the provided {@link Context} {@link Context#current()} for the creation of a listener
    * to a received call and for all events received by that listener.
@@ -49,7 +52,6 @@ public class Contexts {
    * the client.
    *
    * @param context to make {@link Context#current()}.
-   * @param method being requested by the client.
    * @param call used to send responses to client.
    * @param headers received from client.
    * @param next handler used to create the listener to be wrapped.
@@ -57,14 +59,13 @@ public class Contexts {
    */
   public static <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
         Context context,
-        MethodDescriptor<ReqT, RespT> method,
-        ServerCall<RespT> call,
+        ServerCall<ReqT, RespT> call,
         Metadata headers,
         ServerCallHandler<ReqT, RespT> next) {
     Context previous = context.attach();
     try {
       return new ContextualizedServerCallListener<ReqT>(
-          next.startCall(method, call, headers),
+          next.startCall(call, headers),
           context);
     } finally {
       context.detach(previous);
@@ -139,6 +140,7 @@ public class Contexts {
    * Returns the {@link Status} of a cancelled context or {@code null} if the context
    * is not cancelled.
    */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1975")
   public static Status statusFromCancelled(Context context) {
     Preconditions.checkNotNull(context, "context must not be null");
     if (!context.isCancelled()) {

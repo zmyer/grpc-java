@@ -31,9 +31,10 @@
 
 package io.grpc.examples.header;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import io.grpc.ForwardingServerCall.SimpleForwardingServerCall;
 import io.grpc.Metadata;
-import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
@@ -47,21 +48,21 @@ public class HeaderServerInterceptor implements ServerInterceptor {
 
   private static final Logger logger = Logger.getLogger(HeaderServerInterceptor.class.getName());
 
-  private static Metadata.Key<String> customHeadKey =
+  @VisibleForTesting
+  static final Metadata.Key<String> CUSTOM_HEADER_KEY =
       Metadata.Key.of("custom_server_header_key", Metadata.ASCII_STRING_MARSHALLER);
 
 
   @Override
   public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
-      MethodDescriptor<ReqT, RespT> method,
-      ServerCall<RespT> call,
+      ServerCall<ReqT, RespT> call,
       final Metadata requestHeaders,
       ServerCallHandler<ReqT, RespT> next) {
     logger.info("header received from client:" + requestHeaders);
-    return next.startCall(method, new SimpleForwardingServerCall<RespT>(call) {
+    return next.startCall(new SimpleForwardingServerCall<ReqT, RespT>(call) {
       @Override
       public void sendHeaders(Metadata responseHeaders) {
-        responseHeaders.put(customHeadKey, "customRespondValue");
+        responseHeaders.put(CUSTOM_HEADER_KEY, "customRespondValue");
         super.sendHeaders(responseHeaders);
       }
     }, requestHeaders);

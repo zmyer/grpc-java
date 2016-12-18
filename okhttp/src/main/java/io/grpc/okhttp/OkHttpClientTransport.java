@@ -32,6 +32,7 @@
 package io.grpc.okhttp;
 
 import static com.google.common.base.Preconditions.checkState;
+import static io.grpc.internal.GrpcUtil.TIMER_SERVICE;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -39,15 +40,21 @@ import com.google.common.base.Stopwatch;
 import com.google.common.base.Ticker;
 import com.google.common.util.concurrent.SettableFuture;
 
+import io.grpc.Attributes;
+import io.grpc.CallOptions;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.MethodDescriptor.MethodType;
 import io.grpc.Status;
 import io.grpc.Status.Code;
+import io.grpc.internal.ConnectionClientTransport;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.Http2Ping;
-import io.grpc.internal.ManagedClientTransport;
+import io.grpc.internal.KeepAliveManager;
+import io.grpc.internal.LogId;
 import io.grpc.internal.SerializingExecutor;
+import io.grpc.internal.SharedResourceHolder;
+import io.grpc.internal.StatsTraceContext;
 import io.grpc.okhttp.internal.ConnectionSpec;
 import io.grpc.okhttp.internal.framed.ErrorCode;
 import io.grpc.okhttp.internal.framed.FrameReader;
@@ -63,6 +70,8 @@ import okio.BufferedSink;
 import okio.BufferedSource;
 import okio.ByteString;
 import okio.Okio;
+import okio.Source;
+import okio.Timeout;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -77,6 +86,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -85,9 +95,9 @@ import javax.annotation.concurrent.GuardedBy;
 import javax.net.ssl.SSLSocketFactory;
 
 /**
- * A okhttp-based {@link ManagedClientTransport} implementation.
+ * A okhttp-based {@link ConnectionClientTransport} implementation.
  */
-class OkHttpClientTransport implements ManagedClientTransport {
+class OkHttpClientTransport implements ConnectionClientTransport {
   private static final Map<ErrorCode, Status> ERROR_CODE_TO_STATUS = buildErrorCodeToStatusMap();
   private static final Logger log = Logger.getLogger(OkHttpClientTransport.class.getName());
   private static final OkHttpClientStream[] EMPTY_STREAM_ARRAY = new OkHttpClientStream[0];
@@ -123,6 +133,7 @@ class OkHttpClientTransport implements ManagedClientTransport {
 
   private final InetSocketAddress address;
   private final String defaultAuthority;
+  private final String userAgent;
   private final Random random = new Random();
   private final Ticker ticker;
   private Listener listener;
@@ -130,6 +141,7 @@ class OkHttpClientTransport implements ManagedClientTransport {
   private AsyncFrameWriter frameWriter;
   private OutboundFlowController outboundFlow;
   private final Object lock = new Object();
+  private final LogId logId = LogId.allocate(getClass().getName());
   @GuardedBy("lock")
   private int nextStreamId;
   @GuardedBy("lock")
@@ -141,20 +153,20 @@ class OkHttpClientTransport implements ManagedClientTransport {
   private final int maxMessageSize;
   private int connectionUnacknowledgedBytesRead;
   private ClientFrameHandler clientFrameHandler;
-  // Indicates the transport is in go-away state: no new streams will be processed,
-  // but existing streams may continue.
-  @GuardedBy("lock")
-  private boolean goAway;
-  // Used to indicate the special phase while we are going to enter go-away state but before
-  // goAway is turned to true, see the comment at where this is set about why it is needed.
-  @GuardedBy("lock")
-  private boolean startedGoAway;
+  /**
+   * Indicates the transport is in go-away state: no new streams will be processed, but existing
+   * streams may continue.
+   */
   @GuardedBy("lock")
   private Status goAwayStatus;
+  @GuardedBy("lock")
+  private boolean goAwaySent;
   @GuardedBy("lock")
   private Http2Ping ping;
   @GuardedBy("lock")
   private boolean stopped;
+  @GuardedBy("lock")
+  private boolean inUse;
   private SSLSocketFactory sslSocketFactory;
   private Socket socket;
   @GuardedBy("lock")
@@ -163,13 +175,18 @@ class OkHttpClientTransport implements ManagedClientTransport {
   private LinkedList<OkHttpClientStream> pendingStreams = new LinkedList<OkHttpClientStream>();
   private final ConnectionSpec connectionSpec;
   private FrameWriter testFrameWriter;
+  private ScheduledExecutorService scheduler;
+  private KeepAliveManager keepAliveManager;
+  private boolean enableKeepAlive;
+  private long keepAliveDelayNanos;
+  private long keepAliveTimeoutNanos;
 
   // The following fields should only be used for test.
   Runnable connectingCallback;
   SettableFuture<Void> connectedFuture;
 
-  OkHttpClientTransport(InetSocketAddress address, String authority, Executor executor,
-      @Nullable SSLSocketFactory sslSocketFactory, ConnectionSpec connectionSpec,
+  OkHttpClientTransport(InetSocketAddress address, String authority, @Nullable String userAgent,
+      Executor executor, @Nullable SSLSocketFactory sslSocketFactory, ConnectionSpec connectionSpec,
       int maxMessageSize) {
     this.address = Preconditions.checkNotNull(address, "address");
     this.defaultAuthority = authority;
@@ -182,29 +199,41 @@ class OkHttpClientTransport implements ManagedClientTransport {
     this.sslSocketFactory = sslSocketFactory;
     this.connectionSpec = Preconditions.checkNotNull(connectionSpec, "connectionSpec");
     this.ticker = Ticker.systemTicker();
+    this.userAgent = GrpcUtil.getGrpcUserAgent("okhttp", userAgent);
   }
 
   /**
    * Create a transport connected to a fake peer for test.
    */
   @VisibleForTesting
-  OkHttpClientTransport(Executor executor, FrameReader frameReader, FrameWriter testFrameWriter,
-      int nextStreamId, Socket socket, Ticker ticker,
+  OkHttpClientTransport(String userAgent, Executor executor, FrameReader frameReader,
+      FrameWriter testFrameWriter, int nextStreamId, Socket socket, Ticker ticker,
       @Nullable Runnable connectingCallback, SettableFuture<Void> connectedFuture,
       int maxMessageSize) {
     address = null;
     this.maxMessageSize = maxMessageSize;
     defaultAuthority = "notarealauthority:80";
-    this.executor = Preconditions.checkNotNull(executor);
+    this.userAgent = GrpcUtil.getGrpcUserAgent("okhttp", userAgent);
+    this.executor = Preconditions.checkNotNull(executor, "executor");
     serializingExecutor = new SerializingExecutor(executor);
-    this.testFrameReader = Preconditions.checkNotNull(frameReader);
-    this.testFrameWriter = Preconditions.checkNotNull(testFrameWriter);
-    this.socket = Preconditions.checkNotNull(socket);
+    this.testFrameReader = Preconditions.checkNotNull(frameReader, "frameReader");
+    this.testFrameWriter = Preconditions.checkNotNull(testFrameWriter, "testFrameWriter");
+    this.socket = Preconditions.checkNotNull(socket, "socket");
     this.nextStreamId = nextStreamId;
     this.ticker = ticker;
     this.connectionSpec = null;
     this.connectingCallback = connectingCallback;
-    this.connectedFuture = Preconditions.checkNotNull(connectedFuture);
+    this.connectedFuture = Preconditions.checkNotNull(connectedFuture, "connectedFuture");
+  }
+
+  /**
+   * Enable keepalive with custom delay and timeout.
+   */
+  void enableKeepAlive(boolean enable, long keepAliveDelayNanos,
+      long keepAliveTimeoutNanos) {
+    enableKeepAlive = enable;
+    this.keepAliveDelayNanos = keepAliveDelayNanos;
+    this.keepAliveTimeoutNanos = keepAliveTimeoutNanos;
   }
 
   private boolean isForTest() {
@@ -243,20 +272,29 @@ class OkHttpClientTransport implements ManagedClientTransport {
   }
 
   @Override
-  public OkHttpClientStream newStream(final MethodDescriptor<?, ?> method, final Metadata headers) {
+  public OkHttpClientStream newStream(final MethodDescriptor<?, ?> method,
+      final Metadata headers, CallOptions callOptions, StatsTraceContext statsTraceCtx) {
     Preconditions.checkNotNull(method, "method");
     Preconditions.checkNotNull(headers, "headers");
+    Preconditions.checkNotNull(statsTraceCtx, "statsTraceCtx");
     return new OkHttpClientStream(method, headers, frameWriter, OkHttpClientTransport.this,
-        outboundFlow, lock, maxMessageSize, defaultAuthority);
+        outboundFlow, lock, maxMessageSize, defaultAuthority, userAgent, statsTraceCtx);
+  }
+
+  @Override
+  public OkHttpClientStream newStream(final MethodDescriptor<?, ?> method, final Metadata
+      headers) {
+    return newStream(method, headers, CallOptions.DEFAULT, StatsTraceContext.NOOP);
   }
 
   @GuardedBy("lock")
   void streamReadyToStart(OkHttpClientStream clientStream) {
     synchronized (lock) {
-      if (goAway) {
+      if (goAwayStatus != null) {
         clientStream.transportReportStatus(goAwayStatus, true, new Metadata());
       } else if (streams.size() >= maxConcurrentStreams) {
         pendingStreams.add(clientStream);
+        setInUse();
       } else {
         startStream(clientStream);
       }
@@ -265,8 +303,10 @@ class OkHttpClientTransport implements ManagedClientTransport {
 
   @GuardedBy("lock")
   private void startStream(OkHttpClientStream stream) {
-    Preconditions.checkState(stream.id() == null, "StreamId already assigned");
+    Preconditions.checkState(
+        stream.id() == OkHttpClientStream.ABSENT_ID, "StreamId already assigned");
     streams.put(nextStreamId, stream);
+    setInUse();
     stream.start(nextStreamId);
     stream.allocated();
     // For unary and server streaming, there will be a data frame soon, no need to flush the header.
@@ -278,7 +318,8 @@ class OkHttpClientTransport implements ManagedClientTransport {
       // Make sure nextStreamId greater than all used id, so that mayHaveCreatedStream() performs
       // correctly.
       nextStreamId = Integer.MAX_VALUE;
-      startGoAway(Integer.MAX_VALUE, Status.INTERNAL.withDescription("Stream ids exhausted"));
+      startGoAway(Integer.MAX_VALUE, ErrorCode.NO_ERROR,
+          Status.UNAVAILABLE.withDescription("Stream ids exhausted"));
     } else {
       nextStreamId += 2;
     }
@@ -287,16 +328,13 @@ class OkHttpClientTransport implements ManagedClientTransport {
   /**
    * Starts pending streams, returns true if at least one pending stream is started.
    */
+  @GuardedBy("lock")
   private boolean startPendingStreams() {
     boolean hasStreamStarted = false;
-    synchronized (lock) {
-      // No need to check goAway since the pendingStreams will be cleared when goAway
-      // becomes true.
-      while (!pendingStreams.isEmpty() && streams.size() < maxConcurrentStreams) {
-        OkHttpClientStream stream = pendingStreams.poll();
-        startStream(stream);
-        hasStreamStarted = true;
-      }
+    while (!pendingStreams.isEmpty() && streams.size() < maxConcurrentStreams) {
+      OkHttpClientStream stream = pendingStreams.poll();
+      startStream(stream);
+      hasStreamStarted = true;
     }
     return hasStreamStarted;
   }
@@ -307,11 +345,18 @@ class OkHttpClientTransport implements ManagedClientTransport {
   @GuardedBy("lock")
   void removePendingStream(OkHttpClientStream pendingStream) {
     pendingStreams.remove(pendingStream);
+    maybeClearInUse();
   }
 
   @Override
-  public void start(Listener listener) {
+  public Runnable start(Listener listener) {
     this.listener = Preconditions.checkNotNull(listener, "listener");
+
+    if (enableKeepAlive) {
+      scheduler = SharedResourceHolder.get(TIMER_SERVICE);
+      keepAliveManager = new KeepAliveManager(this, scheduler, keepAliveDelayNanos,
+          keepAliveTimeoutNanos);
+    }
 
     frameWriter = new AsyncFrameWriter(this, serializingExecutor);
     outboundFlow = new OutboundFlowController(this, frameWriter);
@@ -329,14 +374,29 @@ class OkHttpClientTransport implements ManagedClientTransport {
           executor.execute(clientFrameHandler);
           synchronized (lock) {
             maxConcurrentStreams = Integer.MAX_VALUE;
+            startPendingStreams();
           }
           frameWriter.becomeConnected(testFrameWriter, socket);
-          startPendingStreams();
           connectedFuture.set(null);
           return;
         }
 
-        BufferedSource source;
+        // Use closed source on failure so that the reader immediately shuts down.
+        BufferedSource source = Okio.buffer(new Source() {
+          @Override
+          public long read(Buffer sink, long byteCount) {
+            return -1;
+          }
+
+          @Override
+          public Timeout timeout() {
+            return Timeout.NONE;
+          }
+
+          @Override
+          public void close() {}
+        });
+        Variant variant = new Http2();
         BufferedSink sink;
         Socket sock;
         try {
@@ -348,32 +408,21 @@ class OkHttpClientTransport implements ManagedClientTransport {
           sock.setTcpNoDelay(true);
           source = Okio.buffer(Okio.source(sock));
           sink = Okio.buffer(Okio.sink(sock));
-        } catch (RuntimeException e) {
-          onException(e);
-          throw e;
         } catch (Exception e) {
           onException(e);
-
-          // (and probably do all of this work asynchronously instead of in calling thread)
-          throw new RuntimeException(e);
+          return;
+        } finally {
+          clientFrameHandler = new ClientFrameHandler(variant.newReader(source, true));
+          executor.execute(clientFrameHandler);
         }
 
         FrameWriter rawFrameWriter;
         synchronized (lock) {
-          if (stopped) {
-            // In case user called shutdown() during the connecting.
-            try {
-              sock.close();
-            } catch (IOException e) {
-              log.log(Level.WARNING, "Failed closing socket", e);
-            }
-            return;
-          }
           socket = sock;
           maxConcurrentStreams = Integer.MAX_VALUE;
+          startPendingStreams();
         }
 
-        Variant variant = new Http2();
         rawFrameWriter = variant.newWriter(sink, true);
         frameWriter.becomeConnected(rawFrameWriter, socket);
 
@@ -383,19 +432,13 @@ class OkHttpClientTransport implements ManagedClientTransport {
           rawFrameWriter.connectionPreface();
           Settings settings = new Settings();
           rawFrameWriter.settings(settings);
-        } catch (RuntimeException e) {
-          onException(e);
-          throw e;
         } catch (Exception e) {
           onException(e);
-          throw new RuntimeException(e);
+          return;
         }
-
-        clientFrameHandler = new ClientFrameHandler(variant.newReader(source, true));
-        executor.execute(clientFrameHandler);
-        startPendingStreams();
       }
     });
+    return null;
   }
 
   @Override
@@ -404,8 +447,8 @@ class OkHttpClientTransport implements ManagedClientTransport {
   }
 
   @Override
-  public String getLogId() {
-    return GrpcUtil.getLogId(this);
+  public LogId getLogId() {
+    return logId;
   }
 
   /**
@@ -444,16 +487,46 @@ class OkHttpClientTransport implements ManagedClientTransport {
   @Override
   public void shutdown() {
     synchronized (lock) {
-      if (goAway) {
+      if (goAwayStatus != null) {
         return;
       }
+
+      goAwayStatus = Status.UNAVAILABLE.withDescription("Transport stopped");
+      listener.transportShutdown(goAwayStatus);
+      stopIfNecessary();
+      if (keepAliveManager != null) {
+        keepAliveManager.onTransportShutdown();
+        // KeepAliveManager should stop using the scheduler after onTransportShutdown gets called.
+        scheduler = SharedResourceHolder.release(TIMER_SERVICE, scheduler);
+      }
     }
+  }
 
-    // Send GOAWAY with lastGoodStreamId of 0, since we don't expect any server-initiated streams.
-    // The GOAWAY is part of graceful shutdown.
-    frameWriter.goAway(0, ErrorCode.NO_ERROR, new byte[0]);
+  @Override
+  public void shutdownNow(Status reason) {
+    shutdown();
+    synchronized (lock) {
+      Iterator<Map.Entry<Integer, OkHttpClientStream>> it = streams.entrySet().iterator();
+      while (it.hasNext()) {
+        Map.Entry<Integer, OkHttpClientStream> entry = it.next();
+        it.remove();
+        entry.getValue().transportReportStatus(reason, false, new Metadata());
+      }
 
-    startGoAway(Integer.MAX_VALUE, Status.UNAVAILABLE.withDescription("Transport stopped"));
+      for (OkHttpClientStream stream : pendingStreams) {
+        stream.transportReportStatus(reason, true, new Metadata());
+      }
+      pendingStreams.clear();
+      maybeClearInUse();
+
+      stopIfNecessary();
+    }
+  }
+
+  @Override
+  public Attributes getAttrs() {
+    // TODO(zhangkun83): fill channel security attributes
+    return Attributes.EMPTY;
   }
 
   /**
@@ -480,40 +553,32 @@ class OkHttpClientTransport implements ManagedClientTransport {
   /**
    * Finish all active streams due to an IOException, then close the transport.
    */
-  void onException(Throwable cause) {
-    log.log(Level.WARNING, "Transport failed", cause);
-    Status status = Status.UNAVAILABLE.withCause(cause);
-    if (cause != null) {
-      status = status.augmentDescription("No provided cause");
-    }
-    startGoAway(0, status);
+  void onException(Throwable failureCause) {
+    Preconditions.checkNotNull(failureCause, "failureCause");
+    Status status = Status.UNAVAILABLE.withCause(failureCause);
+    startGoAway(0, ErrorCode.INTERNAL_ERROR, status);
   }
 
   /**
    * Send GOAWAY to the server, then finish all active streams and close the transport.
    */
   private void onError(ErrorCode errorCode, String moreDetail) {
-    frameWriter.goAway(0, errorCode, new byte[0]);
-    startGoAway(0, toGrpcStatus(errorCode).augmentDescription(moreDetail));
+    startGoAway(0, errorCode, toGrpcStatus(errorCode).augmentDescription(moreDetail));
   }
 
-  private void startGoAway(int lastKnownStreamId, Status status) {
+  private void startGoAway(int lastKnownStreamId, ErrorCode errorCode, Status status) {
     synchronized (lock) {
-      if (startedGoAway) {
-        // Another go-away is in progress, ignore this one.
-        return;
+      if (goAwayStatus == null) {
+        goAwayStatus = status;
+        listener.transportShutdown(status);
       }
-      // We use startedGoAway here instead of goAway, because once the goAway becomes true, other
-      // thread in stopIfNecessary() may stop the transport and cause the
-      // listener.transportTerminated() be called before listener.transportShutdown().
-      startedGoAway = true;
-    }
+      if (errorCode != null && !goAwaySent) {
+        // Send GOAWAY with lastGoodStreamId of 0, since we don't expect any server-initiated
+        // streams. The GOAWAY is part of graceful shutdown.
+        goAwaySent = true;
+        frameWriter.goAway(0, errorCode, new byte[0]);
+      }
 
-    listener.transportShutdown(status);
-
-    synchronized (lock) {
-      goAway = true;
-      goAwayStatus = status;
       Iterator<Map.Entry<Integer, OkHttpClientStream>> it = streams.entrySet().iterator();
       while (it.hasNext()) {
         Map.Entry<Integer, OkHttpClientStream> entry = it.next();
@@ -527,9 +592,10 @@ class OkHttpClientTransport implements ManagedClientTransport {
         stream.transportReportStatus(status, true, new Metadata());
       }
       pendingStreams.clear();
-    }
+      maybeClearInUse();
 
-    stopIfNecessary();
+      stopIfNecessary();
+    }
   }
 
   /**
@@ -559,6 +625,7 @@ class OkHttpClientTransport implements ManagedClientTransport {
         }
         if (!startPendingStreams()) {
           stopIfNecessary();
+          maybeClearInUse();
         }
       }
     }
@@ -567,20 +634,60 @@ class OkHttpClientTransport implements ManagedClientTransport {
   /**
    * When the transport is in goAway state, we should stop it once all active streams finish.
    */
+  @GuardedBy("lock")
   void stopIfNecessary() {
-    synchronized (lock) {
-      if (goAway && streams.size() == 0) {
-        if (!stopped) {
-          stopped = true;
-          // We will close the underlying socket in the writing thread to break out the reader
-          // thread, which will close the frameReader and notify the listener.
-          frameWriter.close();
+    if (!(goAwayStatus != null && streams.isEmpty() && pendingStreams.isEmpty())) {
+      return;
+    }
+    if (stopped) {
+      return;
+    }
+    stopped = true;
 
-          if (ping != null) {
-            ping.failed(getPingFailure());
-            ping = null;
-          }
+    if (ping != null) {
+      ping.failed(getPingFailure());
+      ping = null;
+    }
+
+    if (!goAwaySent) {
+      // Send GOAWAY with lastGoodStreamId of 0, since we don't expect any server-initiated
+      // streams. The GOAWAY is part of graceful shutdown.
+      goAwaySent = true;
+      frameWriter.goAway(0, ErrorCode.NO_ERROR, new byte[0]);
+    }
+
+    // We will close the underlying socket in the writing thread to break out the reader
+    // thread, which will close the frameReader and notify the listener.
+    frameWriter.close();
+  }
+
+  @GuardedBy("lock")
+  private void maybeClearInUse() {
+    if (inUse) {
+      if (pendingStreams.isEmpty() && streams.isEmpty()) {
+        inUse = false;
+        listener.transportInUse(false);
+        if (keepAliveManager != null) {
+          // We don't have any active streams. No need to do keepalives any more.
+          // Again, we have to call this inside the lock to avoid the race between onTransportIdle
+          // and onTransportActive.
+          keepAliveManager.onTransportIdle();
         }
+      }
+    }
+  }
+
+  @GuardedBy("lock")
+  private void setInUse() {
+    if (!inUse) {
+      inUse = true;
+      listener.transportInUse(true);
+      if (keepAliveManager != null) {
+        // We have a new stream. We might need to do keepalives now.
+        // Note that we have to do this inside the lock to avoid calling
+        // KeepAliveManager.onTransportActive and KeepAliveManager.onTransportIdle in the wrong
+        // order.
+        keepAliveManager.onTransportActive();
       }
     }
   }
@@ -632,22 +739,24 @@ class OkHttpClientTransport implements ManagedClientTransport {
     @Override
     public void run() {
       String threadName = Thread.currentThread().getName();
-      Thread.currentThread().setName("OkHttpClientTransport");
+      if (!GrpcUtil.IS_RESTRICTED_APPENGINE) {
+        Thread.currentThread().setName("OkHttpClientTransport");
+      }
       try {
         // Read until the underlying socket closes.
         while (frameReader.nextFrame(this)) {
+          if (keepAliveManager != null) {
+            keepAliveManager.onDataReceived();
+          }
         }
         // frameReader.nextFrame() returns false when the underlying read encounters an IOException,
         // it may be triggered by the socket closing, in such case, the startGoAway() will do
         // nothing, otherwise, we finish all streams since it's a real IO issue.
-        // We don't call onException() here since we don't want to log the warning in case this is
-        // triggered by socket closing.
-        startGoAway(0,
+        startGoAway(0, ErrorCode.INTERNAL_ERROR,
             Status.UNAVAILABLE.withDescription("End of stream or IOException"));
       } catch (Exception t) {
         // TODO(madongfly): Send the exception message to the server.
-        frameWriter.goAway(0, ErrorCode.PROTOCOL_ERROR, new byte[0]);
-        onException(t);
+        startGoAway(0, ErrorCode.PROTOCOL_ERROR, Status.UNAVAILABLE.withCause(t));
       } finally {
         try {
           frameReader.close();
@@ -655,8 +764,10 @@ class OkHttpClientTransport implements ManagedClientTransport {
           log.log(Level.INFO, "Exception closing frame reader", ex);
         }
         listener.transportTerminated();
-        // Restore the original thread name.
-        Thread.currentThread().setName(threadName);
+        if (!GrpcUtil.IS_RESTRICTED_APPENGINE) {
+          // Restore the original thread name.
+          Thread.currentThread().setName(threadName);
+        }
       }
     }
 
@@ -746,6 +857,7 @@ class OkHttpClientTransport implements ManagedClientTransport {
           listener.transportReady();
           firstSettings = false;
         }
+        startPendingStreams();
       }
 
       frameWriter.ackSettings(settings);
@@ -785,13 +897,13 @@ class OkHttpClientTransport implements ManagedClientTransport {
 
     @Override
     public void goAway(int lastGoodStreamId, ErrorCode errorCode, ByteString debugData) {
-      Status status = GrpcUtil.Http2Error.statusForCode(errorCode.httpCode);
-      status.augmentDescription("Received Goaway");
+      Status status = GrpcUtil.Http2Error.statusForCode(errorCode.httpCode)
+          .augmentDescription("Received Goaway");
       if (debugData != null && debugData.size() > 0) {
         // If a debug message was provided, use it.
-        status.augmentDescription(debugData.utf8());
+        status = status.augmentDescription(debugData.utf8());
       }
-      startGoAway(lastGoodStreamId, status);
+      startGoAway(lastGoodStreamId, null, status);
     }
 
     @Override

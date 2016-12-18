@@ -40,16 +40,16 @@ import io.grpc.Status;
 /**
  * Command sent from a Netty server stream to the handler to cancel the stream.
  */
-class CancelServerStreamCommand {
-  private final NettyServerStream stream;
+class CancelServerStreamCommand extends WriteQueue.AbstractQueuedCommand {
+  private final NettyServerStream.TransportState stream;
   private final Status reason;
 
-  CancelServerStreamCommand(NettyServerStream stream, Status reason) {
-    this.stream = Preconditions.checkNotNull(stream);
-    this.reason = Preconditions.checkNotNull(reason);
+  CancelServerStreamCommand(NettyServerStream.TransportState stream, Status reason) {
+    this.stream = Preconditions.checkNotNull(stream, "stream");
+    this.reason = Preconditions.checkNotNull(reason, "reason");
   }
 
-  NettyServerStream stream() {
+  NettyServerStream.TransportState stream() {
     return stream;
   }
 

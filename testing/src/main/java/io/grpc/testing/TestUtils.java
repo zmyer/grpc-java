@@ -34,7 +34,6 @@ package io.grpc.testing;
 import io.grpc.ExperimentalApi;
 import io.grpc.ForwardingServerCall.SimpleForwardingServerCall;
 import io.grpc.Metadata;
-import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
@@ -49,10 +48,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.UnknownHostException;
 import java.security.KeyStore;
 import java.security.NoSuchAlgorithmException;
+import java.security.Provider;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -72,7 +71,7 @@ import javax.security.auth.x500.X500Principal;
 /**
  * Common utility functions useful for writing tests.
  */
-@ExperimentalApi
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1791")
 public class TestUtils {
   public static final String TEST_SERVER_HOST = "foo.test.google.fr";
 
@@ -85,12 +84,10 @@ public class TestUtils {
     return new ServerInterceptor() {
       @Override
       public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
-          MethodDescriptor<ReqT, RespT> method,
-          ServerCall<RespT> call,
+          ServerCall<ReqT, RespT> call,
           final Metadata requestHeaders,
           ServerCallHandler<ReqT, RespT> next) {
-        return next.startCall(method,
-            new SimpleForwardingServerCall<RespT>(call) {
+        return next.startCall(new SimpleForwardingServerCall<ReqT, RespT>(call) {
               @Override
               public void sendHeaders(Metadata responseHeaders) {
                 responseHeaders.merge(requestHeaders, keySet);
@@ -117,12 +114,11 @@ public class TestUtils {
     return new ServerInterceptor() {
       @Override
       public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
-          MethodDescriptor<ReqT, RespT> method,
-          ServerCall<RespT> call,
+          ServerCall<ReqT, RespT> call,
           Metadata requestHeaders,
           ServerCallHandler<ReqT, RespT> next) {
         headersCapture.set(requestHeaders);
-        return next.startCall(method, call, requestHeaders);
+        return next.startCall(call, requestHeaders);
       }
     };
   }
@@ -132,32 +128,17 @@ public class TestUtils {
    * {@link ServerCall#attributes()}
    */
   public static ServerInterceptor recordServerCallInterceptor(
-      final AtomicReference<ServerCall<?>> serverCallCapture) {
+      final AtomicReference<ServerCall<?, ?>> serverCallCapture) {
     return new ServerInterceptor() {
       @Override
       public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
-          MethodDescriptor<ReqT, RespT> method,
-          ServerCall<RespT> call,
+          ServerCall<ReqT, RespT> call,
           Metadata requestHeaders,
           ServerCallHandler<ReqT, RespT> next) {
         serverCallCapture.set(call);
-        return next.startCall(method, call, requestHeaders);
+        return next.startCall(call, requestHeaders);
       }
     };
-  }
-
-  /**
-   * Picks an unused port.
-   */
-  public static int pickUnusedPort() {
-    try {
-      ServerSocket serverSocket = new ServerSocket(0);
-      int port = serverSocket.getLocalPort();
-      serverSocket.close();
-      return port;
-    } catch (IOException e) {
-      throw new RuntimeException(e);
-    }
   }
 
   /**
@@ -254,24 +235,13 @@ public class TestUtils {
   /**
    * Creates an SSLSocketFactory which contains {@code certChainFile} as its only root certificate.
    */
-  public static SSLSocketFactory newSslSocketFactoryForCa(File certChainFile) throws Exception {
-    InputStream is = new FileInputStream(certChainFile);
-    try {
-      return newSslSocketFactoryForCa(is);
-    } finally {
-      is.close();
-    }
-  }
-
-  /**
-   * Creates an SSLSocketFactory which contains {@code certChainFile} as its only root certificate.
-   */
-  public static SSLSocketFactory newSslSocketFactoryForCa(InputStream certChain) throws Exception {
+  public static SSLSocketFactory newSslSocketFactoryForCa(Provider provider,
+      File certChainFile) throws Exception {
     KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
     ks.load(null, null);
     CertificateFactory cf = CertificateFactory.getInstance("X.509");
     X509Certificate cert = (X509Certificate) cf.generateCertificate(
-        new BufferedInputStream(certChain));
+        new BufferedInputStream(new FileInputStream(certChainFile)));
     X500Principal principal = cert.getSubjectX500Principal();
     ks.setCertificateEntry(principal.getName("RFC2253"), cert);
 
@@ -279,7 +249,7 @@ public class TestUtils {
     TrustManagerFactory trustManagerFactory =
         TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
     trustManagerFactory.init(ks);
-    SSLContext context = SSLContext.getInstance("TLS");
+    SSLContext context = SSLContext.getInstance("TLS", provider);
     context.init(null, trustManagerFactory.getTrustManagers(), null);
     return context.getSocketFactory();
   }

@@ -37,7 +37,6 @@ import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
 import com.google.common.base.Preconditions;
 
 import io.grpc.ExperimentalApi;
-import io.grpc.HandlerRegistry;
 import io.grpc.Internal;
 import io.grpc.internal.AbstractServerImplBuilder;
 import io.grpc.internal.GrpcUtil;
@@ -56,7 +55,7 @@ import javax.net.ssl.SSLException;
 /**
  * A builder to help simplify the construction of a Netty-based GRPC server.
  */
-@ExperimentalApi("There is no plan to make this API stable, given transport API instability")
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1784")
 public final class NettyServerBuilder extends AbstractServerImplBuilder<NettyServerBuilder> {
   public static final int DEFAULT_FLOW_CONTROL_WINDOW = 1048576; // 1MiB
 
@@ -84,18 +83,6 @@ public final class NettyServerBuilder extends AbstractServerImplBuilder<NettySer
   }
 
   /**
-   * Creates a server builder that will bind to the given port and use the {@link HandlerRegistry}
-   * for call dispatching.
-   *
-   * @param registry the registry of handlers used for dispatching incoming calls.
-   * @param port the port on which to the server is to be bound.
-   * @return the server builder.
-   */
-  public static NettyServerBuilder forRegistryAndPort(HandlerRegistry registry, int port) {
-    return new NettyServerBuilder(registry, port);
-  }
-
-  /**
    * Creates a server builder configured with the given {@link SocketAddress}.
    *
    * @param address the socket address on which the server is to be bound.
@@ -109,11 +96,6 @@ public final class NettyServerBuilder extends AbstractServerImplBuilder<NettySer
     this.address = new InetSocketAddress(port);
   }
 
-  private NettyServerBuilder(HandlerRegistry registry, int port) {
-    super(registry);
-    this.address = new InetSocketAddress(port);
-  }
-
   private NettyServerBuilder(SocketAddress address) {
     this.address = address;
   }
@@ -122,7 +104,7 @@ public final class NettyServerBuilder extends AbstractServerImplBuilder<NettySer
    * Specify the channel type to use, by default we use {@link NioServerSocketChannel}.
    */
   public NettyServerBuilder channelType(Class<? extends ServerChannel> channelType) {
-    this.channelType = Preconditions.checkNotNull(channelType);
+    this.channelType = Preconditions.checkNotNull(channelType, "channelType");
     return this;
   }
 
@@ -177,6 +159,11 @@ public final class NettyServerBuilder extends AbstractServerImplBuilder<NettySer
    * have been configured with {@link GrpcSslContexts}, but options could have been overridden.
    */
   public NettyServerBuilder sslContext(SslContext sslContext) {
+    if (sslContext != null) {
+      checkArgument(sslContext.isServer(),
+          "Client SSL context can not be used for server");
+      GrpcSslContexts.ensureAlpnAndH2Enabled(sslContext.applicationProtocolNegotiator());
+    }
     this.sslContext = sslContext;
     return this;
   }
@@ -216,7 +203,9 @@ public final class NettyServerBuilder extends AbstractServerImplBuilder<NettySer
 
   /**
    * Sets the maximum message size allowed to be received on the server. If not called,
-   * defaults to 100 MiB.
+   * defaults to 4 MiB. The default provides protection to services who haven't considered the
+   * possibility of receiving large messages while trying to be large enough to not be hit in normal
+   * usage.
    */
   public NettyServerBuilder maxMessageSize(int maxMessageSize) {
     checkArgument(maxMessageSize >= 0, "maxMessageSize must be >= 0");

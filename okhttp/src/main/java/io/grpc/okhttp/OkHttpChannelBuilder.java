@@ -31,11 +31,11 @@
 
 package io.grpc.okhttp;
 
-import static com.google.common.base.Preconditions.checkArgument;
-import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
+import static io.grpc.internal.GrpcUtil.DEFAULT_KEEPALIVE_DELAY_NANOS;
+import static io.grpc.internal.GrpcUtil.DEFAULT_KEEPALIVE_TIMEOUT_NANOS;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 import com.squareup.okhttp.CipherSuite;
 import com.squareup.okhttp.ConnectionSpec;
@@ -47,22 +47,26 @@ import io.grpc.Internal;
 import io.grpc.NameResolver;
 import io.grpc.internal.AbstractManagedChannelImplBuilder;
 import io.grpc.internal.ClientTransportFactory;
+import io.grpc.internal.ConnectionClientTransport;
 import io.grpc.internal.GrpcUtil;
-import io.grpc.internal.ManagedClientTransport;
 import io.grpc.internal.SharedResourceHolder;
 import io.grpc.internal.SharedResourceHolder.Resource;
+import io.grpc.okhttp.internal.Platform;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.security.GeneralSecurityException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import javax.annotation.Nullable;
+import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocketFactory;
 
 /** Convenience class for building channels with the OkHttp transport. */
-@ExperimentalApi("There is no plan to make this API stable, given transport API instability")
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1785")
 public class OkHttpChannelBuilder extends
         AbstractManagedChannelImplBuilder<OkHttpChannelBuilder> {
 
@@ -86,10 +90,7 @@ public class OkHttpChannelBuilder extends
       new Resource<ExecutorService>() {
         @Override
         public ExecutorService create() {
-          return Executors.newCachedThreadPool(new ThreadFactoryBuilder()
-                  .setDaemon(true)
-                  .setNameFormat("grpc-okhttp-%d")
-                  .build());
+          return Executors.newCachedThreadPool(GrpcUtil.getThreadFactory("grpc-okhttp-%d", true));
         }
 
         @Override
@@ -116,7 +117,9 @@ public class OkHttpChannelBuilder extends
   private SSLSocketFactory sslSocketFactory;
   private ConnectionSpec connectionSpec = DEFAULT_CONNECTION_SPEC;
   private NegotiationType negotiationType = NegotiationType.TLS;
-  private int maxMessageSize = DEFAULT_MAX_MESSAGE_SIZE;
+  private boolean enableKeepAlive;
+  private long keepAliveDelayNanos;
+  private long keepAliveTimeoutNanos;
 
   protected OkHttpChannelBuilder(String host, int port) {
     this(GrpcUtil.authorityFromHostAndPort(host, port));
@@ -140,15 +143,46 @@ public class OkHttpChannelBuilder extends
   /**
    * Sets the negotiation type for the HTTP/2 connection.
    *
+   * <p>If TLS is enabled a default {@link SSLSocketFactory} is created using the best
+   * {@link java.security.Provider} available and is NOT based on
+   * {@link SSLSocketFactory#getDefault}. To more precisely control the TLS configuration call
+   * {@link #sslSocketFactory} to override the socket factory used.
+   *
    * <p>Default: <code>TLS</code>
    */
   public final OkHttpChannelBuilder negotiationType(NegotiationType type) {
-    negotiationType = Preconditions.checkNotNull(type);
+    negotiationType = Preconditions.checkNotNull(type, "type");
     return this;
   }
 
   /**
-   * Provides a SSLSocketFactory to replace the default SSLSocketFactory used for TLS.
+   * Enable keepalive with default delay and timeout.
+   */
+  public final OkHttpChannelBuilder enableKeepAlive(boolean enable) {
+    enableKeepAlive = enable;
+    if (enable) {
+      keepAliveDelayNanos = DEFAULT_KEEPALIVE_DELAY_NANOS;
+      keepAliveTimeoutNanos = DEFAULT_KEEPALIVE_TIMEOUT_NANOS;
+    }
+    return this;
+  }
+
+  /**
+   * Enable keepalive with custom delay and timeout.
+   */
+  public final OkHttpChannelBuilder enableKeepAlive(boolean enable, long keepAliveDelay,
+      TimeUnit delayUnit, long keepAliveTimeout, TimeUnit timeoutUnit) {
+    enableKeepAlive = enable;
+    if (enable) {
+      keepAliveDelayNanos = delayUnit.toNanos(keepAliveDelay);
+      keepAliveTimeoutNanos = timeoutUnit.toNanos(keepAliveTimeout);
+    }
+    return this;
+  }
+
+  /**
+   * Override the default {@link SSLSocketFactory} and enable {@link NegotiationType#TLS}
+   * negotiation.
    *
    * <p>By default, when TLS is enabled, <code>SSLSocketFactory.getDefault()</code> will be used.
    *
@@ -165,19 +199,16 @@ public class OkHttpChannelBuilder extends
    * TLS versions.
    *
    * <p>By default {@link #DEFAULT_CONNECTION_SPEC} will be used.
+   *
+   * <p>This method is only used when building a secure connection. For plaintext
+   * connection, use {@link #usePlaintext} instead.
+   *
+   * @throws IllegalArgumentException
+   *         If {@code connectionSpec} is not with TLS
    */
   public final OkHttpChannelBuilder connectionSpec(ConnectionSpec connectionSpec) {
+    Preconditions.checkArgument(connectionSpec.isTls(), "plaintext ConnectionSpec is not accepted");
     this.connectionSpec = connectionSpec;
-    return this;
-  }
-
-  /**
-   * Sets the maximum message size allowed to be received on the channel. If not called,
-   * defaults to {@link io.grpc.internal.GrpcUtil#DEFAULT_MAX_MESSAGE_SIZE}.
-   */
-  public final OkHttpChannelBuilder maxMessageSize(int maxMessageSize) {
-    checkArgument(maxMessageSize >= 0, "maxMessageSize must be >= 0");
-    this.maxMessageSize = maxMessageSize;
     return this;
   }
 
@@ -197,7 +228,8 @@ public class OkHttpChannelBuilder extends
   @Override
   protected final ClientTransportFactory buildTransportFactory() {
     return new OkHttpTransportFactory(transportExecutor,
-            createSocketFactory(), connectionSpec, maxMessageSize);
+        createSocketFactory(), connectionSpec, maxInboundMessageSize(), enableKeepAlive,
+        keepAliveDelayNanos, keepAliveTimeoutNanos);
   }
 
   @Override
@@ -217,11 +249,20 @@ public class OkHttpChannelBuilder extends
         .set(NameResolver.Factory.PARAMS_DEFAULT_PORT, defaultPort).build();
   }
 
-  private SSLSocketFactory createSocketFactory() {
+  @VisibleForTesting
+  @Nullable
+  SSLSocketFactory createSocketFactory() {
     switch (negotiationType) {
       case TLS:
-        return sslSocketFactory == null
-                ? (SSLSocketFactory) SSLSocketFactory.getDefault() : sslSocketFactory;
+        try {
+          if (sslSocketFactory == null) {
+            SSLContext sslContext = SSLContext.getInstance("Default", Platform.get().getProvider());
+            sslSocketFactory = sslContext.getSocketFactory();
+          }
+          return sslSocketFactory;
+        } catch (GeneralSecurityException gse) {
+          throw new RuntimeException("TLS Provider failure", gse);
+        }
       case PLAINTEXT:
         return null;
       default:
@@ -236,19 +277,28 @@ public class OkHttpChannelBuilder extends
   static final class OkHttpTransportFactory implements ClientTransportFactory {
     private final Executor executor;
     private final boolean usingSharedExecutor;
+    @Nullable
     private final SSLSocketFactory socketFactory;
     private final ConnectionSpec connectionSpec;
     private final int maxMessageSize;
-
+    private boolean enableKeepAlive;
+    private long keepAliveDelayNanos;
+    private long keepAliveTimeoutNanos;
     private boolean closed;
 
     private OkHttpTransportFactory(Executor executor,
-                                   SSLSocketFactory socketFactory,
-                                   ConnectionSpec connectionSpec,
-                                   int maxMessageSize) {
+        @Nullable SSLSocketFactory socketFactory,
+        ConnectionSpec connectionSpec,
+        int maxMessageSize,
+        boolean enableKeepAlive,
+        long keepAliveDelayNanos,
+        long keepAliveTimeoutNanos) {
       this.socketFactory = socketFactory;
       this.connectionSpec = connectionSpec;
       this.maxMessageSize = maxMessageSize;
+      this.enableKeepAlive = enableKeepAlive;
+      this.keepAliveDelayNanos = keepAliveDelayNanos;
+      this.keepAliveTimeoutNanos = keepAliveTimeoutNanos;
 
       usingSharedExecutor = executor == null;
       if (usingSharedExecutor) {
@@ -260,13 +310,18 @@ public class OkHttpChannelBuilder extends
     }
 
     @Override
-    public ManagedClientTransport newClientTransport(SocketAddress addr, String authority) {
+    public ConnectionClientTransport newClientTransport(
+        SocketAddress addr, String authority, @Nullable String userAgent) {
       if (closed) {
         throw new IllegalStateException("The transport factory is closed.");
       }
       InetSocketAddress inetSocketAddr = (InetSocketAddress) addr;
-      return new OkHttpClientTransport(inetSocketAddr, authority, executor, socketFactory,
-          Utils.convertSpec(connectionSpec), maxMessageSize);
+      OkHttpClientTransport transport = new OkHttpClientTransport(inetSocketAddr, authority,
+          userAgent, executor, socketFactory, Utils.convertSpec(connectionSpec), maxMessageSize);
+      if (enableKeepAlive) {
+        transport.enableKeepAlive(true, keepAliveDelayNanos, keepAliveTimeoutNanos);
+      }
+      return transport;
     }
 
     @Override

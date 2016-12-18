@@ -14,7 +14,3 @@
 -dontwarn org.mockito.**
 -dontwarn sun.reflect.**
 -dontwarn android.test.**
-
-# Need to create channel through service provider.
--keepnames class io.grpc.ManagedChannelProvider
--keep class io.grpc.okhttp.OkHttpChannelProvider

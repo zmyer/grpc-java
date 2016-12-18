@@ -33,24 +33,25 @@ package io.grpc.netty;
 
 import static io.grpc.internal.GrpcUtil.CONTENT_TYPE_KEY;
 import static io.grpc.internal.GrpcUtil.USER_AGENT_KEY;
+import static io.grpc.internal.TransportFrameUtil.toHttp2Headers;
+import static io.grpc.internal.TransportFrameUtil.toRawSerializedHeaders;
 import static io.netty.util.CharsetUtil.UTF_8;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
+import io.grpc.InternalMetadata;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.SharedResourceHolder.Resource;
-import io.grpc.internal.TransportFrameUtil;
+import io.grpc.netty.GrpcHttp2HeadersDecoder.GrpcHttp2InboundHeaders;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.codec.http2.Http2Headers;
 import io.netty.util.AsciiString;
-import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.DefaultThreadFactory;
-import io.netty.util.concurrent.FastThreadLocalThread;
 
 import java.io.IOException;
 import java.nio.channels.ClosedChannelException;
@@ -58,11 +59,10 @@ import java.util.Map;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
-import javax.net.ssl.SSLSession;
-
 /**
  * Common utility methods.
  */
+@VisibleForTesting
 class Utils {
 
   public static final AsciiString STATUS_OK = AsciiString.of("200");
@@ -81,11 +81,15 @@ class Utils {
   public static final Resource<EventLoopGroup> DEFAULT_WORKER_EVENT_LOOP_GROUP =
       new DefaultEventLoopGroupResource(0, "grpc-default-worker-ELG");
 
-  public static final AttributeKey<SSLSession> SSL_SESSION_ATTR_KEY =
-      AttributeKey.valueOf(SSLSession.class, "ssl-session");
+  @VisibleForTesting
+  static boolean validateHeaders = false;
 
   public static Metadata convertHeaders(Http2Headers http2Headers) {
-    return new Metadata(convertHeadersToArray(http2Headers));
+    if (http2Headers instanceof GrpcHttp2InboundHeaders) {
+      GrpcHttp2InboundHeaders h = (GrpcHttp2InboundHeaders) http2Headers;
+      return InternalMetadata.newMetadata(h.numHeaders(), h.namesAndValues());
+    }
+    return InternalMetadata.newMetadata(convertHeadersToArray(http2Headers));
   }
 
   private static byte[][] convertHeadersToArray(Http2Headers http2Headers) {
@@ -97,13 +101,14 @@ class Utils {
       headerValues[i++] = bytes(entry.getKey());
       headerValues[i++] = bytes(entry.getValue());
     }
-    return TransportFrameUtil.toRawSerializedHeaders(headerValues);
+    return toRawSerializedHeaders(headerValues);
   }
 
   private static byte[] bytes(CharSequence seq) {
     if (seq instanceof AsciiString) {
-      // Fast path - no copy.
-      return ((AsciiString) seq).array();
+      // Fast path - sometimes copy.
+      AsciiString str = (AsciiString) seq;
+      return str.isEntireArrayUsed() ? str.array() : str.toByteArray();
     }
     // Slow path - copy.
     return seq.toString().getBytes(UTF_8);
@@ -112,59 +117,37 @@ class Utils {
   public static Http2Headers convertClientHeaders(Metadata headers,
       AsciiString scheme,
       AsciiString defaultPath,
-      AsciiString authority) {
+      AsciiString authority,
+      AsciiString userAgent) {
     Preconditions.checkNotNull(defaultPath, "defaultPath");
     Preconditions.checkNotNull(authority, "authority");
-    // Add any application-provided headers first.
-    Http2Headers http2Headers = convertMetadata(headers);
 
-    // Now set GRPC-specific default headers.
-    http2Headers.authority(authority)
-        .path(defaultPath)
-        .method(HTTP_METHOD)
-        .scheme(scheme)
-        .set(CONTENT_TYPE_HEADER, CONTENT_TYPE_GRPC)
-        .set(TE_HEADER, TE_TRAILERS);
-
-    // Set the User-Agent header.
-    String userAgent = GrpcUtil.getGrpcUserAgent("netty", headers.get(USER_AGENT_KEY));
-    http2Headers.set(USER_AGENT, new AsciiString(userAgent.getBytes(UTF_8)));
-
-    return http2Headers;
+    return GrpcHttp2OutboundHeaders.clientRequestHeaders(
+        toHttp2Headers(headers),
+        authority,
+        defaultPath,
+        HTTP_METHOD,
+        scheme,
+        userAgent);
   }
 
   public static Http2Headers convertServerHeaders(Metadata headers) {
-    Http2Headers http2Headers = convertMetadata(headers);
-    http2Headers.set(CONTENT_TYPE_HEADER, CONTENT_TYPE_GRPC);
-    http2Headers.status(STATUS_OK);
-    return http2Headers;
+    return GrpcHttp2OutboundHeaders.serverResponseHeaders(toHttp2Headers(headers));
   }
 
   public static Metadata convertTrailers(Http2Headers http2Headers) {
-    return new Metadata(convertHeadersToArray(http2Headers));
+    if (http2Headers instanceof GrpcHttp2InboundHeaders) {
+      GrpcHttp2InboundHeaders h = (GrpcHttp2InboundHeaders) http2Headers;
+      return InternalMetadata.newMetadata(h.numHeaders(), h.namesAndValues());
+    }
+    return InternalMetadata.newMetadata(convertHeadersToArray(http2Headers));
   }
 
   public static Http2Headers convertTrailers(Metadata trailers, boolean headersSent) {
-    Http2Headers http2Trailers = convertMetadata(trailers);
     if (!headersSent) {
-      http2Trailers.set(Utils.CONTENT_TYPE_HEADER, Utils.CONTENT_TYPE_GRPC);
-      http2Trailers.status(STATUS_OK);
+      return convertServerHeaders(trailers);
     }
-    return http2Trailers;
-  }
-
-  private static Http2Headers convertMetadata(Metadata headers) {
-    Preconditions.checkNotNull(headers, "headers");
-    boolean validate = true;
-    Http2Headers http2Headers = new DefaultHttp2Headers(validate, headers.headerCount());
-    byte[][] serializedHeaders = TransportFrameUtil.toHttp2Headers(headers);
-    for (int i = 0; i < serializedHeaders.length; i += 2) {
-      AsciiString name = new AsciiString(serializedHeaders[i], false);
-      AsciiString value = new AsciiString(serializedHeaders[i + 1], false);
-      http2Headers.add(name, value);
-    }
-
-    return http2Headers;
+    return GrpcHttp2OutboundHeaders.serverResponseTrailers(toHttp2Headers(trailers));
   }
 
   public static Status statusFromThrowable(Throwable t) {
@@ -172,10 +155,7 @@ class Utils {
     if (s.getCode() != Status.Code.UNKNOWN) {
       return s;
     }
-    // TODO(ejona): reenable once startup races are resolved; ClosedChannelException is being seen
-    // still. Some tests are asserting UNAVAILABLE and were "working" previously but are now
-    // detecting that our behavior is flaky. See #1330
-    if (false && t instanceof ClosedChannelException) {
+    if (t instanceof ClosedChannelException) {
       // ClosedChannelException is used any time the Netty channel is closed. Proper error
       // processing requires remembering the error that occurred before this one and using it
       // instead.
@@ -203,8 +183,7 @@ class Utils {
     public EventLoopGroup create() {
       // Use Netty's DefaultThreadFactory in order to get the benefit of FastThreadLocal.
       boolean useDaemonThreads = true;
-      ThreadFactory threadFactory = new ThreadGroupSavingDefaultThreadFactory(
-          name, useDaemonThreads);
+      ThreadFactory threadFactory = new DefaultThreadFactory(name, useDaemonThreads);
       int parallelism = numEventLoops == 0
           ? Runtime.getRuntime().availableProcessors() * 2 : numEventLoops;
       return new NioEventLoopGroup(parallelism, threadFactory);
@@ -218,22 +197,6 @@ class Utils {
     @Override
     public String toString() {
       return name;
-    }
-  }
-
-  // A workaround for https://github.com/netty/netty/issues/5084
-  // TODO(zhangkun83): remove it once the issue has been resolved in netty.
-  private static class ThreadGroupSavingDefaultThreadFactory extends DefaultThreadFactory {
-    final ThreadGroup threadGroup;
-
-    ThreadGroupSavingDefaultThreadFactory(String name, boolean daemon) {
-      super(name, daemon);
-      threadGroup = Thread.currentThread().getThreadGroup();
-    }
-
-    @Override
-    protected Thread newThread(Runnable r, String name) {
-      return new FastThreadLocalThread(threadGroup, r, name);
     }
   }
 

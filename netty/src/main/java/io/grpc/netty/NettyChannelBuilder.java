@@ -32,27 +32,33 @@
 package io.grpc.netty;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+import static io.grpc.internal.GrpcUtil.DEFAULT_KEEPALIVE_DELAY_NANOS;
+import static io.grpc.internal.GrpcUtil.DEFAULT_KEEPALIVE_TIMEOUT_NANOS;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
 import io.grpc.Attributes;
 import io.grpc.ExperimentalApi;
-import io.grpc.Internal;
 import io.grpc.NameResolver;
 import io.grpc.internal.AbstractManagedChannelImplBuilder;
 import io.grpc.internal.ClientTransportFactory;
+import io.grpc.internal.ConnectionClientTransport;
 import io.grpc.internal.GrpcUtil;
-import io.grpc.internal.ManagedClientTransport;
 import io.grpc.internal.SharedResourceHolder;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.ssl.SslContext;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import javax.annotation.Nullable;
 import javax.net.ssl.SSLException;
@@ -60,19 +66,27 @@ import javax.net.ssl.SSLException;
 /**
  * A builder to help simplify construction of channels using the Netty transport.
  */
-@ExperimentalApi("There is no plan to make this API stable, given transport API instability")
-public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<NettyChannelBuilder> {
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1784")
+public final class NettyChannelBuilder
+    extends AbstractManagedChannelImplBuilder<NettyChannelBuilder> {
   public static final int DEFAULT_FLOW_CONTROL_WINDOW = 1048576; // 1MiB
 
+  private final Map<ChannelOption<?>, Object> channelOptions =
+      new HashMap<ChannelOption<?>, Object>();
+
   private NegotiationType negotiationType = NegotiationType.TLS;
-  private ProtocolNegotiator protocolNegotiator;
+  private OverrideAuthorityChecker authorityChecker;
   private Class<? extends Channel> channelType = NioSocketChannel.class;
+
   @Nullable
   private EventLoopGroup eventLoopGroup;
   private SslContext sslContext;
   private int flowControlWindow = DEFAULT_FLOW_CONTROL_WINDOW;
-  private int maxMessageSize = DEFAULT_MAX_MESSAGE_SIZE;
   private int maxHeaderListSize = GrpcUtil.DEFAULT_MAX_HEADER_LIST_SIZE;
+  private boolean enableKeepAlive;
+  private long keepAliveDelayNanos;
+  private long keepAliveTimeoutNanos;
+  private TransportCreationParamsFilterFactory dynamicParamsFactory;
 
   /**
    * Creates a new builder with the given server address. This factory method is primarily intended
@@ -99,15 +113,15 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
     return new NettyChannelBuilder(target);
   }
 
-  protected NettyChannelBuilder(String host, int port) {
+  NettyChannelBuilder(String host, int port) {
     this(GrpcUtil.authorityFromHostAndPort(host, port));
   }
 
-  protected NettyChannelBuilder(String target) {
+  NettyChannelBuilder(String target) {
     super(target);
   }
 
-  protected NettyChannelBuilder(SocketAddress address) {
+  NettyChannelBuilder(SocketAddress address) {
     super(address, getAuthorityFromAddress(address));
   }
 
@@ -121,10 +135,19 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
   }
 
   /**
-   * Specify the channel type to use, by default we use {@link NioSocketChannel}.
+   * Specifies the channel type to use, by default we use {@link NioSocketChannel}.
    */
-  public final NettyChannelBuilder channelType(Class<? extends Channel> channelType) {
-    this.channelType = Preconditions.checkNotNull(channelType);
+  public NettyChannelBuilder channelType(Class<? extends Channel> channelType) {
+    this.channelType = Preconditions.checkNotNull(channelType, "channelType");
+    return this;
+  }
+
+  /**
+   * Specifies a channel option. As the underlying channel as well as network implementation may
+   * ignore this value applications should consider it a hint.
+   */
+  public <T> NettyChannelBuilder withOption(ChannelOption<T> option, T value) {
+    channelOptions.put(option, value);
     return this;
   }
 
@@ -133,21 +156,8 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
    *
    * <p>Default: <code>TLS</code>
    */
-  public final NettyChannelBuilder negotiationType(NegotiationType type) {
+  public NettyChannelBuilder negotiationType(NegotiationType type) {
     negotiationType = type;
-    return this;
-  }
-
-  /**
-   * Sets the {@link ProtocolNegotiator} to be used. If non-{@code null}, overrides the value
-   * specified in {@link #negotiationType(NegotiationType)} or {@link #usePlaintext(boolean)}.
-   *
-   * <p>Default: {@code null}.
-   */
-  @Internal
-  public final NettyChannelBuilder protocolNegotiator(
-          @Nullable ProtocolNegotiator protocolNegotiator) {
-    this.protocolNegotiator = protocolNegotiator;
     return this;
   }
 
@@ -160,7 +170,7 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
    * <p>The channel won't take ownership of the given EventLoopGroup. It's caller's responsibility
    * to shut it down when it's desired.
    */
-  public final NettyChannelBuilder eventLoopGroup(@Nullable EventLoopGroup eventLoopGroup) {
+  public NettyChannelBuilder eventLoopGroup(@Nullable EventLoopGroup eventLoopGroup) {
     this.eventLoopGroup = eventLoopGroup;
     return this;
   }
@@ -169,7 +179,12 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
    * SSL/TLS context to use instead of the system default. It must have been configured with {@link
    * GrpcSslContexts}, but options could have been overridden.
    */
-  public final NettyChannelBuilder sslContext(SslContext sslContext) {
+  public NettyChannelBuilder sslContext(SslContext sslContext) {
+    if (sslContext != null) {
+      checkArgument(sslContext.isClient(),
+          "Server SSL context can not be used for client channel");
+      GrpcSslContexts.ensureAlpnAndH2Enabled(sslContext.applicationProtocolNegotiator());
+    }
     this.sslContext = sslContext;
     return this;
   }
@@ -178,19 +193,20 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
    * Sets the flow control window in bytes. If not called, the default value
    * is {@link #DEFAULT_FLOW_CONTROL_WINDOW}).
    */
-  public final NettyChannelBuilder flowControlWindow(int flowControlWindow) {
+  public NettyChannelBuilder flowControlWindow(int flowControlWindow) {
     checkArgument(flowControlWindow > 0, "flowControlWindow must be positive");
     this.flowControlWindow = flowControlWindow;
     return this;
   }
 
   /**
-   * Sets the maximum message size allowed to be received on the channel. If not called,
-   * defaults to {@link GrpcUtil#DEFAULT_MAX_MESSAGE_SIZE}.
+   * Sets the max message size.
+   *
+   * @deprecated Use {@link #maxInboundMessageSize} instead
    */
-  public final NettyChannelBuilder maxMessageSize(int maxMessageSize) {
-    checkArgument(maxMessageSize >= 0, "maxMessageSize must be >= 0");
-    this.maxMessageSize = maxMessageSize;
+  @Deprecated
+  public NettyChannelBuilder maxMessageSize(int maxMessageSize) {
+    maxInboundMessageSize(maxMessageSize);
     return this;
   }
 
@@ -198,7 +214,7 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
    * Sets the maximum size of header list allowed to be received on the channel. If not called,
    * defaults to {@link GrpcUtil#DEFAULT_MAX_HEADER_LIST_SIZE}.
    */
-  public final NettyChannelBuilder maxHeaderListSize(int maxHeaderListSize) {
+  public NettyChannelBuilder maxHeaderListSize(int maxHeaderListSize) {
     checkArgument(maxHeaderListSize > 0, "maxHeaderListSize must be > 0");
     this.maxHeaderListSize = maxHeaderListSize;
     return this;
@@ -209,7 +225,7 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
    * {@code PLAINTEXT_UPGRADE}.
    */
   @Override
-  public final NettyChannelBuilder usePlaintext(boolean skipNegotiation) {
+  public NettyChannelBuilder usePlaintext(boolean skipNegotiation) {
     if (skipNegotiation) {
       negotiationType(NegotiationType.PLAINTEXT);
     } else {
@@ -218,10 +234,37 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
     return this;
   }
 
+
+  /**
+   * Enable keepalive with default delay and timeout.
+   */
+  public final NettyChannelBuilder enableKeepAlive(boolean enable) {
+    enableKeepAlive = enable;
+    if (enable) {
+      keepAliveDelayNanos = DEFAULT_KEEPALIVE_DELAY_NANOS;
+      keepAliveTimeoutNanos = DEFAULT_KEEPALIVE_TIMEOUT_NANOS;
+    }
+    return this;
+  }
+
+  /**
+   * Enable keepalive with custom delay and timeout.
+   */
+  public final NettyChannelBuilder enableKeepAlive(boolean enable, long keepAliveDelay,
+      TimeUnit delayUnit, long keepAliveTimeout, TimeUnit timeoutUnit) {
+    enableKeepAlive = enable;
+    if (enable) {
+      keepAliveDelayNanos = delayUnit.toNanos(keepAliveDelay);
+      keepAliveTimeoutNanos = timeoutUnit.toNanos(keepAliveTimeout);
+    }
+    return this;
+  }
+
   @Override
   protected ClientTransportFactory buildTransportFactory() {
-    return new NettyTransportFactory(channelType, negotiationType, protocolNegotiator, sslContext,
-        eventLoopGroup, flowControlWindow, maxMessageSize, maxHeaderListSize);
+    return new NettyTransportFactory(dynamicParamsFactory, channelType, channelOptions,
+        negotiationType, sslContext, eventLoopGroup, flowControlWindow, maxInboundMessageSize(),
+        maxHeaderListSize, enableKeepAlive, keepAliveDelayNanos, keepAliveTimeoutNanos);
   }
 
   @Override
@@ -240,6 +283,10 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
     }
     return Attributes.newBuilder()
         .set(NameResolver.Factory.PARAMS_DEFAULT_PORT, defaultPort).build();
+  }
+
+  void overrideAuthorityChecker(@Nullable OverrideAuthorityChecker authorityChecker) {
+    this.authorityChecker = authorityChecker;
   }
 
   @VisibleForTesting
@@ -266,38 +313,84 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
     }
   }
 
+  interface OverrideAuthorityChecker {
+    String checkAuthority(String authority);
+  }
+
+  @Override
+  protected String checkAuthority(String authority) {
+    if (authorityChecker != null) {
+      return authorityChecker.checkAuthority(authority);
+    }
+    return super.checkAuthority(authority);
+  }
+
+  void setDynamicParamsFactory(TransportCreationParamsFilterFactory factory) {
+    this.dynamicParamsFactory = checkNotNull(factory, "factory");
+  }
+
+  interface TransportCreationParamsFilterFactory {
+    TransportCreationParamsFilter create(
+        SocketAddress targetServerAddress, String authority, @Nullable String userAgent);
+  }
+
+  interface TransportCreationParamsFilter {
+    SocketAddress getTargetServerAddress();
+
+    String getAuthority();
+
+    @Nullable String getUserAgent();
+
+    ProtocolNegotiator getProtocolNegotiator();
+  }
+
   /**
    * Creates Netty transports. Exposed for internal use, as it should be private.
    */
-  @Internal
-  protected static final class NettyTransportFactory implements ClientTransportFactory {
+  private static final class NettyTransportFactory implements ClientTransportFactory {
+    private final TransportCreationParamsFilterFactory transportCreationParamsFilterFactory;
     private final Class<? extends Channel> channelType;
+    private final Map<ChannelOption<?>, ?> channelOptions;
     private final NegotiationType negotiationType;
-    private final ProtocolNegotiator protocolNegotiator;
     private final SslContext sslContext;
     private final EventLoopGroup group;
     private final boolean usingSharedGroup;
     private final int flowControlWindow;
     private final int maxMessageSize;
     private final int maxHeaderListSize;
+    private final boolean enableKeepAlive;
+    private final long keepAliveDelayNanos;
+    private final long keepAliveTimeoutNanos;
 
     private boolean closed;
 
-    private NettyTransportFactory(Class<? extends Channel> channelType,
-                                  NegotiationType negotiationType,
-                                  ProtocolNegotiator protocolNegotiator,
-                                  SslContext sslContext,
-                                  EventLoopGroup group,
-                                  int flowControlWindow,
-                                  int maxMessageSize,
-                                  int maxHeaderListSize) {
+    NettyTransportFactory(TransportCreationParamsFilterFactory transportCreationParamsFilterFactory,
+        Class<? extends Channel> channelType, Map<ChannelOption<?>, ?> channelOptions,
+        NegotiationType negotiationType, SslContext sslContext, EventLoopGroup group,
+        int flowControlWindow, int maxMessageSize, int maxHeaderListSize, boolean enableKeepAlive,
+        long keepAliveDelayNanos, long keepAliveTimeoutNanos) {
       this.channelType = channelType;
       this.negotiationType = negotiationType;
-      this.protocolNegotiator = protocolNegotiator;
+      this.channelOptions = new HashMap<ChannelOption<?>, Object>(channelOptions);
       this.sslContext = sslContext;
+
+      if (transportCreationParamsFilterFactory == null) {
+        transportCreationParamsFilterFactory = new TransportCreationParamsFilterFactory() {
+          @Override
+          public TransportCreationParamsFilter create(
+              SocketAddress targetServerAddress, String authority, String userAgent) {
+            return new DynamicNettyTransportParams(targetServerAddress, authority, userAgent);
+          }
+        };
+      }
+      this.transportCreationParamsFilterFactory = transportCreationParamsFilterFactory;
+
       this.flowControlWindow = flowControlWindow;
       this.maxMessageSize = maxMessageSize;
       this.maxHeaderListSize = maxHeaderListSize;
+      this.enableKeepAlive = enableKeepAlive;
+      this.keepAliveDelayNanos = keepAliveDelayNanos;
+      this.keepAliveTimeoutNanos = keepAliveTimeoutNanos;
       usingSharedGroup = group == null;
       if (usingSharedGroup) {
         // The group was unspecified, using the shared group.
@@ -308,24 +401,21 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
     }
 
     @Override
-    public ManagedClientTransport newClientTransport(
-        SocketAddress serverAddress, String authority) {
-      if (closed) {
-        throw new IllegalStateException("The transport factory is closed.");
-      }
-      ProtocolNegotiator negotiator = protocolNegotiator != null ? protocolNegotiator :
-          createProtocolNegotiator(authority, negotiationType, sslContext);
-      return newClientTransport(serverAddress, authority, negotiator);
-    }
+    public ConnectionClientTransport newClientTransport(
+        SocketAddress serverAddress, String authority, @Nullable String userAgent) {
+      checkState(!closed, "The transport factory is closed.");
 
-    @Internal  // This is strictly for internal use.  Depend on this at your own peril.
-    public ManagedClientTransport newClientTransport(SocketAddress serverAddress,
-        String authority, ProtocolNegotiator negotiator) {
-      if (closed) {
-        throw new IllegalStateException("The transport factory is closed.");
+      TransportCreationParamsFilter dparams =
+          transportCreationParamsFilterFactory.create(serverAddress, authority, userAgent);
+
+      NettyClientTransport transport = new NettyClientTransport(
+          dparams.getTargetServerAddress(), channelType, channelOptions, group,
+          dparams.getProtocolNegotiator(), flowControlWindow,
+          maxMessageSize, maxHeaderListSize, dparams.getAuthority(), dparams.getUserAgent());
+      if (enableKeepAlive) {
+        transport.enableKeepAlive(true, keepAliveDelayNanos, keepAliveTimeoutNanos);
       }
-      return new NettyClientTransport(serverAddress, channelType, group, negotiator,
-          flowControlWindow, maxMessageSize, maxHeaderListSize, authority);
+      return transport;
     }
 
     @Override
@@ -337,6 +427,40 @@ public class NettyChannelBuilder extends AbstractManagedChannelImplBuilder<Netty
 
       if (usingSharedGroup) {
         SharedResourceHolder.release(Utils.DEFAULT_WORKER_EVENT_LOOP_GROUP, group);
+      }
+    }
+
+    private final class DynamicNettyTransportParams implements TransportCreationParamsFilter {
+
+      private final SocketAddress targetServerAddress;
+      private final String authority;
+      @Nullable private final String userAgent;
+
+      private DynamicNettyTransportParams(
+          SocketAddress targetServerAddress, String authority, String userAgent) {
+        this.targetServerAddress = targetServerAddress;
+        this.authority = authority;
+        this.userAgent = userAgent;
+      }
+
+      @Override
+      public SocketAddress getTargetServerAddress() {
+        return targetServerAddress;
+      }
+
+      @Override
+      public String getAuthority() {
+        return authority;
+      }
+
+      @Override
+      public String getUserAgent() {
+        return userAgent;
+      }
+
+      @Override
+      public ProtocolNegotiator getProtocolNegotiator() {
+        return createProtocolNegotiator(authority, negotiationType, sslContext);
       }
     }
   }

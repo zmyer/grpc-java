@@ -39,6 +39,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.mockito.Mockito.mock;
 
 import com.google.common.base.Objects;
 
@@ -50,19 +51,30 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 
 /** Unit tests for {@link CallOptions}. */
 @RunWith(JUnit4.class)
 public class CallOptionsTest {
   private String sampleAuthority = "authority";
-  private Deadline.Ticker ticker = new DeadlineTest.FakeTicker();
+  private String sampleCompressor = "compressor";
+  private Deadline.Ticker ticker = new FakeTicker();
   private Deadline sampleDeadline = Deadline.after(1, NANOSECONDS, ticker);
   private Key<String> sampleKey = Attributes.Key.of("sample");
   private Attributes sampleAffinity = Attributes.newBuilder().set(sampleKey, "blah").build();
+  private CallCredentials sampleCreds = mock(CallCredentials.class);
+  private CallOptions.Key<String> option1 = CallOptions.Key.of("option1", "default");
+  private CallOptions.Key<String> option2 = CallOptions.Key.of("option2", "default");
   private CallOptions allSet = CallOptions.DEFAULT
       .withAuthority(sampleAuthority)
       .withDeadline(sampleDeadline)
-      .withAffinity(sampleAffinity);
+      .withAffinity(sampleAffinity)
+      .withCallCredentials(sampleCreds)
+      .withCompression(sampleCompressor)
+      .withWaitForReady()
+      .withExecutor(directExecutor())
+      .withOption(option1, "value1")
+      .withOption(option2, "value2");
 
   @Test
   public void defaultsAreAllNull() {
@@ -70,6 +82,16 @@ public class CallOptionsTest {
     assertThat(CallOptions.DEFAULT.getAuthority()).isNull();
     assertThat(CallOptions.DEFAULT.getAffinity()).isEqualTo(Attributes.EMPTY);
     assertThat(CallOptions.DEFAULT.getExecutor()).isNull();
+    assertThat(CallOptions.DEFAULT.getCredentials()).isNull();
+    assertThat(CallOptions.DEFAULT.getCompressor()).isNull();
+    assertThat(CallOptions.DEFAULT.isWaitForReady()).isFalse();
+  }
+
+  @Test
+  public void withAndWithoutWaitForReady() {
+    assertThat(CallOptions.DEFAULT.withWaitForReady().isWaitForReady()).isTrue();
+    assertThat(CallOptions.DEFAULT.withWaitForReady().withoutWaitForReady().isWaitForReady())
+        .isFalse();
   }
 
   @Test
@@ -77,6 +99,12 @@ public class CallOptionsTest {
     assertThat(allSet.getAuthority()).isSameAs(sampleAuthority);
     assertThat(allSet.getDeadline()).isSameAs(sampleDeadline);
     assertThat(allSet.getAffinity()).isSameAs(sampleAffinity);
+    assertThat(allSet.getCredentials()).isSameAs(sampleCreds);
+    assertThat(allSet.getCompressor()).isSameAs(sampleCompressor);
+    assertThat(allSet.getExecutor()).isSameAs(directExecutor());
+    assertThat(allSet.getOption(option1)).isSameAs("value1");
+    assertThat(allSet.getOption(option2)).isSameAs("value2");
+    assertThat(allSet.isWaitForReady()).isTrue();
   }
 
   @Test
@@ -90,6 +118,11 @@ public class CallOptionsTest {
     assertThat(
         equal(allSet,
             allSet.withAffinity(Attributes.EMPTY).withAffinity(sampleAffinity)))
+        .isTrue();
+    assertThat(
+        equal(allSet,
+            allSet.withCallCredentials(mock(CallCredentials.class))
+            .withCallCredentials(sampleCreds)))
         .isTrue();
   }
 
@@ -127,11 +160,14 @@ public class CallOptionsTest {
 
   @Test
   public void toStringMatches_noDeadline_default() {
-    String expected = "CallOptions{deadline=null, authority=authority, affinity={sample=blah}, "
-        + "executor=class io.grpc.internal.SerializingExecutor, compressorName=null}";
+    String expected = "CallOptions{deadline=null, authority=authority, callCredentials=null, "
+        + "affinity={sample=blah}, "
+        + "executor=class io.grpc.internal.SerializingExecutor, compressorName=compressor, "
+        + "customOptions=[[option1, value1], [option2, value2]], waitForReady=true}";
     String actual = allSet
         .withDeadline(null)
         .withExecutor(new SerializingExecutor(directExecutor()))
+        .withCallCredentials(null)
         .toString();
 
     assertThat(actual).isEqualTo(expected);
@@ -139,14 +175,15 @@ public class CallOptionsTest {
 
   @Test
   public void toStringMatches_noDeadline() {
-    assertThat("CallOptions{deadline=null, authority=null, "
-        + "affinity={}, executor=null, compressorName=null}")
-            .isEqualTo(CallOptions.DEFAULT.toString());
+    assertThat("CallOptions{deadline=null, authority=null, callCredentials=null, "
+        + "affinity={}, executor=null, compressorName=null, customOptions=[], "
+        + "waitForReady=false}")
+        .isEqualTo(CallOptions.DEFAULT.toString());
   }
 
   @Test
   public void toStringMatches_withDeadline() {
-    allSet.toString().contains("1 ns from now");
+    assertThat(allSet.toString()).contains("1 ns from now");
   }
 
   @Test
@@ -165,10 +202,56 @@ public class CallOptionsTest {
     assertAbout(deadline()).that(opts.getDeadline()).isWithin(50, MILLISECONDS).of(reference);
   }
 
+  @Test
+  public void withCustomOptionDefault() {
+    CallOptions opts = CallOptions.DEFAULT;
+    assertThat(opts.getOption(option1)).isEqualTo("default");
+  }
+  
+  @Test
+  public void withCustomOption() {
+    CallOptions opts = CallOptions.DEFAULT.withOption(option1, "v1");
+    assertThat(opts.getOption(option1)).isEqualTo("v1");
+  }
+  
+  @Test
+  public void withCustomOptionLastOneWins() {
+    CallOptions opts = CallOptions.DEFAULT.withOption(option1, "v1").withOption(option1, "v2");
+    assertThat(opts.getOption(option1)).isEqualTo("v2");
+  }
+  
+  @Test
+  public void withMultipleCustomOption() {
+    CallOptions opts = CallOptions.DEFAULT.withOption(option1, "v1").withOption(option2, "v2");
+    assertThat(opts.getOption(option1)).isEqualTo("v1");
+    assertThat(opts.getOption(option2)).isEqualTo("v2");
+  }
+
   // TODO(carl-mastrangelo): consider making a CallOptionsSubject for Truth.
   private static boolean equal(CallOptions o1, CallOptions o2) {
     return Objects.equal(o1.getDeadline(), o2.getDeadline())
         && Objects.equal(o1.getAuthority(), o2.getAuthority())
-        && Objects.equal(o1.getAffinity(), o2.getAffinity());
+        && Objects.equal(o1.getAffinity(), o2.getAffinity())
+        && Objects.equal(o1.getCredentials(), o2.getCredentials());
+  }
+
+  private static class FakeTicker extends Deadline.Ticker {
+    private long time;
+
+    @Override
+    public long read() {
+      return time;
+    }
+
+    public void reset(long time) {
+      this.time = time;
+    }
+
+    public void increment(long period, TimeUnit unit) {
+      if (period < 0) {
+        throw new IllegalArgumentException();
+      }
+      this.time += unit.toNanos(period);
+    }
   }
 }

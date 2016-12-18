@@ -31,20 +31,23 @@
 
 package io.grpc;
 
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.io.IOException;
-import java.net.URL;
-import java.util.Enumeration;
+import java.util.ServiceConfigurationError;
 
 /** Unit tests for {@link ManagedChannelProvider}. */
 @RunWith(JUnit4.class)
 public class ManagedChannelProviderTest {
+  private final String serviceFile = "META-INF/services/io.grpc.ManagedChannelProvider";
+
   @Test(expected = ManagedChannelProvider.ProviderNotFoundException.class)
   public void noProvider() {
     ManagedChannelProvider.provider();
@@ -52,41 +55,56 @@ public class ManagedChannelProviderTest {
 
   @Test
   public void multipleProvider() {
-    ClassLoader cl = new ServicesClassLoader(getClass().getClassLoader(),
+    ClassLoader cl = new ReplacingClassLoader(getClass().getClassLoader(), serviceFile,
         "io/grpc/ManagedChannelProviderTest-multipleProvider.txt");
     assertSame(Available7Provider.class, ManagedChannelProvider.load(cl).getClass());
   }
 
   @Test
   public void unavailableProvider() {
-    ClassLoader cl = new ServicesClassLoader(getClass().getClassLoader(),
+    ClassLoader cl = new ReplacingClassLoader(getClass().getClassLoader(), serviceFile,
         "io/grpc/ManagedChannelProviderTest-unavailableProvider.txt");
     assertNull(ManagedChannelProvider.load(cl));
   }
 
-  private static class ServicesClassLoader extends ClassLoader {
-    private final String serviceFile = "META-INF/services/io.grpc.ManagedChannelProvider";
-    private final String resourceName;
-
-    public ServicesClassLoader(ClassLoader parent, String resourceName) {
-      super(parent);
-      this.resourceName = resourceName;
+  @Test
+  public void getCandidatesViaHardCoded_usesProvidedClassLoader() {
+    final RuntimeException toThrow = new RuntimeException();
+    try {
+      ManagedChannelProvider.getCandidatesViaHardCoded(new ClassLoader() {
+        @Override
+        public Class<?> loadClass(String name) {
+          throw toThrow;
+        }
+      });
+      fail("Expected exception");
+    } catch (RuntimeException ex) {
+      assertSame(toThrow, ex);
     }
+  }
 
-    @Override
-    protected URL findResource(String name) {
-      if (serviceFile.equals(name)) {
-        return getParent().getResource(resourceName);
-      }
-      return super.findResource(name);
-    }
+  @Test
+  public void getCandidatesViaHardCoded_ignoresMissingClasses() {
+    Iterable<ManagedChannelProvider> i =
+        ManagedChannelProvider.getCandidatesViaHardCoded(new ClassLoader() {
+          @Override
+          public Class<?> loadClass(String name) throws ClassNotFoundException {
+            throw new ClassNotFoundException();
+          }
+        });
+    assertFalse("Iterator should be empty", i.iterator().hasNext());
+  }
 
-    @Override
-    protected Enumeration<URL> findResources(String name) throws IOException {
-      if (serviceFile.equals(name)) {
-        return getParent().getResources(resourceName);
-      }
-      return super.findResources(name);
+  @Test
+  public void create_throwsErrorOnMisconfiguration() throws Exception {
+    class PrivateClass {}
+
+    try {
+      ManagedChannelProvider.create(PrivateClass.class);
+      fail("Expected exception");
+    } catch (ServiceConfigurationError e) {
+      assertTrue("Expected ClassCastException cause: " + e.getCause(),
+          e.getCause() instanceof ClassCastException);
     }
   }
 

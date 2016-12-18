@@ -31,7 +31,7 @@
 
 package io.grpc.inprocess;
 
-import io.grpc.internal.Server;
+import io.grpc.internal.InternalServer;
 import io.grpc.internal.ServerListener;
 import io.grpc.internal.ServerTransportListener;
 
@@ -42,7 +42,7 @@ import java.util.concurrent.ConcurrentMap;
 import javax.annotation.concurrent.ThreadSafe;
 
 @ThreadSafe
-class InProcessServer implements Server {
+class InProcessServer implements InternalServer {
   private static final ConcurrentMap<String, InProcessServer> registry
       = new ConcurrentHashMap<String, InProcessServer>();
 

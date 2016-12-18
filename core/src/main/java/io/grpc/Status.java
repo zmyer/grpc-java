@@ -31,15 +31,17 @@
 
 package io.grpc;
 
+import static com.google.common.base.Charsets.US_ASCII;
+import static com.google.common.base.Charsets.UTF_8;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Throwables.getStackTraceAsString;
+
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
-import com.google.common.base.Preconditions;
-import com.google.common.base.Throwables;
 
-import io.grpc.Metadata.AsciiMarshaller;
+import io.grpc.Metadata.TrustedAsciiMarshaller;
 
 import java.nio.ByteBuffer;
-import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -47,6 +49,7 @@ import java.util.TreeMap;
 
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.Immutable;
+
 
 /**
  * Defines the status of an operation by providing a standard {@link Code} in conjunction with an
@@ -140,7 +143,7 @@ public final class Status {
      * to be deleted may be non-empty, an rmdir operation is applied to
      * a non-directory, etc.
      *
-     * <p> A litmus test that may help a service implementor in deciding
+     * <p>A litmus test that may help a service implementor in deciding
      * between FAILED_PRECONDITION, ABORTED, and UNAVAILABLE:
      * (a) Use UNAVAILABLE if the client can retry just the failing call.
      * (b) Use ABORTED if the client should retry at a higher-level
@@ -157,7 +160,7 @@ public final class Status {
      * The operation was aborted, typically due to a concurrency issue
      * like sequencer check failures, transaction aborts, etc.
      *
-     * <p> See litmus test above for deciding between FAILED_PRECONDITION,
+     * <p>See litmus test above for deciding between FAILED_PRECONDITION,
      * ABORTED, and UNAVAILABLE.
      */
     ABORTED(10),
@@ -214,11 +217,11 @@ public final class Status {
     UNAUTHENTICATED(16);
 
     private final int value;
-    private final String valueAscii;
+    private final byte[] valueAscii;
 
     private Code(int value) {
       this.value = value;
-      this.valueAscii = Integer.toString(value);
+      this.valueAscii = Integer.toString(value).getBytes(US_ASCII);
     }
 
     /**
@@ -228,11 +231,11 @@ public final class Status {
       return value;
     }
 
-    private Status status() {
+    public Status toStatus() {
       return STATUS_LIST.get(value);
     }
 
-    private String valueAscii() {
+    private byte[] valueAscii() {
       return valueAscii;
     }
   }
@@ -255,52 +258,52 @@ public final class Status {
   // A pseudo-enum of Status instances mapped 1:1 with values in Code. This simplifies construction
   // patterns for derived instances of Status.
   /** The operation completed successfully. */
-  public static final Status OK = Code.OK.status();
+  public static final Status OK = Code.OK.toStatus();
   /** The operation was cancelled (typically by the caller). */
-  public static final Status CANCELLED = Code.CANCELLED.status();
+  public static final Status CANCELLED = Code.CANCELLED.toStatus();
   /** Unknown error. See {@link Code#UNKNOWN}. */
-  public static final Status UNKNOWN = Code.UNKNOWN.status();
+  public static final Status UNKNOWN = Code.UNKNOWN.toStatus();
   /** Client specified an invalid argument. See {@link Code#INVALID_ARGUMENT}. */
-  public static final Status INVALID_ARGUMENT = Code.INVALID_ARGUMENT.status();
+  public static final Status INVALID_ARGUMENT = Code.INVALID_ARGUMENT.toStatus();
   /** Deadline expired before operation could complete. See {@link Code#DEADLINE_EXCEEDED}. */
-  public static final Status DEADLINE_EXCEEDED = Code.DEADLINE_EXCEEDED.status();
+  public static final Status DEADLINE_EXCEEDED = Code.DEADLINE_EXCEEDED.toStatus();
   /** Some requested entity (e.g., file or directory) was not found. */
-  public static final Status NOT_FOUND = Code.NOT_FOUND.status();
+  public static final Status NOT_FOUND = Code.NOT_FOUND.toStatus();
   /** Some entity that we attempted to create (e.g., file or directory) already exists. */
-  public static final Status ALREADY_EXISTS = Code.ALREADY_EXISTS.status();
+  public static final Status ALREADY_EXISTS = Code.ALREADY_EXISTS.toStatus();
   /**
    * The caller does not have permission to execute the specified operation. See {@link
    * Code#PERMISSION_DENIED}.
    */
-  public static final Status PERMISSION_DENIED = Code.PERMISSION_DENIED.status();
+  public static final Status PERMISSION_DENIED = Code.PERMISSION_DENIED.toStatus();
   /** The request does not have valid authentication credentials for the operation. */
-  public static final Status UNAUTHENTICATED = Code.UNAUTHENTICATED.status();
+  public static final Status UNAUTHENTICATED = Code.UNAUTHENTICATED.toStatus();
   /**
    * Some resource has been exhausted, perhaps a per-user quota, or perhaps the entire file system
    * is out of space.
    */
-  public static final Status RESOURCE_EXHAUSTED = Code.RESOURCE_EXHAUSTED.status();
+  public static final Status RESOURCE_EXHAUSTED = Code.RESOURCE_EXHAUSTED.toStatus();
   /**
    * Operation was rejected because the system is not in a state required for the operation's
    * execution. See {@link Code#FAILED_PRECONDITION}.
    */
   public static final Status FAILED_PRECONDITION =
-      Code.FAILED_PRECONDITION.status();
+      Code.FAILED_PRECONDITION.toStatus();
   /**
    * The operation was aborted, typically due to a concurrency issue like sequencer check failures,
    * transaction aborts, etc. See {@link Code#ABORTED}.
    */
-  public static final Status ABORTED = Code.ABORTED.status();
+  public static final Status ABORTED = Code.ABORTED.toStatus();
   /** Operation was attempted past the valid range. See {@link Code#OUT_OF_RANGE}. */
-  public static final Status OUT_OF_RANGE = Code.OUT_OF_RANGE.status();
+  public static final Status OUT_OF_RANGE = Code.OUT_OF_RANGE.toStatus();
   /** Operation is not implemented or not supported/enabled in this service. */
-  public static final Status UNIMPLEMENTED = Code.UNIMPLEMENTED.status();
+  public static final Status UNIMPLEMENTED = Code.UNIMPLEMENTED.toStatus();
   /** Internal errors. See {@link Code#INTERNAL}. */
-  public static final Status INTERNAL = Code.INTERNAL.status();
+  public static final Status INTERNAL = Code.INTERNAL.toStatus();
   /** The service is currently unavailable. See {@link Code#UNAVAILABLE}. */
-  public static final Status UNAVAILABLE = Code.UNAVAILABLE.status();
+  public static final Status UNAVAILABLE = Code.UNAVAILABLE.toStatus();
   /** Unrecoverable data loss or corruption. */
-  public static final Status DATA_LOSS = Code.DATA_LOSS.status();
+  public static final Status DATA_LOSS = Code.DATA_LOSS.toStatus();
 
   /**
    * Return a {@link Status} given a canonical error {@link Code} value.
@@ -311,6 +314,46 @@ public final class Status {
     } else {
       return STATUS_LIST.get(codeValue);
     }
+  }
+
+  private static Status fromCodeValue(byte[] asciiCodeValue) {
+    if (asciiCodeValue.length == 1 && asciiCodeValue[0] == '0') {
+      return Status.OK;
+    }
+    return fromCodeValueSlow(asciiCodeValue);
+  }
+
+  @SuppressWarnings("fallthrough")
+  private static Status fromCodeValueSlow(byte[] asciiCodeValue) {
+    int index = 0;
+    int codeValue = 0;
+    switch (asciiCodeValue.length) {
+      case 2:
+        if (asciiCodeValue[index] < '0' || asciiCodeValue[index] > '9') {
+          break;
+        }
+        codeValue += (asciiCodeValue[index++] - '0') * 10;
+        // fall through
+      case 1:
+        if (asciiCodeValue[index] < '0' || asciiCodeValue[index] > '9') {
+          break;
+        }
+        codeValue += asciiCodeValue[index] - '0';
+        if (codeValue < STATUS_LIST.size()) {
+          return STATUS_LIST.get(codeValue);
+        }
+        break;
+      default:
+        break;
+    }
+    return UNKNOWN.withDescription("Unknown code " + new String(asciiCodeValue, US_ASCII));
+  }
+
+  /**
+   * Return a {@link Status} given a canonical error {@link Code} object.
+   */
+  public static Status fromCode(Code code) {
+    return code.toStatus();
   }
 
   /**
@@ -342,67 +385,54 @@ public final class Status {
    * sequence.  After the input header bytes are converted into UTF-8 bytes, the new byte array is
    * reinterpretted back as a string.
    */
-  private static final AsciiMarshaller<String> STATUS_MESSAGE_MARSHALLER =
-      new AsciiMarshaller<String>() {
-
-    @Override
-    public String toAsciiString(String value) {
-      // This can be made faster if necessary.
-      StringBuilder sb = new StringBuilder(value.length());
-      for (byte b : value.getBytes(Charset.forName("UTF-8"))) {
-        if (b >= ' ' && b < '%' || b > '%' && b < '~') {
-          // fast path, if it's plain ascii and not a percent, pass it through.
-          sb.append((char) b);
-        } else {
-          sb.append(String.format("%%%02X", b));
-        }
-      }
-      return sb.toString();
-    }
-
-    @Override
-    public String parseAsciiString(String value) {
-      Charset transerEncoding = Charset.forName("US-ASCII");
-      // This can be made faster if necessary.
-      byte[] source = value.getBytes(transerEncoding);
-      ByteBuffer buf = ByteBuffer.allocate(source.length);
-      for (int i = 0; i < source.length; ) {
-        if (source[i] == '%' && i + 2 < source.length) {
-          try {
-            buf.put((byte)Integer.parseInt(new String(source, i + 1, 2, transerEncoding), 16));
-            i += 3;
-            continue;
-          } catch (NumberFormatException e) {
-            // ignore, fall through, just push the bytes.
-          }
-        }
-        buf.put(source[i]);
-        i += 1;
-      }
-      return new String(buf.array(), 0, buf.position(), Charset.forName("UTF-8"));
-    }
-  };
+  private static final TrustedAsciiMarshaller<String> STATUS_MESSAGE_MARSHALLER =
+      new StatusMessageMarshaller();
 
   /**
    * Key to bind status message to trailing metadata.
    */
   @Internal
-  public static final Metadata.Key<String> MESSAGE_KEY
-      = Metadata.Key.of("grpc-message", STATUS_MESSAGE_MARSHALLER);
+  public static final Metadata.Key<String> MESSAGE_KEY =
+      Metadata.Key.of("grpc-message", STATUS_MESSAGE_MARSHALLER);
 
   /**
    * Extract an error {@link Status} from the causal chain of a {@link Throwable}.
+   * If no status can be found, a status is created with {@link Code#UNKNOWN} as its code and
+   * {@code t} as its cause.
+   *
+   * @return non-{@code null} status
    */
   public static Status fromThrowable(Throwable t) {
-    for (Throwable cause : Throwables.getCausalChain(t)) {
+    Throwable cause = checkNotNull(t, "t");
+    while (cause != null) {
       if (cause instanceof StatusException) {
         return ((StatusException) cause).getStatus();
       } else if (cause instanceof StatusRuntimeException) {
         return ((StatusRuntimeException) cause).getStatus();
       }
+      cause = cause.getCause();
     }
     // Couldn't find a cause with a Status
     return UNKNOWN.withCause(t);
+  }
+
+  /**
+   * Extract an error trailers from the causal chain of a {@link Throwable}.
+   *
+   * @return the trailers or {@code null} if not found.
+   */
+  @ExperimentalApi
+  public static Metadata trailersFromThrowable(Throwable t) {
+    Throwable cause = checkNotNull(t, "t");
+    while (cause != null) {
+      if (cause instanceof StatusException) {
+        return ((StatusException) cause).getTrailers();
+      } else if (cause instanceof StatusRuntimeException) {
+        return ((StatusRuntimeException) cause).getTrailers();
+      }
+      cause = cause.getCause();
+    }
+    return null;
   }
 
   static String formatThrowableMessage(Status status) {
@@ -422,13 +452,14 @@ public final class Status {
   }
 
   private Status(Code code, @Nullable String description, @Nullable Throwable cause) {
-    this.code = Preconditions.checkNotNull(code);
+    this.code = checkNotNull(code, "code");
     this.description = description;
     this.cause = cause;
   }
 
   /**
    * Create a derived instance of {@link Status} with the given cause.
+   * However, the cause is not transmitted from server to client.
    */
   public Status withCause(Throwable cause) {
     if (Objects.equal(this.cause, cause)) {
@@ -480,6 +511,7 @@ public final class Status {
 
   /**
    * The underlying cause of an error.
+   * Note that the cause is not transmitted from server to client.
    */
   @Nullable
   public Throwable getCause() {
@@ -502,11 +534,28 @@ public final class Status {
   }
 
   /**
+   * Same as {@link #asRuntimeException()} but includes the provided trailers in the returned
+   * exception.
+   */
+  @ExperimentalApi
+  public StatusRuntimeException asRuntimeException(Metadata trailers) {
+    return new StatusRuntimeException(this, trailers);
+  }
+
+  /**
    * Convert this {@link Status} to an {@link Exception}. Use {@link #fromThrowable}
    * to recover this {@link Status} instance when the returned exception is in the causal chain.
    */
   public StatusException asException() {
     return new StatusException(this);
+  }
+
+  /**
+   * Same as {@link #asException()} but includes the provided trailers in the returned exception.
+   */
+  @ExperimentalApi
+  public StatusException asException(Metadata trailers) {
+    return new StatusException(this, trailers);
   }
 
   /** A string representation of the status useful for debugging. */
@@ -515,19 +564,101 @@ public final class Status {
     return MoreObjects.toStringHelper(this)
         .add("code", code.name())
         .add("description", description)
-        .add("cause", cause)
+        .add("cause", cause != null ? getStackTraceAsString(cause) : cause)
         .toString();
   }
 
-  private static class StatusCodeMarshaller implements Metadata.AsciiMarshaller<Status> {
+  private static final class StatusCodeMarshaller implements TrustedAsciiMarshaller<Status> {
     @Override
-    public String toAsciiString(Status status) {
+    public byte[] toAsciiString(Status status) {
       return status.getCode().valueAscii();
     }
 
     @Override
-    public Status parseAsciiString(String serialized) {
-      return fromCodeValue(Integer.valueOf(serialized));
+    public Status parseAsciiString(byte[] serialized) {
+      return fromCodeValue(serialized);
+    }
+  }
+
+  private static final class StatusMessageMarshaller implements TrustedAsciiMarshaller<String> {
+
+    private static final byte[] HEX =
+        {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
+
+    @Override
+    public byte[] toAsciiString(String value) {
+      byte[] valueBytes = value.getBytes(UTF_8);
+      for (int i = 0; i < valueBytes.length; i++) {
+        byte b = valueBytes[i];
+        // If there are only non escaping characters, skip the slow path.
+        if (isEscapingChar(b)) {
+          return toAsciiStringSlow(valueBytes, i);
+        }
+      }
+      return valueBytes;
+    }
+
+    private static boolean isEscapingChar(byte b) {
+      return b < ' ' || b >= '~' || b == '%';
+    }
+
+    /**
+     * @param valueBytes the UTF-8 bytes
+     * @param ri The reader index, pointed at the first byte that needs escaping.
+     */
+    private static byte[] toAsciiStringSlow(byte[] valueBytes, int ri) {
+      byte[] escapedBytes = new byte[ri + (valueBytes.length - ri) * 3];
+      // copy over the good bytes
+      if (ri != 0) {
+        System.arraycopy(valueBytes, 0, escapedBytes, 0, ri);
+      }
+      int wi = ri;
+      for (; ri < valueBytes.length; ri++) {
+        byte b = valueBytes[ri];
+        // Manually implement URL encoding, per the gRPC spec.
+        if (isEscapingChar(b)) {
+          escapedBytes[wi] = '%';
+          escapedBytes[wi + 1] = HEX[(b >> 4) & 0xF];
+          escapedBytes[wi + 2] = HEX[b & 0xF];
+          wi += 3;
+          continue;
+        }
+        escapedBytes[wi++] = b;
+      }
+      byte[] dest = new byte[wi];
+      System.arraycopy(escapedBytes, 0, dest, 0, wi);
+
+      return dest;
+    }
+
+    @SuppressWarnings("deprecation") // Use fast but deprecated String ctor
+    @Override
+    public String parseAsciiString(byte[] value) {
+      for (int i = 0; i < value.length; i++) {
+        byte b = value[i];
+        if (b < ' ' || b >= '~' || (b == '%' && i + 2 < value.length)) {
+          return parseAsciiStringSlow(value);
+        }
+      }
+      return new String(value, 0);
+    }
+
+    private static String parseAsciiStringSlow(byte[] value) {
+      ByteBuffer buf = ByteBuffer.allocate(value.length);
+      for (int i = 0; i < value.length;) {
+        if (value[i] == '%' && i + 2 < value.length) {
+          try {
+            buf.put((byte)Integer.parseInt(new String(value, i + 1, 2, US_ASCII), 16));
+            i += 3;
+            continue;
+          } catch (NumberFormatException e) {
+            // ignore, fall through, just push the bytes.
+          }
+        }
+        buf.put(value[i]);
+        i += 1;
+      }
+      return new String(buf.array(), 0, buf.position(), UTF_8);
     }
   }
 

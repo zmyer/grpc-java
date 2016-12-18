@@ -49,6 +49,7 @@ import io.grpc.Channel;
 import io.grpc.ClientCall;
 import io.grpc.Deadline;
 import io.grpc.MethodDescriptor;
+import io.grpc.testing.NoopClientCall;
 import io.grpc.testing.integration.Messages.SimpleRequest;
 import io.grpc.testing.integration.Messages.SimpleResponse;
 import io.grpc.testing.integration.TestServiceGrpc;
@@ -73,17 +74,16 @@ public class StubConfigTest {
   @Mock
   private StreamObserver<SimpleResponse> responseObserver;
 
-  @Mock
-  private ClientCall<SimpleRequest, SimpleResponse> call;
-
   /**
    * Sets up mocks.
    */
   @Before public void setUp() {
     MockitoAnnotations.initMocks(this);
+    ClientCall<SimpleRequest, SimpleResponse> call =
+        new NoopClientCall<SimpleRequest, SimpleResponse>();
     when(channel.newCall(
-      Mockito.<MethodDescriptor<SimpleRequest, SimpleResponse>>any(), any(CallOptions.class)))
-      .thenReturn(call);
+        Mockito.<MethodDescriptor<SimpleRequest, SimpleResponse>>any(), any(CallOptions.class)))
+        .thenReturn(call);
   }
 
   @Test
@@ -107,11 +107,13 @@ public class StubConfigTest {
     // Create a default stub
     TestServiceGrpc.TestServiceBlockingStub stub = TestServiceGrpc.newBlockingStub(channel);
     assertNull(stub.getCallOptions().getDeadlineNanoTime());
+    // Warm up JVM
+    stub.withDeadlineNanoTime(deadline);
     // Reconfigure it
     TestServiceGrpc.TestServiceBlockingStub reconfiguredStub = stub.withDeadlineNanoTime(deadline);
     // New altered config
     assertNotNull(reconfiguredStub.getCallOptions().getDeadlineNanoTime());
-    long maxDelta = MILLISECONDS.toNanos(30);
+    long maxDelta = MILLISECONDS.toNanos(10);
     long actualDelta = Math.abs(reconfiguredStub.getCallOptions().getDeadlineNanoTime() - deadline);
     assertTrue(maxDelta + " < " + actualDelta, maxDelta >= actualDelta);
     // Default config unchanged

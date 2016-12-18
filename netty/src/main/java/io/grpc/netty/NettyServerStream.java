@@ -35,9 +35,9 @@ import static com.google.common.base.Preconditions.checkNotNull;
 
 import io.grpc.Attributes;
 import io.grpc.Metadata;
-import io.grpc.ServerCall;
 import io.grpc.Status;
 import io.grpc.internal.AbstractServerStream;
+import io.grpc.internal.StatsTraceContext;
 import io.grpc.internal.WritableBuffer;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
@@ -46,121 +46,138 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.handler.codec.http2.Http2Headers;
 import io.netty.handler.codec.http2.Http2Stream;
 
-import javax.net.ssl.SSLSession;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
- * Server stream for a Netty HTTP2 transport.
+ * Server stream for a Netty HTTP2 transport. Must only be called from the sending application
+ * thread.
  */
-class NettyServerStream extends AbstractServerStream<Integer> {
+class NettyServerStream extends AbstractServerStream {
+  private static final Logger log = Logger.getLogger(NettyServerStream.class.getName());
 
+  private final Sink sink = new Sink();
+  private final TransportState state;
   private final Channel channel;
-  private final NettyServerHandler handler;
-  private final Http2Stream http2Stream;
   private final WriteQueue writeQueue;
   private final Attributes attributes;
 
-  NettyServerStream(Channel channel, Http2Stream http2Stream, NettyServerHandler handler,
-                    int maxMessageSize) {
-    super(new NettyWritableBufferAllocator(channel.alloc()), maxMessageSize);
-    this.writeQueue = handler.getWriteQueue();
+  public NettyServerStream(Channel channel, TransportState state, Attributes transportAttrs,
+      StatsTraceContext statsTraceCtx) {
+    super(new NettyWritableBufferAllocator(channel.alloc()), statsTraceCtx);
+    this.state = checkNotNull(state, "transportState");
     this.channel = checkNotNull(channel, "channel");
-    this.http2Stream = checkNotNull(http2Stream, "http2Stream");
-    this.handler = checkNotNull(handler, "handler");
-    this.attributes = buildAttributes(channel);
+    this.writeQueue = state.handler.getWriteQueue();
+    this.attributes = checkNotNull(transportAttrs);
   }
 
   @Override
-  public Integer id() {
-    return http2Stream.id();
+  protected TransportState transportState() {
+    return state;
   }
 
   @Override
-  protected void inboundHeadersReceived(Metadata headers) {
-    super.inboundHeadersReceived(headers);
-  }
-
-  void inboundDataReceived(ByteBuf frame, boolean endOfStream) {
-    super.inboundDataReceived(new NettyReadableBuffer(frame.retain()), endOfStream);
+  protected Sink abstractServerStreamSink() {
+    return sink;
   }
 
   @Override
-  public void request(final int numMessages) {
-    if (channel.eventLoop().inEventLoop()) {
-      // Processing data read in the event loop so can call into the deframer immediately
-      requestMessagesFromDeframer(numMessages);
-    } else {
-      writeQueue.enqueue(new RequestMessagesCommand(this, numMessages), true);
-    }
-  }
-
-  @Override
-  protected void inboundDeliveryPaused() {
-    // Do nothing.
-  }
-
-  @Override
-  protected void internalSendHeaders(Metadata headers) {
-    writeQueue.enqueue(new SendResponseHeadersCommand(id(),
-        Utils.convertServerHeaders(headers), false),
-        true);
-  }
-
-  @Override
-  protected void sendFrame(WritableBuffer frame, boolean endOfStream, boolean flush) {
-    ByteBuf bytebuf = ((NettyWritableBuffer) frame).bytebuf();
-    final int numBytes = bytebuf.readableBytes();
-    // Add the bytes to outbound flow control.
-    onSendingBytes(numBytes);
-    writeQueue.enqueue(
-        new SendGrpcFrameCommand(this, bytebuf, endOfStream),
-        channel.newPromise().addListener(new ChannelFutureListener() {
-          @Override
-          public void operationComplete(ChannelFuture future) throws Exception {
-            // Remove the bytes from outbound flow control, optionally notifying
-            // the client that they can send more bytes.
-            onSentBytes(numBytes);
-          }
-        }), flush);
-  }
-
-  @Override
-  protected void sendTrailers(Metadata trailers, boolean headersSent) {
-    Http2Headers http2Trailers = Utils.convertTrailers(trailers, headersSent);
-    writeQueue.enqueue(new SendResponseHeadersCommand(id(), http2Trailers, true), true);
-  }
-
-  @Override
-  protected void returnProcessedBytes(int processedBytes) {
-    handler.returnProcessedBytes(http2Stream, processedBytes);
-    writeQueue.scheduleFlush();
-  }
-
-  @Override
-  protected void sendStreamAbortToClient(Status status, Metadata trailers) {
-    // Cancel the stream.
-    // TODO(nmittler): Consider sending trailers.
-    cancel(status);
-  }
-
-  @Override
-  public void cancel(Status status) {
-    writeQueue.enqueue(new CancelServerStreamCommand(this, status), true);
-  }
-
-  @Override public Attributes attributes() {
+  public Attributes attributes() {
     return attributes;
   }
 
-  private static Attributes buildAttributes(Channel channel) {
-    // NB(lukaszx0) SSLSession will be set only if SSL handshake was successful
-    SSLSession sslSession = null;
-    if (channel.hasAttr(Utils.SSL_SESSION_ATTR_KEY)) {
-      sslSession = channel.attr(Utils.SSL_SESSION_ATTR_KEY).get();
+  private class Sink implements AbstractServerStream.Sink {
+    @Override
+    public void request(final int numMessages) {
+      if (channel.eventLoop().inEventLoop()) {
+        // Processing data read in the event loop so can call into the deframer immediately
+        transportState().requestMessagesFromDeframer(numMessages);
+      } else {
+        channel.eventLoop().execute(new Runnable() {
+          @Override
+          public void run() {
+            transportState().requestMessagesFromDeframer(numMessages);
+          }
+        });
+      }
     }
 
-    return Attributes.newBuilder()
-        .set(ServerCall.REMOTE_ADDR_KEY, channel.remoteAddress())
-        .set(ServerCall.SSL_SESSION_KEY, sslSession)
-        .build();
+    @Override
+    public void writeHeaders(Metadata headers) {
+      writeQueue.enqueue(new SendResponseHeadersCommand(transportState(),
+          Utils.convertServerHeaders(headers), false),
+          true);
+    }
+
+    @Override
+    public void writeFrame(WritableBuffer frame, boolean flush) {
+      if (frame == null) {
+        writeQueue.scheduleFlush();
+        return;
+      }
+      ByteBuf bytebuf = ((NettyWritableBuffer) frame).bytebuf();
+      final int numBytes = bytebuf.readableBytes();
+      // Add the bytes to outbound flow control.
+      onSendingBytes(numBytes);
+      writeQueue.enqueue(
+          new SendGrpcFrameCommand(transportState(), bytebuf, false),
+          channel.newPromise().addListener(new ChannelFutureListener() {
+            @Override
+            public void operationComplete(ChannelFuture future) throws Exception {
+              // Remove the bytes from outbound flow control, optionally notifying
+              // the client that they can send more bytes.
+              transportState().onSentBytes(numBytes);
+            }
+          }), flush);
+    }
+
+    @Override
+    public void writeTrailers(Metadata trailers, boolean headersSent) {
+      Http2Headers http2Trailers = Utils.convertTrailers(trailers, headersSent);
+      writeQueue.enqueue(
+          new SendResponseHeadersCommand(transportState(), http2Trailers, true), true);
+    }
+
+    @Override
+    public void cancel(Status status) {
+      writeQueue.enqueue(new CancelServerStreamCommand(transportState(), status), true);
+    }
+  }
+
+  /** This should only called from the transport thread. */
+  public static class TransportState extends AbstractServerStream.TransportState
+      implements StreamIdHolder {
+    private final Http2Stream http2Stream;
+    private final NettyServerHandler handler;
+
+    public TransportState(NettyServerHandler handler, Http2Stream http2Stream, int maxMessageSize,
+        StatsTraceContext statsTraceCtx) {
+      super(maxMessageSize, statsTraceCtx);
+      this.http2Stream = checkNotNull(http2Stream, "http2Stream");
+      this.handler = checkNotNull(handler, "handler");
+    }
+
+    @Override
+    public void bytesRead(int processedBytes) {
+      handler.returnProcessedBytes(http2Stream, processedBytes);
+      handler.getWriteQueue().scheduleFlush();
+    }
+
+    @Override
+    protected void deframeFailed(Throwable cause) {
+      log.log(Level.WARNING, "Exception processing message", cause);
+      Status status = Status.fromThrowable(cause);
+      transportReportStatus(status);
+      handler.getWriteQueue().enqueue(new CancelServerStreamCommand(this, status), true);
+    }
+
+    void inboundDataReceived(ByteBuf frame, boolean endOfStream) {
+      super.inboundDataReceived(new NettyReadableBuffer(frame.retain()), endOfStream);
+    }
+
+    @Override
+    public int id() {
+      return http2Stream.id();
+    }
   }
 }

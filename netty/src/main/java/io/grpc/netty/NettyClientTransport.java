@@ -33,41 +33,60 @@ package io.grpc.netty;
 
 import static io.netty.channel.ChannelOption.SO_KEEPALIVE;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Ticker;
 
+import io.grpc.Attributes;
+import io.grpc.CallOptions;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
 import io.grpc.internal.ClientStream;
+import io.grpc.internal.ConnectionClientTransport;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.Http2Ping;
-import io.grpc.internal.ManagedClientTransport;
+import io.grpc.internal.KeepAliveManager;
+import io.grpc.internal.LogId;
+import io.grpc.internal.StatsTraceContext;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.codec.http2.StreamBufferingEncoder.Http2ChannelClosedException;
 import io.netty.util.AsciiString;
 
 import java.net.SocketAddress;
 import java.nio.channels.ClosedChannelException;
+import java.util.Map;
 import java.util.concurrent.Executor;
 
+import javax.annotation.Nullable;
+
 /**
- * A Netty-based {@link ManagedClientTransport} implementation.
+ * A Netty-based {@link ConnectionClientTransport} implementation.
  */
-class NettyClientTransport implements ManagedClientTransport {
+class NettyClientTransport implements ConnectionClientTransport {
+  private final LogId logId = LogId.allocate(getClass().getName());
+  private final Map<ChannelOption<?>, ?> channelOptions;
   private final SocketAddress address;
   private final Class<? extends Channel> channelType;
   private final EventLoopGroup group;
   private final ProtocolNegotiator negotiator;
   private final AsciiString authority;
+  private final AsciiString userAgent;
   private final int flowControlWindow;
   private final int maxMessageSize;
   private final int maxHeaderListSize;
+  private KeepAliveManager keepAliveManager;
+  private boolean enableKeepAlive;
+  private long keepAliveDelayNanos;
+  private long keepAliveTimeoutNanos;
+
   private ProtocolNegotiator.Handler negotiationHandler;
   private NettyClientHandler handler;
   // We should not send on the channel until negotiation completes. This is a hard requirement
@@ -76,22 +95,36 @@ class NettyClientTransport implements ManagedClientTransport {
   /** Since not thread-safe, may only be used from event loop. */
   private ClientTransportLifecycleManager lifecycleManager;
 
-  NettyClientTransport(SocketAddress address, Class<? extends Channel> channelType,
-                       EventLoopGroup group, ProtocolNegotiator negotiator,
-                       int flowControlWindow, int maxMessageSize, int maxHeaderListSize,
-                       String authority) {
+  NettyClientTransport(
+      SocketAddress address, Class<? extends Channel> channelType,
+      Map<ChannelOption<?>, ?> channelOptions, EventLoopGroup group,
+      ProtocolNegotiator negotiator, int flowControlWindow, int maxMessageSize,
+      int maxHeaderListSize, String authority, @Nullable String userAgent) {
     this.negotiator = Preconditions.checkNotNull(negotiator, "negotiator");
     this.address = Preconditions.checkNotNull(address, "address");
     this.group = Preconditions.checkNotNull(group, "group");
     this.channelType = Preconditions.checkNotNull(channelType, "channelType");
+    this.channelOptions = Preconditions.checkNotNull(channelOptions, "channelOptions");
     this.flowControlWindow = flowControlWindow;
     this.maxMessageSize = maxMessageSize;
     this.maxHeaderListSize = maxHeaderListSize;
     this.authority = new AsciiString(authority);
+    this.userAgent = new AsciiString(GrpcUtil.getGrpcUserAgent("netty", userAgent));
+  }
+
+  /**
+   * Enable keepalive with custom delay and timeout.
+   */
+  void enableKeepAlive(boolean enable, long keepAliveDelayNanos, long keepAliveTimeoutNanos) {
+    enableKeepAlive = enable;
+    this.keepAliveDelayNanos = keepAliveDelayNanos;
+    this.keepAliveTimeoutNanos = keepAliveTimeoutNanos;
   }
 
   @Override
   public void ping(final PingCallback callback, final Executor executor) {
+    // The promise and listener always succeed in NettyClientHandler. So this listener handles the
+    // error case, when the channel is closed and the NettyClientHandler no longer in the pipeline.
     ChannelFutureListener failureListener = new ChannelFutureListener() {
       @Override
       public void operationComplete(ChannelFuture future) throws Exception {
@@ -107,24 +140,42 @@ class NettyClientTransport implements ManagedClientTransport {
   }
 
   @Override
-  public ClientStream newStream(MethodDescriptor<?, ?> method, Metadata headers) {
+  public ClientStream newStream(
+      MethodDescriptor<?, ?> method, Metadata headers, CallOptions callOptions,
+      StatsTraceContext statsTraceCtx) {
     Preconditions.checkNotNull(method, "method");
     Preconditions.checkNotNull(headers, "headers");
-    return new NettyClientStream(method, headers, channel, handler, maxMessageSize, authority,
-        negotiationHandler.scheme()) {
-      @Override
-      protected Status statusFromFailedFuture(ChannelFuture f) {
-        return NettyClientTransport.this.statusFromFailedFuture(f);
-      }
-    };
+    Preconditions.checkNotNull(statsTraceCtx, "statsTraceCtx");
+    return new NettyClientStream(
+        new NettyClientStream.TransportState(handler, maxMessageSize, statsTraceCtx) {
+          @Override
+          protected Status statusFromFailedFuture(ChannelFuture f) {
+            return NettyClientTransport.this.statusFromFailedFuture(f);
+          }
+        },
+        method, headers, channel, authority, negotiationHandler.scheme(), userAgent,
+        statsTraceCtx);
   }
 
   @Override
-  public void start(Listener transportListener) {
+  public ClientStream newStream(MethodDescriptor<?, ?> method, Metadata headers) {
+    return newStream(method, headers, CallOptions.DEFAULT, StatsTraceContext.NOOP);
+  }
+
+  @SuppressWarnings("unchecked")
+  @Override
+  public Runnable start(Listener transportListener) {
     lifecycleManager = new ClientTransportLifecycleManager(
         Preconditions.checkNotNull(transportListener, "listener"));
 
+    if (enableKeepAlive) {
+      keepAliveManager = new KeepAliveManager(this, channel.eventLoop(), keepAliveDelayNanos,
+          keepAliveTimeoutNanos);
+    }
+
     handler = newHandler();
+    HandlerSettings.setAutoWindow(handler);
+
     negotiationHandler = negotiator.newHandler(handler);
 
     Bootstrap b = new Bootstrap();
@@ -133,6 +184,13 @@ class NettyClientTransport implements ManagedClientTransport {
     if (NioSocketChannel.class.isAssignableFrom(channelType)) {
       b.option(SO_KEEPALIVE, true);
     }
+    for (Map.Entry<ChannelOption<?>, ?> entry : channelOptions.entrySet()) {
+      // Every entry in the map is obtained from
+      // NettyChannelBuilder#withOption(ChannelOption<T> option, T value)
+      // so it is safe to pass the key-value pair to b.option().
+      b.option((ChannelOption<Object>) entry.getKey(), entry.getValue());
+    }
+
     /**
      * We don't use a ChannelInitializer in the client bootstrap because its "initChannel" method
      * is executed in the event loop and we need this handler to be in the pipeline immediately so
@@ -178,6 +236,7 @@ class NettyClientTransport implements ManagedClientTransport {
             Status.INTERNAL.withDescription("Connection closed with unknown cause"));
       }
     });
+    return null;
   }
 
   @Override
@@ -191,36 +250,59 @@ class NettyClientTransport implements ManagedClientTransport {
   }
 
   @Override
+  public void shutdownNow(Status reason) {
+    // Notifying of termination is automatically done when the channel closes.
+    if (channel != null && channel.isOpen()) {
+      handler.getWriteQueue().enqueue(new ForcefulCloseCommand(reason), true);
+    }
+  }
+
+  @Override
   public String toString() {
     return getLogId() + "(" + address + ")";
   }
 
   @Override
-  public String getLogId() {
-    return GrpcUtil.getLogId(this);
+  public LogId getLogId() {
+    return logId;
+  }
+
+  @Override
+  public Attributes getAttrs() {
+    // TODO(zhangkun83): fill channel security attributes
+    return Attributes.EMPTY;
+  }
+
+  @VisibleForTesting
+  Channel channel() {
+    return channel;
   }
 
   /**
    * Convert ChannelFuture.cause() to a Status, taking into account that all handlers are removed
    * from the pipeline when the channel is closed. Since handlers are removed, you may get an
    * unhelpful exception like ClosedChannelException.
+   *
+   * <p>This method must only be called on the event loop.
    */
   private Status statusFromFailedFuture(ChannelFuture f) {
     Throwable t = f.cause();
-    if (t instanceof ClosedChannelException) {
-      synchronized (this) {
-        Status shutdownStatus = lifecycleManager.getShutdownStatus();
-        if (shutdownStatus == null) {
-          return Status.UNKNOWN.withDescription("Channel closed but for unknown reason");
-        }
-        return shutdownStatus;
+    if (t instanceof ClosedChannelException
+        // Exception thrown by the StreamBufferingEncoder if the channel is closed while there
+        // are still streams buffered. This exception is not helpful. Replace it by the real
+        // cause of the shutdown (if available).
+        || t instanceof Http2ChannelClosedException) {
+      Status shutdownStatus = lifecycleManager.getShutdownStatus();
+      if (shutdownStatus == null) {
+        return Status.UNKNOWN.withDescription("Channel closed but for unknown reason");
       }
+      return shutdownStatus;
     }
     return Utils.statusFromThrowable(t);
   }
 
   private NettyClientHandler newHandler() {
-    return NettyClientHandler.newHandler(lifecycleManager, flowControlWindow, maxHeaderListSize,
-        Ticker.systemTicker());
+    return NettyClientHandler.newHandler(lifecycleManager, keepAliveManager, flowControlWindow,
+        maxHeaderListSize, Ticker.systemTicker());
   }
 }

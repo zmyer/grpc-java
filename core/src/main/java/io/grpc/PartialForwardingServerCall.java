@@ -35,11 +35,11 @@ package io.grpc;
  * A {@link ServerCall} which forwards all of it's methods to another {@link ServerCall} which
  * may have a different onMessage() message type.
  */
-abstract class PartialForwardingServerCall<RespT> extends ServerCall<RespT> {
+abstract class PartialForwardingServerCall<ReqT, RespT> extends ServerCall<ReqT, RespT> {
   /**
    * Returns the delegated {@code ServerCall}.
    */
-  protected abstract ServerCall<?> delegate();
+  protected abstract ServerCall<?, ?> delegate();
 
   @Override
   public void request(int numMessages) {
@@ -67,19 +67,19 @@ abstract class PartialForwardingServerCall<RespT> extends ServerCall<RespT> {
   }
 
   @Override
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1703")
   public void setMessageCompression(boolean enabled) {
     delegate().setMessageCompression(enabled);
   }
 
   @Override
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   public void setCompression(String compressor) {
     delegate().setCompression(compressor);
   }
 
   @Override
-  @ExperimentalApi
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1779")
   public Attributes attributes() {
     return delegate().attributes();
   }

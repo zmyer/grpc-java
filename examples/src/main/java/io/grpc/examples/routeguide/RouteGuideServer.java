@@ -123,9 +123,9 @@ public class RouteGuideServer {
   /**
    * Our implementation of RouteGuide service.
    *
-   * <p> See route_guide.proto for details of the methods.
+   * <p>See route_guide.proto for details of the methods.
    */
-  private static class RouteGuideService extends RouteGuideGrpc.AbstractRouteGuide {
+  private static class RouteGuideService extends RouteGuideGrpc.RouteGuideImplBase {
     private final Collection<Feature> features;
     private final ConcurrentMap<Point, List<RouteNote>> routeNotes =
         new ConcurrentHashMap<Point, List<RouteNote>>();
@@ -188,7 +188,7 @@ public class RouteGuideServer {
         int featureCount;
         int distance;
         Point previous;
-        long startTime = System.nanoTime();
+        final long startTime = System.nanoTime();
 
         @Override
         public void onNext(Point point) {
@@ -290,21 +290,22 @@ public class RouteGuideServer {
      * @param end The end point
      * @return The distance between the points in meters
      */
-    private static double calcDistance(Point start, Point end) {
+    private static int calcDistance(Point start, Point end) {
       double lat1 = RouteGuideUtil.getLatitude(start);
       double lat2 = RouteGuideUtil.getLatitude(end);
       double lon1 = RouteGuideUtil.getLongitude(start);
       double lon2 = RouteGuideUtil.getLongitude(end);
-      int r = 6371000; // metres
-      double φ1 = toRadians(lat1);
-      double φ2 = toRadians(lat2);
-      double Δφ = toRadians(lat2 - lat1);
-      double Δλ = toRadians(lon2 - lon1);
+      int r = 6371000; // meters
+      double phi1 = toRadians(lat1);
+      double phi2 = toRadians(lat2);
+      double deltaPhi = toRadians(lat2 - lat1);
+      double deltaLambda = toRadians(lon2 - lon1);
 
-      double a = sin(Δφ / 2) * sin(Δφ / 2) + cos(φ1) * cos(φ2) * sin(Δλ / 2) * sin(Δλ / 2);
+      double a = sin(deltaPhi / 2) * sin(deltaPhi / 2)
+          + cos(phi1) * cos(phi2) * sin(deltaLambda / 2) * sin(deltaLambda / 2);
       double c = 2 * atan2(sqrt(a), sqrt(1 - a));
 
-      return r * c;
+      return (int) (r * c);
     }
   }
 }

@@ -34,12 +34,15 @@ package io.grpc.internal;
 import static com.google.common.base.Preconditions.checkArgument;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
-import com.google.common.collect.ImmutableMap;
+import com.google.common.base.Stopwatch;
+import com.google.common.base.Supplier;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
+import io.grpc.LoadBalancer2.PickResult;
+import io.grpc.LoadBalancer2.Subchannel;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.internal.SharedResourceHolder.Resource;
@@ -48,10 +51,10 @@ import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.Map.Entry;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
 import javax.annotation.Nullable;
@@ -60,6 +63,12 @@ import javax.annotation.Nullable;
  * Common utilities for GRPC.
  */
 public final class GrpcUtil {
+
+  // Certain production AppEngine runtimes have constraints on threading and socket handling
+  // that need to be accommodated.
+  public static final boolean IS_RESTRICTED_APPENGINE =
+      "Production".equals(System.getProperty("com.google.appengine.runtime.environment"))
+          && "1.7".equals(System.getProperty("java.specification.version"));
 
   /**
    * {@link io.grpc.Metadata.Key} for the timeout header.
@@ -132,45 +141,62 @@ public final class GrpcUtil {
   public static final String MESSAGE_ACCEPT_ENCODING = "grpc-accept-encoding";
 
   /**
-   * The default maximum uncompressed size (in bytes) for inbound messages. Defaults to 100 MiB.
+   * The default maximum uncompressed size (in bytes) for inbound messages. Defaults to 4 MiB.
    */
-  public static final int DEFAULT_MAX_MESSAGE_SIZE = 100 * 1024 * 1024;
+  public static final int DEFAULT_MAX_MESSAGE_SIZE = 4 * 1024 * 1024;
 
   /**
    * The default maximum size (in bytes) for inbound header/trailer.
    */
   public static final int DEFAULT_MAX_HEADER_LIST_SIZE = 8192;
 
-  public static final Splitter ACCEPT_ENCODING_SPLITER = Splitter.on(',').trimResults();
+  public static final Splitter ACCEPT_ENCODING_SPLITTER = Splitter.on(',').trimResults();
 
-  public static final Joiner ACCEPT_ENCODING_JOINER = Joiner.on(',');
+  private static final String IMPLEMENTATION_VERSION = getImplementationVersion();
 
   /**
-   * Maps HTTP error response status codes to transport codes.
+   * The default delay in nanos before we send a keepalive.
+   */
+  public static final long DEFAULT_KEEPALIVE_DELAY_NANOS = TimeUnit.MINUTES.toNanos(1);
+
+  /**
+   * The default timeout in nanos for a keepalive ping request.
+   */
+  public static final long DEFAULT_KEEPALIVE_TIMEOUT_NANOS = TimeUnit.MINUTES.toNanos(2);
+
+  /**
+   * Maps HTTP error response status codes to transport codes, as defined in <a
+   * href="https://github.com/grpc/grpc/blob/master/doc/http-grpc-status-mapping.md">
+   * http-grpc-status-mapping.md</a>. Never returns a status for which {@code status.isOk()} is
+   * {@code true}.
    */
   public static Status httpStatusToGrpcStatus(int httpStatusCode) {
-    // Specific HTTP code handling.
-    switch (httpStatusCode) {
-      case HttpURLConnection.HTTP_UNAUTHORIZED:  // 401
-        return Status.UNAUTHENTICATED;
-      case HttpURLConnection.HTTP_FORBIDDEN:  // 403
-        return Status.PERMISSION_DENIED;
-      default:
-    }
-    // Generic HTTP code handling.
-    if (httpStatusCode < 100) {
-      // 0xx. These don't exist.
-      return Status.UNKNOWN;
-    }
-    if (httpStatusCode < 200) {
+    return httpStatusToGrpcCode(httpStatusCode).toStatus()
+        .withDescription("HTTP status code " + httpStatusCode);
+  }
+
+  private static Status.Code httpStatusToGrpcCode(int httpStatusCode) {
+    if (httpStatusCode >= 100 && httpStatusCode < 200) {
       // 1xx. These headers should have been ignored.
-      return Status.INTERNAL;
+      return Status.Code.INTERNAL;
     }
-    if (httpStatusCode < 300) {
-      // 2xx
-      return Status.OK;
+    switch (httpStatusCode) {
+      case HttpURLConnection.HTTP_BAD_REQUEST:  // 400
+        return Status.Code.INTERNAL;
+      case HttpURLConnection.HTTP_UNAUTHORIZED:  // 401
+        return Status.Code.UNAUTHENTICATED;
+      case HttpURLConnection.HTTP_FORBIDDEN:  // 403
+        return Status.Code.PERMISSION_DENIED;
+      case HttpURLConnection.HTTP_NOT_FOUND:  // 404
+        return Status.Code.UNIMPLEMENTED;
+      case 429:  // Too Many Requests
+      case HttpURLConnection.HTTP_BAD_GATEWAY:  // 502
+      case HttpURLConnection.HTTP_UNAVAILABLE:  // 503
+      case HttpURLConnection.HTTP_GATEWAY_TIMEOUT:  // 504
+        return Status.Code.UNAVAILABLE;
+      default:
+        return Status.Code.UNKNOWN;
     }
-    return Status.UNKNOWN;
   }
 
   /**
@@ -303,8 +329,8 @@ public final class GrpcUtil {
   /**
    * Gets the User-Agent string for the gRPC transport.
    */
-  public static String getGrpcUserAgent(String transportName,
-                                        @Nullable String applicationUserAgent) {
+  public static String getGrpcUserAgent(
+      String transportName, @Nullable String applicationUserAgent) {
     StringBuilder builder = new StringBuilder();
     if (applicationUserAgent != null) {
       builder.append(applicationUserAgent);
@@ -312,11 +338,7 @@ public final class GrpcUtil {
     }
     builder.append("grpc-java-");
     builder.append(transportName);
-    String version = GrpcUtil.class.getPackage().getImplementationVersion();
-    if (version != null) {
-      builder.append("/");
-      builder.append(version);
-    }
+    builder.append(IMPLEMENTATION_VERSION);
     return builder.toString();
   }
 
@@ -364,13 +386,10 @@ public final class GrpcUtil {
    */
   public static final Resource<ExecutorService> SHARED_CHANNEL_EXECUTOR =
       new Resource<ExecutorService>() {
-        private static final String name = "grpc-default-executor";
+        private static final String NAME = "grpc-default-executor";
         @Override
         public ExecutorService create() {
-          return Executors.newCachedThreadPool(new ThreadFactoryBuilder()
-              .setDaemon(true)
-              .setNameFormat(name + "-%d")
-              .build());
+          return Executors.newCachedThreadPool(getThreadFactory(NAME + "-%d", true));
         }
 
         @Override
@@ -380,7 +399,7 @@ public final class GrpcUtil {
 
         @Override
         public String toString() {
-          return name;
+          return NAME;
         }
       };
 
@@ -391,11 +410,12 @@ public final class GrpcUtil {
       new Resource<ScheduledExecutorService>() {
         @Override
         public ScheduledExecutorService create() {
-          ScheduledExecutorService service = Executors.newSingleThreadScheduledExecutor(
-              new ThreadFactoryBuilder()
-                  .setDaemon(true)
-                  .setNameFormat("grpc-timer-%d")
-                  .build());
+          // We don't use newSingleThreadScheduledExecutor because it doesn't return a
+          // ScheduledThreadPoolExecutor.
+          ScheduledExecutorService service = Executors.newScheduledThreadPool(
+              1,
+              getThreadFactory("grpc-timer-%d", true));
+
           // If there are long timeouts that are cancelled, they will not actually be removed from
           // the executors queue.  This forces immediate removal upon cancellation to avoid a
           // memory leak.  Reflection is used because we cannot use methods added in Java 1.7.  If
@@ -421,6 +441,37 @@ public final class GrpcUtil {
         }
       };
 
+
+  /**
+   * Get a {@link ThreadFactory} suitable for use in the current environment.
+   * @param nameFormat to apply to threads created by the factory.
+   * @param daemon {@code true} if the threads the factory creates are daemon threads, {@code false}
+   *     otherwise.
+   * @return a {@link ThreadFactory}.
+   */
+  public static ThreadFactory getThreadFactory(String nameFormat, boolean daemon) {
+    ThreadFactory threadFactory = MoreExecutors.platformThreadFactory();
+    if (IS_RESTRICTED_APPENGINE) {
+      return threadFactory;
+    } else {
+      return new ThreadFactoryBuilder()
+          .setThreadFactory(threadFactory)
+          .setDaemon(daemon)
+          .setNameFormat(nameFormat)
+          .build();
+    }
+  }
+
+  /**
+   * The factory of default Stopwatches.
+   */
+  public static final Supplier<Stopwatch> STOPWATCH_SUPPLIER = new Supplier<Stopwatch>() {
+      @Override
+      public Stopwatch get() {
+        return Stopwatch.createUnstarted();
+      }
+    };
+
   /**
    * Marshals a nanoseconds representation of the timeout to and from a string representation,
    * consisting of an ASCII decimal representation of a number with at most 8 digits, followed by a
@@ -441,51 +492,79 @@ public final class GrpcUtil {
   @VisibleForTesting
   static class TimeoutMarshaller implements Metadata.AsciiMarshaller<Long> {
 
-    // ImmutableMap's have consistent iteration order.
-    private static final ImmutableMap<Character, TimeUnit> UNITS =
-        ImmutableMap.<Character, TimeUnit>builder()
-            .put('n', TimeUnit.NANOSECONDS)
-            .put('u', TimeUnit.MICROSECONDS)
-            .put('m', TimeUnit.MILLISECONDS)
-            .put('S', TimeUnit.SECONDS)
-            .put('M', TimeUnit.MINUTES)
-            .put('H', TimeUnit.HOURS)
-            .build();
-
     @Override
     public String toAsciiString(Long timeoutNanos) {
-      checkArgument(timeoutNanos >= 0, "Negative timeout");
-      // the smallest integer with 9 digits
-      int cutoff = 100000000;
-      for (Entry<Character, TimeUnit> unit : UNITS.entrySet()) {
-        long timeout = unit.getValue().convert(timeoutNanos, TimeUnit.NANOSECONDS);
-        if (timeout < cutoff) {
-          return Long.toString(timeout) + unit.getKey();
-        }
+      long cutoff = 100000000;
+      if (timeoutNanos < 0) {
+        throw new IllegalArgumentException("Timeout too small");
+      } else if (timeoutNanos < cutoff) {
+        return TimeUnit.NANOSECONDS.toNanos(timeoutNanos) + "n";
+      } else if (timeoutNanos < cutoff * 1000L) {
+        return TimeUnit.NANOSECONDS.toMicros(timeoutNanos) + "u";
+      } else if (timeoutNanos < cutoff * 1000L * 1000L) {
+        return TimeUnit.NANOSECONDS.toMillis(timeoutNanos) + "m";
+      } else if (timeoutNanos < cutoff * 1000L * 1000L * 1000L) {
+        return TimeUnit.NANOSECONDS.toSeconds(timeoutNanos) + "S";
+      } else if (timeoutNanos < cutoff * 1000L * 1000L * 1000L * 60L) {
+        return TimeUnit.NANOSECONDS.toMinutes(timeoutNanos) + "M";
+      } else {
+        return TimeUnit.NANOSECONDS.toHours(timeoutNanos) + "H";
       }
-      throw new IllegalArgumentException("Timeout too large");
     }
 
     @Override
     public Long parseAsciiString(String serialized) {
       checkArgument(serialized.length() > 0, "empty timeout");
       checkArgument(serialized.length() <= 9, "bad timeout format");
-      String valuePart = serialized.substring(0, serialized.length() - 1);
+      long value = Long.parseLong(serialized.substring(0, serialized.length() - 1));
       char unit = serialized.charAt(serialized.length() - 1);
-      TimeUnit timeUnit = UNITS.get(unit);
-      if (timeUnit != null) {
-        return timeUnit.toNanos(Long.parseLong(valuePart));
+      switch (unit) {
+        case 'n':
+          return TimeUnit.NANOSECONDS.toNanos(value);
+        case 'u':
+          return TimeUnit.MICROSECONDS.toNanos(value);
+        case 'm':
+          return TimeUnit.MILLISECONDS.toNanos(value);
+        case 'S':
+          return TimeUnit.SECONDS.toNanos(value);
+        case 'M':
+          return TimeUnit.MINUTES.toNanos(value);
+        case 'H':
+          return TimeUnit.HOURS.toNanos(value);
+        default:
+          throw new IllegalArgumentException(String.format("Invalid timeout unit: %s", unit));
       }
-      throw new IllegalArgumentException(String.format("Invalid timeout unit: %s", unit));
     }
   }
 
   /**
-   * The canonical implementation of {@link WithLogId#getLogId}.
+   * Returns a transport out of a PickResult, or {@code null} if the result is "buffer".
    */
-  public static String getLogId(WithLogId subject) {
-    return subject.getClass().getSimpleName() + "@" + Integer.toHexString(subject.hashCode());
+  @Nullable
+  static ClientTransport getTransportFromPickResult(PickResult result, boolean isWaitForReady) {
+    ClientTransport transport;
+    Subchannel subchannel = result.getSubchannel();
+    if (subchannel != null) {
+      transport = ((SubchannelImpl) subchannel).obtainActiveTransport();
+    } else {
+      transport = null;
+    }
+    if (transport != null) {
+      return transport;
+    }
+    if (!result.getStatus().isOk() && !isWaitForReady) {
+      return new FailingClientTransport(result.getStatus());
+    }
+    return null;
   }
 
   private GrpcUtil() {}
+
+  private static String getImplementationVersion() {
+    String version = GrpcUtil.class.getPackage().getImplementationVersion();
+    if (version != null) {
+      return "/" + version;
+    }
+    return "";
+  }
 }
