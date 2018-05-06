@@ -1,32 +1,17 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.okhttp;
@@ -34,18 +19,16 @@ package io.grpc.okhttp;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.common.annotations.VisibleForTesting;
-
 import io.grpc.okhttp.internal.OptionalMethod;
 import io.grpc.okhttp.internal.Platform;
+import io.grpc.okhttp.internal.Platform.TlsExtensionType;
 import io.grpc.okhttp.internal.Protocol;
 import io.grpc.okhttp.internal.Util;
-
 import java.io.IOException;
 import java.net.Socket;
-import java.security.Provider;
-import java.security.Security;
 import java.util.List;
-
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import javax.annotation.Nullable;
 import javax.net.ssl.SSLSocket;
 
@@ -53,11 +36,12 @@ import javax.net.ssl.SSLSocket;
  * A helper class located in package com.squareup.okhttp.internal for TLS negotiation.
  */
 class OkHttpProtocolNegotiator {
+  private static final Logger logger = Logger.getLogger(OkHttpProtocolNegotiator.class.getName());
   private static final Platform DEFAULT_PLATFORM = Platform.get();
   private static OkHttpProtocolNegotiator NEGOTIATOR =
       createNegotiator(OkHttpProtocolNegotiator.class.getClassLoader());
 
-  private final Platform platform;
+  protected final Platform platform;
 
   @VisibleForTesting
   OkHttpProtocolNegotiator(Platform platform) {
@@ -77,16 +61,18 @@ class OkHttpProtocolNegotiator {
     try {
       // Attempt to find Android 2.3+ APIs.
       loader.loadClass("com.android.org.conscrypt.OpenSSLSocketImpl");
-    } catch (ClassNotFoundException ignored) {
+    } catch (ClassNotFoundException e1) {
+      logger.log(Level.FINE, "Unable to find Conscrypt. Skipping", e1);
       try {
         // Older platform before being unbundled.
         loader.loadClass("org.apache.harmony.xnet.provider.jsse.OpenSSLSocketImpl");
-      } catch (ClassNotFoundException ignored2) {
+      } catch (ClassNotFoundException e2) {
+        logger.log(Level.FINE, "Unable to find any OpenSSLSocketImpl. Skipping", e2);
         android = false;
       }
     }
     return android
-        ? new AndroidNegotiator(DEFAULT_PLATFORM, AndroidNegotiator.DEFAULT_TLS_EXTENSION_TYPE)
+        ? new AndroidNegotiator(DEFAULT_PLATFORM)
         : new OkHttpProtocolNegotiator(DEFAULT_PLATFORM);
   }
 
@@ -147,19 +133,8 @@ class OkHttpProtocolNegotiator {
     private static final OptionalMethod<Socket> SET_NPN_PROTOCOLS =
         new OptionalMethod<Socket>(null, "setNpnProtocols", byte[].class);
 
-    private static final TlsExtensionType DEFAULT_TLS_EXTENSION_TYPE =
-        pickTlsExtensionType(AndroidNegotiator.class.getClassLoader());
-
-    enum TlsExtensionType {
-      ALPN_AND_NPN,
-      NPN,
-    }
-
-    private final TlsExtensionType tlsExtensionType;
-
-    AndroidNegotiator(Platform platform, TlsExtensionType tlsExtensionType) {
+    AndroidNegotiator(Platform platform) {
       super(platform);
-      this.tlsExtensionType = checkNotNull(tlsExtensionType, "Unable to pick a TLS extension");
     }
 
     @Override
@@ -188,11 +163,11 @@ class OkHttpProtocolNegotiator {
       }
 
       Object[] parameters = {Platform.concatLengthPrefixed(protocols)};
-      if (tlsExtensionType == TlsExtensionType.ALPN_AND_NPN) {
+      if (platform.getTlsExtensionType() == TlsExtensionType.ALPN_AND_NPN) {
         SET_ALPN_PROTOCOLS.invokeWithoutCheckedException(sslSocket, parameters);
       }
 
-      if (tlsExtensionType != null) {
+      if (platform.getTlsExtensionType() != TlsExtensionType.NONE) {
         SET_NPN_PROTOCOLS.invokeWithoutCheckedException(sslSocket, parameters);
       } else {
         throw new RuntimeException("We can not do TLS handshake on this Android version, please"
@@ -202,7 +177,7 @@ class OkHttpProtocolNegotiator {
 
     @Override
     public String getSelectedProtocol(SSLSocket socket) {
-      if (tlsExtensionType == TlsExtensionType.ALPN_AND_NPN) {
+      if (platform.getTlsExtensionType() == TlsExtensionType.ALPN_AND_NPN) {
         try {
           byte[] alpnResult =
               (byte[]) GET_ALPN_SELECTED_PROTOCOL.invokeWithoutCheckedException(socket);
@@ -215,7 +190,7 @@ class OkHttpProtocolNegotiator {
         }
       }
 
-      if (tlsExtensionType != null) {
+      if (platform.getTlsExtensionType() != TlsExtensionType.NONE) {
         try {
           byte[] npnResult =
               (byte[]) GET_NPN_SELECTED_PROTOCOL.invokeWithoutCheckedException(socket);
@@ -227,41 +202,6 @@ class OkHttpProtocolNegotiator {
           // exception.
         }
       }
-      return null;
-    }
-
-    @VisibleForTesting
-    static TlsExtensionType pickTlsExtensionType(ClassLoader loader) {
-      // Decide which TLS Extension (APLN and NPN) we will use, follow the rules:
-      // 1. If Google Play Services Security Provider is installed, use both
-      // 2. If on Android 5.0 or later, use both, else
-      // 3. If on Android 4.1 or later, use NPN, else
-      // 4. Fail.
-      // TODO(madongfly): Logging.
-
-      // Check if Google Play Services Security Provider is installed.
-      Provider provider = Security.getProvider("GmsCore_OpenSSL");
-      if (provider != null) {
-        return TlsExtensionType.ALPN_AND_NPN;
-      }
-
-      // Check if on Android 5.0 or later.
-      try {
-        loader.loadClass("android.net.Network"); // Arbitrary class added in Android 5.0.
-        return TlsExtensionType.ALPN_AND_NPN;
-      } catch (ClassNotFoundException ignored) {
-        // making checkstyle happy.
-      }
-
-      // Check if on Android 4.1 or later.
-      try {
-        loader.loadClass("android.app.ActivityOptions"); // Arbitrary class added in Android 4.1.
-        return TlsExtensionType.NPN;
-      } catch (ClassNotFoundException ignored) {
-        // making checkstyle happy.
-      }
-
-      // This will be caught by the constructor.
       return null;
     }
   }

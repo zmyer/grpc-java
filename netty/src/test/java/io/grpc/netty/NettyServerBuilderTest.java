@@ -1,32 +1,17 @@
 /*
- * Copyright 2016, Google Inc. All rights reserved.
+ * Copyright 2016 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.netty;
@@ -35,6 +20,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.netty.handler.ssl.SslContext;
+import java.util.concurrent.TimeUnit;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -50,21 +36,84 @@ public class NettyServerBuilderTest {
 
   @Rule public final ExpectedException thrown = ExpectedException.none();
 
+  private NettyServerBuilder builder = NettyServerBuilder.forPort(8080);
+
   @Test
   public void sslContextCanBeNull() {
-    NettyServerBuilder builder = NettyServerBuilder.forPort(8080);
     builder.sslContext(null);
   }
 
   @Test
   public void failIfSslContextIsNotServer() {
-    thrown.expect(IllegalArgumentException.class);
-    thrown.expectMessage("Client SSL context can not be used for server");
-
     SslContext sslContext = mock(SslContext.class);
     when(sslContext.isClient()).thenReturn(true);
 
-    NettyServerBuilder builder = NettyServerBuilder.forPort(8080);;
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("Client SSL context can not be used for server");
     builder.sslContext(sslContext);
+  }
+
+  @Test
+  public void failIfKeepAliveTimeNegative() {
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("keepalive time must be positive");
+
+    builder.keepAliveTime(-10L, TimeUnit.HOURS);
+  }
+
+  @Test
+  public void failIfKeepAliveTimeoutNegative() {
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("keepalive timeout must be positive");
+
+    builder.keepAliveTimeout(-10L, TimeUnit.HOURS);
+  }
+
+  @Test
+  public void failIfMaxConcurrentCallsPerConnectionNegative() {
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("max must be positive");
+
+    builder.maxConcurrentCallsPerConnection(0);
+  }
+
+  @Test
+  public void failIfMaxHeaderListSizeNegative() {
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("maxHeaderListSize must be > 0");
+
+    builder.maxHeaderListSize(0);
+  }
+
+  @Test
+  public void failIfMaxConnectionIdleNegative() {
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("max connection idle must be positive");
+
+    builder.maxConnectionIdle(-1, TimeUnit.HOURS);
+  }
+
+  @Test
+  public void failIfMaxConnectionAgeNegative() {
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("max connection age must be positive");
+
+    builder.maxConnectionAge(-1, TimeUnit.HOURS);
+  }
+
+  @Test
+  public void failIfMaxConnectionAgeGraceNegative() {
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("max connection age grace must be non-negative");
+
+    builder.maxConnectionAgeGrace(-1, TimeUnit.HOURS);
+  }
+
+  @Test
+  public void failIfPermitKeepAliveTimeNegative() {
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("permit keepalive time must be non-negative");
+
+    builder.permitKeepAliveTime(-1, TimeUnit.HOURS);
   }
 }

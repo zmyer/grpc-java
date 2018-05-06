@@ -1,53 +1,46 @@
 /*
- * Copyright 2016, Google Inc. All rights reserved.
+ * Copyright 2016 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.okhttp;
 
 import static com.google.common.truth.Truth.assertThat;
+import static io.grpc.internal.ClientStreamListener.RpcProgress.PROCESSED;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.eq;
+import static org.mockito.Matchers.isA;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
+import com.google.common.io.BaseEncoding;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.MethodDescriptor.MethodType;
 import io.grpc.Status;
-import io.grpc.internal.ClientStreamListener;
 import io.grpc.internal.GrpcUtil;
+import io.grpc.internal.NoopClientStreamListener;
 import io.grpc.internal.StatsTraceContext;
+import io.grpc.internal.TransportTracer;
 import io.grpc.okhttp.internal.framed.ErrorCode;
 import io.grpc.okhttp.internal.framed.Header;
-
+import java.io.ByteArrayInputStream;
+import java.nio.charset.Charset;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -60,10 +53,6 @@ import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
-import java.io.InputStream;
-import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
-
 @RunWith(JUnit4.class)
 public class OkHttpClientStreamTest {
   private static final int MAX_MESSAGE_SIZE = 100;
@@ -75,6 +64,7 @@ public class OkHttpClientStreamTest {
   @Captor private ArgumentCaptor<List<Header>> headersCaptor;
 
   private final Object lock = new Object();
+  private final TransportTracer transportTracer = new TransportTracer();
 
   private MethodDescriptor<?, ?> methodDescriptor;
   private OkHttpClientStream stream;
@@ -82,10 +72,25 @@ public class OkHttpClientStreamTest {
   @Before
   public void setUp() {
     MockitoAnnotations.initMocks(this);
-    methodDescriptor = MethodDescriptor.create(
-        MethodType.UNARY, "/testService/test", marshaller, marshaller);
-    stream = new OkHttpClientStream(methodDescriptor, new Metadata(), frameWriter, transport,
-        flowController, lock, MAX_MESSAGE_SIZE, "localhost", "userAgent", StatsTraceContext.NOOP);
+    methodDescriptor = MethodDescriptor.<Void, Void>newBuilder()
+        .setType(MethodDescriptor.MethodType.UNARY)
+        .setFullMethodName("testService/test")
+        .setRequestMarshaller(marshaller)
+        .setResponseMarshaller(marshaller)
+        .build();
+
+    stream = new OkHttpClientStream(
+        methodDescriptor,
+        new Metadata(),
+        frameWriter,
+        transport,
+        flowController,
+        lock,
+        MAX_MESSAGE_SIZE,
+        "localhost",
+        "userAgent",
+        StatsTraceContext.NOOP,
+        transportTracer);
   }
 
   @Test
@@ -94,44 +99,46 @@ public class OkHttpClientStreamTest {
   }
 
   @Test
-  public void sendCancel_notStarted() {
+  public void cancel_notStarted() {
     final AtomicReference<Status> statusRef = new AtomicReference<Status>();
     stream.start(new BaseClientStreamListener() {
       @Override
-      public void closed(Status status, Metadata trailers) {
+      public void closed(
+          Status status, RpcProgress rpcProgress, Metadata trailers) {
         statusRef.set(status);
         assertTrue(Thread.holdsLock(lock));
       }
     });
 
-    stream.sendCancel(Status.CANCELLED);
+    stream.cancel(Status.CANCELLED);
 
     assertEquals(Status.Code.CANCELLED, statusRef.get().getCode());
   }
 
   @Test
-  public void sendCancel_started() {
+  public void cancel_started() {
     stream.start(new BaseClientStreamListener());
-    stream.start(1234);
+    stream.transportState().start(1234);
     Mockito.doAnswer(new Answer<Void>() {
       @Override
       public Void answer(InvocationOnMock invocation) throws Throwable {
         assertTrue(Thread.holdsLock(lock));
         return null;
       }
-    }).when(transport).finishStream(1234, Status.CANCELLED, ErrorCode.CANCEL);
+    }).when(transport).finishStream(
+        1234, Status.CANCELLED, PROCESSED, true, ErrorCode.CANCEL, null);
 
-    stream.sendCancel(Status.CANCELLED);
+    stream.cancel(Status.CANCELLED);
 
-    verify(transport).finishStream(1234, Status.CANCELLED, ErrorCode.CANCEL);
+    verify(transport).finishStream(1234, Status.CANCELLED, PROCESSED,true, ErrorCode.CANCEL, null);
   }
 
   @Test
   public void start_alreadyCancelled() {
     stream.start(new BaseClientStreamListener());
-    stream.sendCancel(Status.CANCELLED);
+    stream.cancel(Status.CANCELLED);
 
-    stream.start(1234);
+    stream.transportState().start(1234);
 
     verifyNoMoreInteractions(frameWriter);
   }
@@ -142,9 +149,9 @@ public class OkHttpClientStreamTest {
     metaData.put(GrpcUtil.USER_AGENT_KEY, "misbehaving-application");
     stream = new OkHttpClientStream(methodDescriptor, metaData, frameWriter, transport,
         flowController, lock, MAX_MESSAGE_SIZE, "localhost", "good-application",
-        StatsTraceContext.NOOP);
+        StatsTraceContext.NOOP, transportTracer);
     stream.start(new BaseClientStreamListener());
-    stream.start(3);
+    stream.transportState().start(3);
 
     verify(frameWriter).synStream(eq(false), eq(false), eq(3), eq(0), headersCaptor.capture());
     assertThat(headersCaptor.getValue())
@@ -157,9 +164,9 @@ public class OkHttpClientStreamTest {
     metaData.put(GrpcUtil.USER_AGENT_KEY, "misbehaving-application");
     stream = new OkHttpClientStream(methodDescriptor, metaData, frameWriter, transport,
         flowController, lock, MAX_MESSAGE_SIZE, "localhost", "good-application",
-        StatsTraceContext.NOOP);
+        StatsTraceContext.NOOP, transportTracer);
     stream.start(new BaseClientStreamListener());
-    stream.start(3);
+    stream.transportState().start(3);
 
     verify(frameWriter).synStream(eq(false), eq(false), eq(3), eq(0), headersCaptor.capture());
     assertThat(headersCaptor.getValue()).containsExactly(
@@ -173,20 +180,48 @@ public class OkHttpClientStreamTest {
             .inOrder();
   }
 
+  @Test
+  public void getUnaryRequest() {
+    MethodDescriptor<?, ?> getMethod = MethodDescriptor.<Void, Void>newBuilder()
+        .setType(MethodDescriptor.MethodType.UNARY)
+        .setFullMethodName("service/method")
+        .setIdempotent(true)
+        .setSafe(true)
+        .setRequestMarshaller(marshaller)
+        .setResponseMarshaller(marshaller)
+        .build();
+    stream = new OkHttpClientStream(getMethod, new Metadata(), frameWriter, transport,
+        flowController, lock, MAX_MESSAGE_SIZE, "localhost", "good-application",
+        StatsTraceContext.NOOP, transportTracer);
+    stream.start(new BaseClientStreamListener());
+
+    // GET streams send headers after halfClose is called.
+    verify(frameWriter, times(0)).synStream(
+        eq(false), eq(false), eq(3), eq(0), headersCaptor.capture());
+    verify(transport, times(0)).streamReadyToStart(isA(OkHttpClientStream.class));
+
+    byte[] msg = "request".getBytes(Charset.forName("UTF-8"));
+    stream.writeMessage(new ByteArrayInputStream(msg));
+    stream.halfClose();
+    verify(transport).streamReadyToStart(eq(stream));
+    stream.transportState().start(3);
+
+    verify(frameWriter)
+        .synStream(eq(true), eq(false), eq(3), eq(0), headersCaptor.capture());
+    assertThat(headersCaptor.getValue()).contains(Headers.METHOD_GET_HEADER);
+    assertThat(headersCaptor.getValue()).contains(
+        new Header(Header.TARGET_PATH, "/" + getMethod.getFullMethodName() + "?"
+            + BaseEncoding.base64().encode(msg)));
+  }
+
   // TODO(carl-mastrangelo): extract this out into a testing/ directory and remove other definitions
   // of it.
-  private static class BaseClientStreamListener implements ClientStreamListener {
-    @Override
-    public void onReady() {}
+  private static class BaseClientStreamListener extends NoopClientStreamListener {
 
     @Override
-    public void messageRead(InputStream message) {}
-
-    @Override
-    public void headersRead(Metadata headers) {}
-
-    @Override
-    public void closed(Status status, Metadata trailers) {}
+    public void messagesAvailable(MessageProducer producer) {
+      while (producer.next() != null) {}
+    }
   }
 }
 

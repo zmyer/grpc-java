@@ -10,6 +10,7 @@ public  final class EmptyMessage extends
     com.google.protobuf.GeneratedMessageV3 implements
     // @@protoc_insertion_point(message_implements:grpc.reflection.testing.EmptyMessage)
     EmptyMessageOrBuilder {
+private static final long serialVersionUID = 0L;
   // Use EmptyMessage.newBuilder() to construct.
   private EmptyMessage(com.google.protobuf.GeneratedMessageV3.Builder<?> builder) {
     super(builder);
@@ -27,6 +28,9 @@ public  final class EmptyMessage extends
       com.google.protobuf.ExtensionRegistryLite extensionRegistry)
       throws com.google.protobuf.InvalidProtocolBufferException {
     this();
+    if (extensionRegistry == null) {
+      throw new java.lang.NullPointerException();
+    }
     com.google.protobuf.UnknownFieldSet.Builder unknownFields =
         com.google.protobuf.UnknownFieldSet.newBuilder();
     try {
@@ -38,8 +42,8 @@ public  final class EmptyMessage extends
             done = true;
             break;
           default: {
-            if (!parseUnknownField(input, unknownFields,
-                                   extensionRegistry, tag)) {
+            if (!parseUnknownField(
+                input, unknownFields, extensionRegistry, tag)) {
               done = true;
             }
             break;
@@ -93,7 +97,6 @@ public  final class EmptyMessage extends
     return size;
   }
 
-  private static final long serialVersionUID = 0L;
   @java.lang.Override
   public boolean equals(final java.lang.Object obj) {
     if (obj == this) {
@@ -115,12 +118,23 @@ public  final class EmptyMessage extends
       return memoizedHashCode;
     }
     int hash = 41;
-    hash = (19 * hash) + getDescriptorForType().hashCode();
+    hash = (19 * hash) + getDescriptor().hashCode();
     hash = (29 * hash) + unknownFields.hashCode();
     memoizedHashCode = hash;
     return hash;
   }
 
+  public static io.grpc.reflection.testing.EmptyMessage parseFrom(
+      java.nio.ByteBuffer data)
+      throws com.google.protobuf.InvalidProtocolBufferException {
+    return PARSER.parseFrom(data);
+  }
+  public static io.grpc.reflection.testing.EmptyMessage parseFrom(
+      java.nio.ByteBuffer data,
+      com.google.protobuf.ExtensionRegistryLite extensionRegistry)
+      throws com.google.protobuf.InvalidProtocolBufferException {
+    return PARSER.parseFrom(data, extensionRegistry);
+  }
   public static io.grpc.reflection.testing.EmptyMessage parseFrom(
       com.google.protobuf.ByteString data)
       throws com.google.protobuf.InvalidProtocolBufferException {
@@ -265,7 +279,7 @@ public  final class EmptyMessage extends
     }
     public Builder setField(
         com.google.protobuf.Descriptors.FieldDescriptor field,
-        Object value) {
+        java.lang.Object value) {
       return (Builder) super.setField(field, value);
     }
     public Builder clearField(
@@ -278,12 +292,12 @@ public  final class EmptyMessage extends
     }
     public Builder setRepeatedField(
         com.google.protobuf.Descriptors.FieldDescriptor field,
-        int index, Object value) {
+        int index, java.lang.Object value) {
       return (Builder) super.setRepeatedField(field, index, value);
     }
     public Builder addRepeatedField(
         com.google.protobuf.Descriptors.FieldDescriptor field,
-        Object value) {
+        java.lang.Object value) {
       return (Builder) super.addRepeatedField(field, value);
     }
     public Builder mergeFrom(com.google.protobuf.Message other) {
@@ -353,7 +367,7 @@ public  final class EmptyMessage extends
         com.google.protobuf.CodedInputStream input,
         com.google.protobuf.ExtensionRegistryLite extensionRegistry)
         throws com.google.protobuf.InvalidProtocolBufferException {
-        return new EmptyMessage(input, extensionRegistry);
+      return new EmptyMessage(input, extensionRegistry);
     }
   };
 

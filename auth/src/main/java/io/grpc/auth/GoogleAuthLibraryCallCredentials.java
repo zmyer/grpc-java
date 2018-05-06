@@ -1,32 +1,17 @@
 /*
- * Copyright 2016, Google Inc. All rights reserved.
+ * Copyright 2016 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.auth;
@@ -34,18 +19,18 @@ package io.grpc.auth;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auth.Credentials;
+import com.google.auth.RequestMetadataCallback;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.io.BaseEncoding;
-
 import io.grpc.Attributes;
-import io.grpc.CallCredentials.MetadataApplier;
 import io.grpc.CallCredentials;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
 import io.grpc.StatusException;
-
+import java.io.IOException;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -87,6 +72,9 @@ final class GoogleAuthLibraryCallCredentials implements CallCredentials {
   }
 
   @Override
+  public void thisUsesUnstableApi() {}
+
+  @Override
   public void applyRequestMetadata(MethodDescriptor<?, ?> method, Attributes attrs,
       Executor appExecutor, final MetadataApplier applier) {
     String authority = checkNotNull(attrs.get(ATTR_AUTHORITY), "authority");
@@ -97,37 +85,48 @@ final class GoogleAuthLibraryCallCredentials implements CallCredentials {
       applier.fail(e.getStatus());
       return;
     }
-    appExecutor.execute(new Runnable() {
-        @Override
-        public void run() {
-          try {
-            // Credentials is expected to manage caching internally if the metadata is fetched over
-            // the network.
-            //
-            // TODO(zhangkun83): we don't know whether there is valid cache data. If there is, we
-            // would waste a context switch by always scheduling in executor. However, we have to
-            // do so because we can't risk blocking the network thread. This can be resolved after
-            // https://github.com/google/google-auth-library-java/issues/3 is resolved.
-            //
-            // Some implementations may return null here.
-            Map<String, List<String>> metadata = creds.getRequestMetadata(uri);
-            // Re-use the headers if getRequestMetadata() returns the same map. It may return a
-            // different map based on the provided URI, i.e., for JWT. However, today it does not
-            // cache JWT and so we won't bother tring to save its return value based on the URI.
-            Metadata headers;
-            synchronized (GoogleAuthLibraryCallCredentials.this) {
-              if (lastMetadata == null || lastMetadata != metadata) {
-                lastMetadata = metadata;
-                lastHeaders = toHeaders(metadata);
-              }
-              headers = lastHeaders;
+    // Credentials is expected to manage caching internally if the metadata is fetched over
+    // the network.
+    creds.getRequestMetadata(uri, appExecutor, new RequestMetadataCallback() {
+      @Override
+      public void onSuccess(Map<String, List<String>> metadata) {
+        // Some implementations may pass null metadata.
+
+        // Re-use the headers if getRequestMetadata() returns the same map. It may return a
+        // different map based on the provided URI, i.e., for JWT. However, today it does not
+        // cache JWT and so we won't bother tring to save its return value based on the URI.
+        Metadata headers;
+        try {
+          synchronized (GoogleAuthLibraryCallCredentials.this) {
+            if (lastMetadata == null || lastMetadata != metadata) {
+              lastHeaders = toHeaders(metadata);
+              lastMetadata = metadata;
             }
-            applier.apply(headers);
-          } catch (Throwable e) {
-            applier.fail(Status.UNAUTHENTICATED.withCause(e));
+            headers = lastHeaders;
           }
+        } catch (Throwable t) {
+          applier.fail(Status.UNAUTHENTICATED
+              .withDescription("Failed to convert credential metadata")
+              .withCause(t));
+          return;
         }
-      });
+        applier.apply(headers);
+      }
+
+      @Override
+      public void onFailure(Throwable e) {
+        if (e instanceof IOException) {
+          // Since it's an I/O failure, let the call be retried with UNAVAILABLE.
+          applier.fail(Status.UNAVAILABLE
+              .withDescription("Credentials failed to obtain metadata")
+              .withCause(e));
+        } else {
+          applier.fail(Status.UNAUTHENTICATED
+              .withDescription("Failed computing credential metadata")
+              .withCause(e));
+        }
+      }
+    });
   }
 
   /**
@@ -168,6 +167,7 @@ final class GoogleAuthLibraryCallCredentials implements CallCredentials {
     }
   }
 
+  @SuppressWarnings("BetaApi") // BaseEncoding is stable in Guava 20.0
   private static Metadata toHeaders(@Nullable Map<String, List<String>> metadata) {
     Metadata headers = new Metadata();
     if (metadata != null) {
@@ -193,19 +193,25 @@ final class GoogleAuthLibraryCallCredentials implements CallCredentials {
   static JwtHelper createJwtHelperOrNull(ClassLoader loader) {
     Class<?> rawServiceAccountClass;
     try {
-      // Specify loader so it can be overriden in tests
+      // Specify loader so it can be overridden in tests
       rawServiceAccountClass
           = Class.forName("com.google.auth.oauth2.ServiceAccountCredentials", false, loader);
     } catch (ClassNotFoundException ex) {
       return null;
     }
+    Exception caughtException;
     try {
       return new JwtHelper(rawServiceAccountClass, loader);
-    } catch (ReflectiveOperationException ex) {
-      // Failure is a bug in this class, but we still choose to gracefully recover
-      log.log(Level.WARNING, "Failed to create JWT helper. This is unexpected", ex);
-      return null;
+    } catch (ClassNotFoundException ex) {
+      caughtException = ex;
+    } catch (NoSuchMethodException ex) {
+      caughtException = ex;
     }
+    if (caughtException != null) {
+      // Failure is a bug in this class, but we still choose to gracefully recover
+      log.log(Level.WARNING, "Failed to create JWT helper. This is unexpected", caughtException);
+    }
+    return null;
   }
 
   @VisibleForTesting
@@ -219,7 +225,7 @@ final class GoogleAuthLibraryCallCredentials implements CallCredentials {
     private final Method getPrivateKeyId;
 
     public JwtHelper(Class<?> rawServiceAccountClass, ClassLoader loader)
-        throws ReflectiveOperationException {
+        throws ClassNotFoundException, NoSuchMethodException {
       serviceAccountClass = rawServiceAccountClass.asSubclass(Credentials.class);
       getScopes = serviceAccountClass.getMethod("getScopes");
       getClientId = serviceAccountClass.getMethod("getClientId");
@@ -237,6 +243,7 @@ final class GoogleAuthLibraryCallCredentials implements CallCredentials {
       if (!serviceAccountClass.isInstance(creds)) {
         return creds;
       }
+      Exception caughtException;
       try {
         creds = serviceAccountClass.cast(creds);
         Collection<?> scopes = (Collection<?>) getScopes.invoke(creds);
@@ -249,12 +256,21 @@ final class GoogleAuthLibraryCallCredentials implements CallCredentials {
             getClientEmail.invoke(creds),
             getPrivateKey.invoke(creds),
             getPrivateKeyId.invoke(creds));
-      } catch (ReflectiveOperationException ex) {
-        // Failure is a bug in this class, but we still choose to gracefully recover
-        log.log(Level.WARNING,
-            "Failed converting service account credential to JWT. This is unexpected", ex);
-        return creds;
+      } catch (IllegalAccessException ex) {
+        caughtException = ex;
+      } catch (InvocationTargetException ex) {
+        caughtException = ex;
+      } catch (InstantiationException ex) {
+        caughtException = ex;
       }
+      if (caughtException != null) {
+        // Failure is a bug in this class, but we still choose to gracefully recover
+        log.log(
+            Level.WARNING,
+            "Failed converting service account credential to JWT. This is unexpected",
+            caughtException);
+      }
+      return creds;
     }
   }
 }

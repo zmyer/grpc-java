@@ -1,26 +1,26 @@
 package io.grpc.grpclb;
 
-import static io.grpc.stub.ClientCalls.asyncUnaryCall;
-import static io.grpc.stub.ClientCalls.asyncServerStreamingCall;
-import static io.grpc.stub.ClientCalls.asyncClientStreamingCall;
-import static io.grpc.stub.ClientCalls.asyncBidiStreamingCall;
-import static io.grpc.stub.ClientCalls.blockingUnaryCall;
-import static io.grpc.stub.ClientCalls.blockingServerStreamingCall;
-import static io.grpc.stub.ClientCalls.futureUnaryCall;
 import static io.grpc.MethodDescriptor.generateFullMethodName;
-import static io.grpc.stub.ServerCalls.asyncUnaryCall;
-import static io.grpc.stub.ServerCalls.asyncServerStreamingCall;
-import static io.grpc.stub.ServerCalls.asyncClientStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncBidiStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncClientStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncServerStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncUnaryCall;
+import static io.grpc.stub.ClientCalls.blockingServerStreamingCall;
+import static io.grpc.stub.ClientCalls.blockingUnaryCall;
+import static io.grpc.stub.ClientCalls.futureUnaryCall;
 import static io.grpc.stub.ServerCalls.asyncBidiStreamingCall;
-import static io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall;
+import static io.grpc.stub.ServerCalls.asyncClientStreamingCall;
+import static io.grpc.stub.ServerCalls.asyncServerStreamingCall;
+import static io.grpc.stub.ServerCalls.asyncUnaryCall;
 import static io.grpc.stub.ServerCalls.asyncUnimplementedStreamingCall;
+import static io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall;
 
 /**
  */
 @javax.annotation.Generated(
-    value = "by gRPC proto compiler (version 1.1.0-SNAPSHOT)",
-    comments = "Source: load_balancer.proto")
-public class LoadBalancerGrpc {
+    value = "by gRPC proto compiler",
+    comments = "Source: grpc/lb/v1/load_balancer.proto")
+public final class LoadBalancerGrpc {
 
   private LoadBalancerGrpc() {}
 
@@ -28,14 +28,42 @@ public class LoadBalancerGrpc {
 
   // Static method descriptors that strictly reflect the proto.
   @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  @java.lang.Deprecated // Use {@link #getBalanceLoadMethod()} instead. 
   public static final io.grpc.MethodDescriptor<io.grpc.grpclb.LoadBalanceRequest,
-      io.grpc.grpclb.LoadBalanceResponse> METHOD_BALANCE_LOAD =
-      io.grpc.MethodDescriptor.create(
-          io.grpc.MethodDescriptor.MethodType.BIDI_STREAMING,
-          generateFullMethodName(
-              "grpc.lb.v1.LoadBalancer", "BalanceLoad"),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.grpclb.LoadBalanceRequest.getDefaultInstance()),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.grpclb.LoadBalanceResponse.getDefaultInstance()));
+      io.grpc.grpclb.LoadBalanceResponse> METHOD_BALANCE_LOAD = getBalanceLoadMethodHelper();
+
+  private static volatile io.grpc.MethodDescriptor<io.grpc.grpclb.LoadBalanceRequest,
+      io.grpc.grpclb.LoadBalanceResponse> getBalanceLoadMethod;
+
+  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  public static io.grpc.MethodDescriptor<io.grpc.grpclb.LoadBalanceRequest,
+      io.grpc.grpclb.LoadBalanceResponse> getBalanceLoadMethod() {
+    return getBalanceLoadMethodHelper();
+  }
+
+  private static io.grpc.MethodDescriptor<io.grpc.grpclb.LoadBalanceRequest,
+      io.grpc.grpclb.LoadBalanceResponse> getBalanceLoadMethodHelper() {
+    io.grpc.MethodDescriptor<io.grpc.grpclb.LoadBalanceRequest, io.grpc.grpclb.LoadBalanceResponse> getBalanceLoadMethod;
+    if ((getBalanceLoadMethod = LoadBalancerGrpc.getBalanceLoadMethod) == null) {
+      synchronized (LoadBalancerGrpc.class) {
+        if ((getBalanceLoadMethod = LoadBalancerGrpc.getBalanceLoadMethod) == null) {
+          LoadBalancerGrpc.getBalanceLoadMethod = getBalanceLoadMethod = 
+              io.grpc.MethodDescriptor.<io.grpc.grpclb.LoadBalanceRequest, io.grpc.grpclb.LoadBalanceResponse>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.BIDI_STREAMING)
+              .setFullMethodName(generateFullMethodName(
+                  "grpc.lb.v1.LoadBalancer", "BalanceLoad"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.grpclb.LoadBalanceRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.grpclb.LoadBalanceResponse.getDefaultInstance()))
+                  .setSchemaDescriptor(new LoadBalancerMethodDescriptorSupplier("BalanceLoad"))
+                  .build();
+          }
+        }
+     }
+     return getBalanceLoadMethod;
+  }
 
   /**
    * Creates a new async stub that supports all call types for the service
@@ -53,7 +81,7 @@ public class LoadBalancerGrpc {
   }
 
   /**
-   * Creates a new ListenableFuture-style stub that supports unary and streaming output calls on the service
+   * Creates a new ListenableFuture-style stub that supports unary calls on the service
    */
   public static LoadBalancerFutureStub newFutureStub(
       io.grpc.Channel channel) {
@@ -71,13 +99,13 @@ public class LoadBalancerGrpc {
      */
     public io.grpc.stub.StreamObserver<io.grpc.grpclb.LoadBalanceRequest> balanceLoad(
         io.grpc.stub.StreamObserver<io.grpc.grpclb.LoadBalanceResponse> responseObserver) {
-      return asyncUnimplementedStreamingCall(METHOD_BALANCE_LOAD, responseObserver);
+      return asyncUnimplementedStreamingCall(getBalanceLoadMethodHelper(), responseObserver);
     }
 
-    @java.lang.Override public io.grpc.ServerServiceDefinition bindService() {
+    @java.lang.Override public final io.grpc.ServerServiceDefinition bindService() {
       return io.grpc.ServerServiceDefinition.builder(getServiceDescriptor())
           .addMethod(
-            METHOD_BALANCE_LOAD,
+            getBalanceLoadMethodHelper(),
             asyncBidiStreamingCall(
               new MethodHandlers<
                 io.grpc.grpclb.LoadBalanceRequest,
@@ -113,7 +141,7 @@ public class LoadBalancerGrpc {
     public io.grpc.stub.StreamObserver<io.grpc.grpclb.LoadBalanceRequest> balanceLoad(
         io.grpc.stub.StreamObserver<io.grpc.grpclb.LoadBalanceResponse> responseObserver) {
       return asyncBidiStreamingCall(
-          getChannel().newCall(METHOD_BALANCE_LOAD, getCallOptions()), responseObserver);
+          getChannel().newCall(getBalanceLoadMethodHelper(), getCallOptions()), responseObserver);
     }
   }
 
@@ -157,7 +185,7 @@ public class LoadBalancerGrpc {
 
   private static final int METHODID_BALANCE_LOAD = 0;
 
-  private static class MethodHandlers<Req, Resp> implements
+  private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
       io.grpc.stub.ServerCalls.ServerStreamingMethod<Req, Resp>,
       io.grpc.stub.ServerCalls.ClientStreamingMethod<Req, Resp>,
@@ -165,7 +193,7 @@ public class LoadBalancerGrpc {
     private final LoadBalancerImplBase serviceImpl;
     private final int methodId;
 
-    public MethodHandlers(LoadBalancerImplBase serviceImpl, int methodId) {
+    MethodHandlers(LoadBalancerImplBase serviceImpl, int methodId) {
       this.serviceImpl = serviceImpl;
       this.methodId = methodId;
     }
@@ -193,22 +221,56 @@ public class LoadBalancerGrpc {
     }
   }
 
-  private static final class LoadBalancerDescriptorSupplier implements io.grpc.protobuf.ProtoFileDescriptorSupplier {
+  private static abstract class LoadBalancerBaseDescriptorSupplier
+      implements io.grpc.protobuf.ProtoFileDescriptorSupplier, io.grpc.protobuf.ProtoServiceDescriptorSupplier {
+    LoadBalancerBaseDescriptorSupplier() {}
+
     @java.lang.Override
     public com.google.protobuf.Descriptors.FileDescriptor getFileDescriptor() {
       return io.grpc.grpclb.LoadBalancerProto.getDescriptor();
     }
+
+    @java.lang.Override
+    public com.google.protobuf.Descriptors.ServiceDescriptor getServiceDescriptor() {
+      return getFileDescriptor().findServiceByName("LoadBalancer");
+    }
   }
 
-  private static io.grpc.ServiceDescriptor serviceDescriptor;
+  private static final class LoadBalancerFileDescriptorSupplier
+      extends LoadBalancerBaseDescriptorSupplier {
+    LoadBalancerFileDescriptorSupplier() {}
+  }
 
-  public static synchronized io.grpc.ServiceDescriptor getServiceDescriptor() {
-    if (serviceDescriptor == null) {
-      serviceDescriptor = new io.grpc.ServiceDescriptor(SERVICE_NAME,
-          new LoadBalancerDescriptorSupplier(),
-          METHOD_BALANCE_LOAD);
+  private static final class LoadBalancerMethodDescriptorSupplier
+      extends LoadBalancerBaseDescriptorSupplier
+      implements io.grpc.protobuf.ProtoMethodDescriptorSupplier {
+    private final String methodName;
+
+    LoadBalancerMethodDescriptorSupplier(String methodName) {
+      this.methodName = methodName;
     }
 
-    return serviceDescriptor;
+    @java.lang.Override
+    public com.google.protobuf.Descriptors.MethodDescriptor getMethodDescriptor() {
+      return getServiceDescriptor().findMethodByName(methodName);
+    }
+  }
+
+  private static volatile io.grpc.ServiceDescriptor serviceDescriptor;
+
+  public static io.grpc.ServiceDescriptor getServiceDescriptor() {
+    io.grpc.ServiceDescriptor result = serviceDescriptor;
+    if (result == null) {
+      synchronized (LoadBalancerGrpc.class) {
+        result = serviceDescriptor;
+        if (result == null) {
+          serviceDescriptor = result = io.grpc.ServiceDescriptor.newBuilder(SERVICE_NAME)
+              .setSchemaDescriptor(new LoadBalancerFileDescriptorSupplier())
+              .addMethod(getBalanceLoadMethodHelper())
+              .build();
+        }
+      }
+    }
+    return result;
   }
 }

@@ -1,51 +1,39 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.netty;
 
 import static com.google.common.base.Preconditions.checkNotNull;
-import static io.grpc.netty.GrpcSslContexts.HTTP2_VERSION;
+import static io.grpc.netty.GrpcSslContexts.NEXT_PROTOCOL_VERSIONS;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-
 import io.grpc.Attributes;
 import io.grpc.Grpc;
 import io.grpc.Internal;
 import io.grpc.Status;
+import io.grpc.internal.Channelz;
 import io.grpc.internal.GrpcUtil;
 import io.netty.channel.ChannelDuplexHandler;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerAdapter;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandler;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
@@ -55,6 +43,9 @@ import io.netty.handler.codec.http.HttpClientUpgradeHandler;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http2.Http2ClientUpgradeCodec;
+import io.netty.handler.proxy.HttpProxyHandler;
+import io.netty.handler.proxy.ProxyConnectionEvent;
+import io.netty.handler.proxy.ProxyHandler;
 import io.netty.handler.ssl.OpenSsl;
 import io.netty.handler.ssl.OpenSslEngine;
 import io.netty.handler.ssl.SslContext;
@@ -62,17 +53,17 @@ import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import io.netty.util.AsciiString;
 import io.netty.util.ReferenceCountUtil;
-
+import java.net.SocketAddress;
 import java.net.URI;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Queue;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-
 import javax.annotation.Nullable;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSession;
 
 /**
  * Common {@link ProtocolNegotiator}s used by gRPC.
@@ -94,6 +85,11 @@ public final class ProtocolNegotiators {
         class PlaintextHandler extends ChannelHandlerAdapter implements Handler {
           @Override
           public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+            // Set sttributes before replace to be sure we pass it before accepting any requests.
+            handler.handleProtocolNegotiationCompleted(Attributes.newBuilder()
+                .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, ctx.channel().remoteAddress())
+                .build(),
+                /*securityInfo=*/ null);
             // Just replace this handler with the gRPC handler.
             ctx.pipeline().replace(this, null, handler);
           }
@@ -151,14 +147,16 @@ public final class ProtocolNegotiators {
       if (evt instanceof SslHandshakeCompletionEvent) {
         SslHandshakeCompletionEvent handshakeEvent = (SslHandshakeCompletionEvent) evt;
         if (handshakeEvent.isSuccess()) {
-          if (HTTP2_VERSION.equals(sslHandler(ctx.pipeline()).applicationProtocol())) {
+          if (NEXT_PROTOCOL_VERSIONS.contains(sslHandler(ctx.pipeline()).applicationProtocol())) {
+            SSLSession session = sslHandler(ctx.pipeline()).engine().getSession();
             // Successfully negotiated the protocol.
             // Notify about completion and pass down SSLSession in attributes.
             grpcHandler.handleProtocolNegotiationCompleted(
                 Attributes.newBuilder()
-                    .set(Grpc.TRANSPORT_ATTR_SSL_SESSION,
-                        sslHandler(ctx.pipeline()).engine().getSession())
-                    .build());
+                    .set(Grpc.TRANSPORT_ATTR_SSL_SESSION, session)
+                    .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, ctx.channel().remoteAddress())
+                    .build(),
+                new Channelz.Security(new Channelz.Tls(session)));
             // Replace this handler with the GRPC handler.
             ctx.pipeline().replace(this, null, grpcHandler);
           } else {
@@ -184,6 +182,73 @@ public final class ProtocolNegotiators {
     @Override
     public AsciiString scheme() {
       return Utils.HTTPS;
+    }
+  }
+
+  /**
+   * Returns a {@link ProtocolNegotiator} that does HTTP CONNECT proxy negotiation.
+   */
+  public static ProtocolNegotiator httpProxy(final SocketAddress proxyAddress,
+      final @Nullable String proxyUsername, final @Nullable String proxyPassword,
+      final ProtocolNegotiator negotiator) {
+    Preconditions.checkNotNull(proxyAddress, "proxyAddress");
+    Preconditions.checkNotNull(negotiator, "negotiator");
+    class ProxyNegotiator implements ProtocolNegotiator {
+      @Override
+      public Handler newHandler(GrpcHttp2ConnectionHandler http2Handler) {
+        HttpProxyHandler proxyHandler;
+        if (proxyUsername == null || proxyPassword == null) {
+          proxyHandler = new HttpProxyHandler(proxyAddress);
+        } else {
+          proxyHandler = new HttpProxyHandler(proxyAddress, proxyUsername, proxyPassword);
+        }
+        return new BufferUntilProxyTunnelledHandler(
+            proxyHandler, negotiator.newHandler(http2Handler));
+      }
+    }
+
+    return new ProxyNegotiator();
+  }
+
+  /**
+   * Buffers all writes until the HTTP CONNECT tunnel is established.
+   */
+  static final class BufferUntilProxyTunnelledHandler extends AbstractBufferingHandler
+      implements ProtocolNegotiator.Handler {
+    private final ProtocolNegotiator.Handler originalHandler;
+
+    public BufferUntilProxyTunnelledHandler(
+        ProxyHandler proxyHandler, ProtocolNegotiator.Handler handler) {
+      super(proxyHandler, handler);
+      this.originalHandler = handler;
+    }
+
+
+    @Override
+    public AsciiString scheme() {
+      return originalHandler.scheme();
+    }
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+      if (evt instanceof ProxyConnectionEvent) {
+        writeBufferedAndRemove(ctx);
+      }
+      super.userEventTriggered(ctx, evt);
+    }
+
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+      fail(ctx, unavailableException("Connection broken while trying to CONNECT through proxy"));
+      super.channelInactive(ctx);
+    }
+
+    @Override
+    public void close(ChannelHandlerContext ctx, ChannelPromise future) throws Exception {
+      if (ctx.channel().isActive()) { // This may be a notification that the socket was closed
+        fail(ctx, unavailableException("Channel closed while trying to CONNECT through proxy"));
+      }
+      super.close(ctx, future);
     }
   }
 
@@ -243,7 +308,7 @@ public final class ProtocolNegotiators {
         @Override
         public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
           SSLEngine sslEngine = sslContext.newEngine(ctx.alloc(), host, port);
-          SSLParameters sslParams = new SSLParameters();
+          SSLParameters sslParams = sslEngine.getSSLParameters();
           sslParams.setEndpointIdentificationAlgorithm("HTTPS");
           sslEngine.setSSLParameters(sslParams);
           ctx.pipeline().replace(this, null, new SslHandler(sslEngine, false));
@@ -268,7 +333,7 @@ public final class ProtocolNegotiators {
       HttpClientCodec httpClientCodec = new HttpClientCodec();
       final HttpClientUpgradeHandler upgrader =
           new HttpClientUpgradeHandler(httpClientCodec, upgradeCodec, 1000);
-      return new BufferingHttp2UpgradeHandler(upgrader);
+      return new BufferingHttp2UpgradeHandler(upgrader, handler);
     }
   }
 
@@ -313,6 +378,8 @@ public final class ProtocolNegotiators {
       builder.append("    Jetty ALPN");
     } else if (JettyTlsUtil.isJettyNpnConfigured()) {
       builder.append("    Jetty NPN");
+    } else if (JettyTlsUtil.isJava9AlpnAvailable()) {
+      builder.append("    JDK9 ALPN");
     }
     builder.append("\n    TLS Protocol: ");
     builder.append(engine.getSession().getProtocol());
@@ -357,6 +424,10 @@ public final class ProtocolNegotiators {
       this.handlers = handlers;
     }
 
+    /**
+     * When this channel is registered, we will add all the ChannelHandlers passed into our
+     * constructor to the pipeline.
+     */
     @Override
     public void channelRegistered(ChannelHandlerContext ctx) throws Exception {
       /**
@@ -364,23 +435,65 @@ public final class ProtocolNegotiators {
        * lifetime and we only want to configure it once.
        */
       if (handlers != null) {
-        ctx.pipeline().addFirst(handlers);
+        for (ChannelHandler handler : handlers) {
+          ctx.pipeline().addBefore(ctx.name(), null, handler);
+        }
+        ChannelHandler handler0 = handlers[0];
+        ChannelHandlerContext handler0Ctx = ctx.pipeline().context(handlers[0]);
         handlers = null;
+        if (handler0Ctx != null) { // The handler may have removed itself immediately
+          if (handler0 instanceof ChannelInboundHandler) {
+            ((ChannelInboundHandler) handler0).channelRegistered(handler0Ctx);
+          } else {
+            handler0Ctx.fireChannelRegistered();
+          }
+        }
+      } else {
+        super.channelRegistered(ctx);
       }
-      super.channelRegistered(ctx);
     }
 
+    /**
+     * Do not rely on channel handlers to propagate exceptions to us.
+     * {@link NettyClientHandler} is an example of a class that does not propagate exceptions.
+     * Add a listener to the connect future directly and do appropriate error handling.
+     */
+    @Override
+    public void connect(final ChannelHandlerContext ctx, SocketAddress remoteAddress,
+        SocketAddress localAddress, ChannelPromise promise) throws Exception {
+      super.connect(ctx, remoteAddress, localAddress, promise);
+      promise.addListener(new ChannelFutureListener() {
+        @Override
+        public void operationComplete(ChannelFuture future) throws Exception {
+          if (!future.isSuccess()) {
+            fail(ctx, future.cause());
+          }
+        }
+      });
+    }
+
+    /**
+     * If we encounter an exception, then notify all buffered writes that we failed.
+     */
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
       fail(ctx, cause);
     }
 
+    /**
+     * If this channel becomes inactive, then notify all buffered writes that we failed.
+     */
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
       fail(ctx, unavailableException("Connection broken while performing protocol negotiation"));
       super.channelInactive(ctx);
     }
 
+    /**
+     * Buffers the write until either {@link #writeBufferedAndRemove(ChannelHandlerContext)} is
+     * called, or we have somehow failed. If we have already failed in the past, then the write
+     * will fail immediately.
+     */
     @Override
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
         throws Exception {
@@ -404,6 +517,10 @@ public final class ProtocolNegotiators {
       }
     }
 
+    /**
+     * Calls to this method will not trigger an immediate flush. The flush will be deferred until
+     * {@link #writeBufferedAndRemove(ChannelHandlerContext)}.
+     */
     @Override
     public void flush(ChannelHandlerContext ctx) {
       /**
@@ -420,11 +537,21 @@ public final class ProtocolNegotiators {
       }
     }
 
+    /**
+     * If we are still performing protocol negotiation, then this will propagate failures to all
+     * buffered writes.
+     */
     @Override
     public void close(ChannelHandlerContext ctx, ChannelPromise future) throws Exception {
-      fail(ctx, unavailableException("Channel closed while performing protocol negotiation"));
+      if (ctx.channel().isActive()) { // This may be a notification that the socket was closed
+        fail(ctx, unavailableException("Channel closed while performing protocol negotiation"));
+      }
+      super.close(ctx, future);
     }
 
+    /**
+     * Propagate failures to all buffered writes.
+     */
     protected final void fail(ChannelHandlerContext ctx, Throwable cause) {
       if (failCause == null) {
         failCause = cause;
@@ -488,7 +615,7 @@ public final class ProtocolNegotiators {
 
     BufferUntilTlsNegotiatedHandler(
         ChannelHandler bootstrapHandler, GrpcHttp2ConnectionHandler grpcHandler) {
-      super(bootstrapHandler, grpcHandler);
+      super(bootstrapHandler);
       this.grpcHandler = grpcHandler;
     }
 
@@ -503,16 +630,23 @@ public final class ProtocolNegotiators {
         SslHandshakeCompletionEvent handshakeEvent = (SslHandshakeCompletionEvent) evt;
         if (handshakeEvent.isSuccess()) {
           SslHandler handler = ctx.pipeline().get(SslHandler.class);
-          if (HTTP2_VERSION.equals(handler.applicationProtocol())) {
+          if (NEXT_PROTOCOL_VERSIONS.contains(handler.applicationProtocol())) {
             // Successfully negotiated the protocol.
             logSslEngineDetails(Level.FINER, ctx, "TLS negotiation succeeded.", null);
 
+            // Wait until negotiation is complete to add gRPC.   If added too early, HTTP/2 writes
+            // will fail before we see the userEvent, and the channel is closed down prematurely.
+            ctx.pipeline().addBefore(ctx.name(), null, grpcHandler);
+
+            SSLSession session = handler.engine().getSession();
             // Successfully negotiated the protocol.
             // Notify about completion and pass down SSLSession in attributes.
             grpcHandler.handleProtocolNegotiationCompleted(
                 Attributes.newBuilder()
-                    .set(Grpc.TRANSPORT_ATTR_SSL_SESSION, handler.engine().getSession())
-                    .build());
+                    .set(Grpc.TRANSPORT_ATTR_SSL_SESSION, session)
+                    .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, ctx.channel().remoteAddress())
+                    .build(),
+                new Channelz.Security(new Channelz.Tls(session)));
             writeBufferedAndRemove(ctx);
           } else {
             Exception ex = new Exception(
@@ -534,8 +668,11 @@ public final class ProtocolNegotiators {
   private static class BufferUntilChannelActiveHandler extends AbstractBufferingHandler
       implements ProtocolNegotiator.Handler {
 
-    BufferUntilChannelActiveHandler(ChannelHandler... handlers) {
-      super(handlers);
+    private final GrpcHttp2ConnectionHandler handler;
+
+    BufferUntilChannelActiveHandler(GrpcHttp2ConnectionHandler handler) {
+      super(handler);
+      this.handler = handler;
     }
 
     @Override
@@ -551,6 +688,12 @@ public final class ProtocolNegotiators {
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
       writeBufferedAndRemove(ctx);
+      handler.handleProtocolNegotiationCompleted(
+          Attributes
+              .newBuilder()
+              .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, ctx.channel().remoteAddress())
+              .build(),
+          /*securityInfo=*/ null);
       super.channelActive(ctx);
     }
   }
@@ -561,8 +704,11 @@ public final class ProtocolNegotiators {
   private static class BufferingHttp2UpgradeHandler extends AbstractBufferingHandler
       implements ProtocolNegotiator.Handler {
 
-    BufferingHttp2UpgradeHandler(ChannelHandler... handlers) {
-      super(handlers);
+    private final GrpcHttp2ConnectionHandler grpcHandler;
+
+    BufferingHttp2UpgradeHandler(ChannelHandler handler, GrpcHttp2ConnectionHandler grpcHandler) {
+      super(handler);
+      this.grpcHandler = grpcHandler;
     }
 
     @Override
@@ -584,6 +730,12 @@ public final class ProtocolNegotiators {
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
       if (evt == HttpClientUpgradeHandler.UpgradeEvent.UPGRADE_SUCCESSFUL) {
         writeBufferedAndRemove(ctx);
+        grpcHandler.handleProtocolNegotiationCompleted(
+            Attributes
+                .newBuilder()
+                .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, ctx.channel().remoteAddress())
+                .build(),
+            /*securityInfo=*/ null);
       } else if (evt == HttpClientUpgradeHandler.UpgradeEvent.UPGRADE_REJECTED) {
         fail(ctx, unavailableException("HTTP/2 upgrade rejected"));
       }

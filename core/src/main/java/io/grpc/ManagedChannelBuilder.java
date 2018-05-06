@@ -1,36 +1,22 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
 
+import com.google.common.base.Preconditions;
 import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -41,6 +27,12 @@ import java.util.concurrent.TimeUnit;
  * @param <T> The concrete type of this builder.
  */
 public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> {
+  /**
+   * Creates a channel with the target's address and port number.
+   *
+   * @see #forTarget(String)
+   * @since 1.0.0
+   */
   public static ManagedChannelBuilder<?> forAddress(String name, int port) {
     return ManagedChannelProvider.provider().builderForAddress(name, port);
   }
@@ -72,6 +64,8 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    *   <li>{@code "[2001:db8:85a3:8d3:1319:8a2e:370:7348]"}</li>
    *   <li>{@code "[2001:db8:85a3:8d3:1319:8a2e:370:7348]:443"}</li>
    * </ul>
+   *
+   * @since 1.0.0
    */
   public static ManagedChannelBuilder<?> forTarget(String target) {
     return ManagedChannelProvider.provider().builderForTarget(target);
@@ -87,6 +81,9 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    * <p>Calling this method is semantically equivalent to calling {@link #executor(Executor)} and
    * passing in a direct executor. However, this is the preferred way as it may allow the transport
    * to perform special optimizations.
+   *
+   * @return this
+   * @since 1.0.0
    */
   public abstract T directExecutor();
 
@@ -98,6 +95,9 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    *
    * <p>The channel won't take ownership of the given executor. It's caller's responsibility to
    * shut down the executor when it's desired.
+   *
+   * @return this
+   * @since 1.0.0
    */
   public abstract T executor(Executor executor);
 
@@ -105,6 +105,9 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    * Adds interceptors that will be called before the channel performs its real work. This is
    * functionally equivalent to using {@link ClientInterceptors#intercept(Channel, List)}, but while
    * still having access to the original {@code ManagedChannel}.
+   *
+   * @return this
+   * @since 1.0.0
    */
   public abstract T intercept(List<ClientInterceptor> interceptors);
 
@@ -112,14 +115,20 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    * Adds interceptors that will be called before the channel performs its real work. This is
    * functionally equivalent to using {@link ClientInterceptors#intercept(Channel,
    * ClientInterceptor...)}, but while still having access to the original {@code ManagedChannel}.
+   *
+   * @return this
+   * @since 1.0.0
    */
   public abstract T intercept(ClientInterceptor... interceptors);
 
   /**
    * Provides a custom {@code User-Agent} for the application.
    *
-   * <p>It's an optional parameter. If provided, the given agent will be prepended by the
-   * grpc {@code User-Agent}.
+   * <p>It's an optional parameter. The library will provide a user agent independent of this
+   * option. If provided, the given agent will prepend the library's user agent information.
+   *
+   * @return this
+   * @since 1.0.0
    */
   public abstract T userAgent(String userAgent);
 
@@ -127,12 +136,15 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    * Overrides the authority used with TLS and HTTP virtual hosting. It does not change what host is
    * actually connected to. Is commonly in the form {@code host:port}.
    *
-   * <p>Should only used by tests.
+   * <p>This method is intended for testing, but may safely be used outside of tests as an
+   * alternative to DNS overrides.
+   *
+   * @return this
+   * @since 1.0.0
    */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1767")
   public abstract T overrideAuthority(String authority);
 
-  /*
+  /**
    * Use of a plaintext connection to the server. By default a secure connection mechanism
    * such as TLS will be used.
    *
@@ -141,15 +153,63 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    *
    * @param skipNegotiation @{code true} if there is a priori knowledge that the endpoint supports
    *                        plaintext, {@code false} if plaintext use must be negotiated.
+   * @deprecated Use {@link #usePlaintext()} instead.
+   *
+   * @throws UnsupportedOperationException if plaintext mode is not supported.
+   * @return this
+   * @since 1.0.0
    */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1772")
-  public abstract T usePlaintext(boolean skipNegotiation);
+  @Deprecated
+  public T usePlaintext(boolean skipNegotiation) {
+    throw new UnsupportedOperationException();
+  }
 
-  /*
-   * Provides a custom {@link NameResolver.Factory} for the channel.
+  /**
+   * Use of a plaintext connection to the server. By default a secure connection mechanism
+   * such as TLS will be used.
    *
-   * <p>If this method is not called, the builder will try the providers listed by {@link
-   * NameResolverProvider#providers()} for the given target.
+   * <p>Should only be used for testing or for APIs where the use of such API or the data
+   * exchanged is not sensitive.
+   *
+   * <p>This assumes prior knowledge that the target of this channel is using plaintext.  It will
+   * not perform HTTP/1.1 upgrades.
+   *
+   *
+   * @throws UnsupportedOperationException if plaintext mode is not supported.
+   * @return this
+   * @since 1.11.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1772")
+  @SuppressWarnings("deprecation")
+  public T usePlaintext() {
+    return usePlaintext(true);
+  }
+
+  /**
+   * Makes the client use TLS.
+   *
+   * @return this
+   * @throws UnsupportedOperationException if transport security is not supported.
+   * @since 1.9.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/3713")
+  public T useTransportSecurity() {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Provides a custom {@link NameResolver.Factory} for the channel. If this method is not called,
+   * the builder will try the providers listed by {@link NameResolverProvider#providers()} for the
+   * given target.
+   *
+   * <p>This method should rarely be used, as name resolvers should provide a {@code
+   * NameResolverProvider} and users rely on service loading to find implementations in the class
+   * path. That allows application's configuration to easily choose the name resolver via the
+   * 'target' string passed to {@link ManagedChannelBuilder#forTarget(String)}.
+   *
+   * @return this
+   * @since 1.0.0
    */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1770")
   public abstract T nameResolverFactory(NameResolver.Factory resolverFactory);
@@ -159,14 +219,40 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    *
    * <p>If this method is not called, the builder will use {@link PickFirstBalancerFactory}
    * for the channel.
+   *
+   * <p>This method is implemented by all stock channel builders that
+   * are shipped with gRPC, but may not be implemented by custom channel builders, in which case
+   * this method will throw.
+   *
+   * @return this
+   * @since 1.0.0
    */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1771")
   public abstract T loadBalancerFactory(LoadBalancer.Factory loadBalancerFactory);
 
   /**
-   * Set the decompression registry for use in the channel.  This is an advanced API call and
-   * shouldn't be used unless you are using custom message encoding.   The default supported
-   * decompressors are in {@code DecompressorRegistry.getDefaultInstance}.
+   * Enables full-stream decompression of inbound streams. This will cause the channel's outbound
+   * headers to advertise support for GZIP compressed streams, and gRPC servers which support the
+   * feature may respond with a GZIP compressed stream.
+   *
+   * <p>EXPERIMENTAL: This method is here to enable an experimental feature, and may be changed or
+   * removed once the feature is stable.
+   *
+   * @throws UnsupportedOperationException if unsupported
+   * @since 1.7.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/3399")
+  public T enableFullStreamDecompression() {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Set the decompression registry for use in the channel. This is an advanced API call and
+   * shouldn't be used unless you are using custom message encoding. The default supported
+   * decompressors are in {@link DecompressorRegistry#getDefaultInstance}.
+   *
+   * @return this
+   * @since 1.0.0
    */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   public abstract T decompressorRegistry(DecompressorRegistry registry);
@@ -174,7 +260,10 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
   /**
    * Set the compression registry for use in the channel.  This is an advanced API call and
    * shouldn't be used unless you are using custom message encoding.   The default supported
-   * compressors are in {@code CompressorRegistry.getDefaultInstance}.
+   * compressors are in {@link CompressorRegistry#getDefaultInstance}.
+   *
+   * @return this
+   * @since 1.0.0
    */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   public abstract T compressorRegistry(CompressorRegistry registry);
@@ -189,6 +278,9 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    * mode.
    *
    * <p>This is an advisory option. Do not rely on any specific behavior related to this option.
+   *
+   * @return this
+   * @since 1.0.0
    */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2022")
   public abstract T idleTimeout(long value, TimeUnit unit);
@@ -202,25 +294,173 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    * <p>This method is advisory, and implementations may decide to not enforce this.  Currently,
    * the only known transport to not enforce this is {@code InProcessTransport}.
    *
-   * @param max the maximum number of bytes a single message can be.
-   *
-   * @throws IllegalArgumentException if max is negative.
+   * @param bytes the maximum number of bytes a single message can be.
+   * @return this
+   * @throws IllegalArgumentException if bytes is negative.
+   * @since 1.1.0
    */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2307")
-  public T maxInboundMessageSize(int max) {
-    // intentional nop
+  public T maxInboundMessageSize(int bytes) {
+    // intentional noop rather than throw, this method is only advisory.
+    Preconditions.checkArgument(bytes >= 0, "bytes must be >= 0");
     return thisT();
   }
 
   /**
+   * Sets the time without read activity before sending a keepalive ping. An unreasonably small
+   * value might be increased, and {@code Long.MAX_VALUE} nano seconds or an unreasonably large
+   * value will disable keepalive. Defaults to infinite.
+   *
+   * <p>Clients must receive permission from the service owner before enabling this option.
+   * Keepalives can increase the load on services and are commonly "invisible" making it hard to
+   * notice when they are causing excessive load. Clients are strongly encouraged to use only as
+   * small of a value as necessary.
+   *
+   * @throws UnsupportedOperationException if unsupported
+   * @since 1.7.0
+   */
+  public T keepAliveTime(long keepAliveTime, TimeUnit timeUnit) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Sets the time waiting for read activity after sending a keepalive ping. If the time expires
+   * without any read activity on the connection, the connection is considered dead. An unreasonably
+   * small value might be increased. Defaults to 20 seconds.
+   *
+   * <p>This value should be at least multiple times the RTT to allow for lost packets.
+   *
+   * @throws UnsupportedOperationException if unsupported
+   * @since 1.7.0
+   */
+  public T keepAliveTimeout(long keepAliveTimeout, TimeUnit timeUnit) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Sets whether keepalive will be performed when there are no outstanding RPC on a connection.
+   * Defaults to {@code false}.
+   *
+   * <p>Clients must receive permission from the service owner before enabling this option.
+   * Keepalives on unused connections can easilly accidentally consume a considerable amount of
+   * bandwidth and CPU. {@link ManagedChannelBuilder#idleTimeout idleTimeout()} should generally be
+   * used instead of this option.
+   *
+   * @throws UnsupportedOperationException if unsupported
+   * @see #keepAliveTime(long, TimeUnit)
+   * @since 1.7.0
+   */
+  public T keepAliveWithoutCalls(boolean enable) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Sets max number of retry attempts. The total number of retry attempts for each RPC will not
+   * exceed this number even if service config may allow a higher number. Setting this number to
+   * zero is not effectively the same as {@code disableRetry()} because the former does not disable
+   * <a
+   * href="https://github.com/grpc/proposal/blob/master/A6-client-retries.md#transparent-retries">
+   * transparent retry</a>.
+   *
+   * <p>This method may not work as expected for the current release because retry is not fully
+   * implemented yet.
+   *
+   * @return this
+   * @since 1.11.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/3982")
+  public T maxRetryAttempts(int maxRetryAttempts) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Sets max number of hedged attempts. The total number of hedged attempts for each RPC will not
+   * exceed this number even if service config may allow a higher number.
+   *
+   * <p>This method may not work as expected for the current release because retry is not fully
+   * implemented yet.
+   *
+   * @return this
+   * @since 1.11.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/3982")
+  public T maxHedgedAttempts(int maxHedgedAttempts) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Sets the retry buffer size in bytes. If the buffer limit is exceeded, no RPC
+   * could retry at the moment, and in hedging case all hedges but one of the same RPC will cancel.
+   * The implementation may only estimate the buffer size being used rather than count the
+   * exact physical memory allocated. The method does not have any effect if retry is disabled by
+   * the client.
+   *
+   * <p>This method may not work as expected for the current release because retry is not fully
+   * implemented yet.
+   *
+   * @return this
+   * @since 1.10.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/3982")
+  public T retryBufferSize(long bytes) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Sets the per RPC buffer limit in bytes used for retry. The RPC is not retriable if its buffer
+   * limit is exceeded. The implementation may only estimate the buffer size being used rather than
+   * count the exact physical memory allocated. It does not have any effect if retry is disabled by
+   * the client.
+   *
+   * <p>This method may not work as expected for the current release because retry is not fully
+   * implemented yet.
+   *
+   * @return this
+   * @since 1.10.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/3982")
+  public T perRpcBufferLimit(long bytes) {
+    throw new UnsupportedOperationException();
+  }
+
+
+  /**
+   * Disables the retry mechanism provided by the gRPC library. This is designed for the case when
+   * users have their own retry implementation and want to avoid their own retry taking place
+   * simultaneously with the gRPC library layer retry.
+   *
+   * @return this
+   * @since 1.11.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/3982")
+  public T disableRetry() {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Enables the retry mechanism provided by the gRPC library.
+   *
+   * <p>This method may not work as expected for the current release because retry is not fully
+   * implemented yet.
+   *
+   * @return this
+   * @since 1.11.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/3982")
+  public T enableRetry() {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
    * Builds a channel using the given parameters.
+   *
+   * @since 1.0.0
    */
   public abstract ManagedChannel build();
 
   /**
    * Returns the correctly typed version of the builder.
    */
-  protected final T thisT() {
+  private T thisT() {
     @SuppressWarnings("unchecked")
     T thisT = (T) this;
     return thisT;

@@ -15,6 +15,7 @@ public  final class ExtensionNumberResponse extends
     com.google.protobuf.GeneratedMessageV3 implements
     // @@protoc_insertion_point(message_implements:grpc.reflection.v1alpha.ExtensionNumberResponse)
     ExtensionNumberResponseOrBuilder {
+private static final long serialVersionUID = 0L;
   // Use ExtensionNumberResponse.newBuilder() to construct.
   private ExtensionNumberResponse(com.google.protobuf.GeneratedMessageV3.Builder<?> builder) {
     super(builder);
@@ -27,14 +28,19 @@ public  final class ExtensionNumberResponse extends
   @java.lang.Override
   public final com.google.protobuf.UnknownFieldSet
   getUnknownFields() {
-    return com.google.protobuf.UnknownFieldSet.getDefaultInstance();
+    return this.unknownFields;
   }
   private ExtensionNumberResponse(
       com.google.protobuf.CodedInputStream input,
       com.google.protobuf.ExtensionRegistryLite extensionRegistry)
       throws com.google.protobuf.InvalidProtocolBufferException {
     this();
+    if (extensionRegistry == null) {
+      throw new java.lang.NullPointerException();
+    }
     int mutable_bitField0_ = 0;
+    com.google.protobuf.UnknownFieldSet.Builder unknownFields =
+        com.google.protobuf.UnknownFieldSet.newBuilder();
     try {
       boolean done = false;
       while (!done) {
@@ -44,7 +50,8 @@ public  final class ExtensionNumberResponse extends
             done = true;
             break;
           default: {
-            if (!input.skipField(tag)) {
+            if (!parseUnknownFieldProto3(
+                input, unknownFields, extensionRegistry, tag)) {
               done = true;
             }
             break;
@@ -87,6 +94,7 @@ public  final class ExtensionNumberResponse extends
       if (((mutable_bitField0_ & 0x00000002) == 0x00000002)) {
         extensionNumber_ = java.util.Collections.unmodifiableList(extensionNumber_);
       }
+      this.unknownFields = unknownFields.build();
       makeExtensionsImmutable();
     }
   }
@@ -111,7 +119,7 @@ public  final class ExtensionNumberResponse extends
    * is &lt;package&gt;.&lt;type&gt;
    * </pre>
    *
-   * <code>optional string base_type_name = 1;</code>
+   * <code>string base_type_name = 1;</code>
    */
   public java.lang.String getBaseTypeName() {
     java.lang.Object ref = baseTypeName_;
@@ -131,7 +139,7 @@ public  final class ExtensionNumberResponse extends
    * is &lt;package&gt;.&lt;type&gt;
    * </pre>
    *
-   * <code>optional string base_type_name = 1;</code>
+   * <code>string base_type_name = 1;</code>
    */
   public com.google.protobuf.ByteString
       getBaseTypeNameBytes() {
@@ -193,6 +201,7 @@ public  final class ExtensionNumberResponse extends
     for (int i = 0; i < extensionNumber_.size(); i++) {
       output.writeInt32NoTag(extensionNumber_.get(i));
     }
+    unknownFields.writeTo(output);
   }
 
   public int getSerializedSize() {
@@ -217,11 +226,11 @@ public  final class ExtensionNumberResponse extends
       }
       extensionNumberMemoizedSerializedSize = dataSize;
     }
+    size += unknownFields.getSerializedSize();
     memoizedSize = size;
     return size;
   }
 
-  private static final long serialVersionUID = 0L;
   @java.lang.Override
   public boolean equals(final java.lang.Object obj) {
     if (obj == this) {
@@ -237,6 +246,7 @@ public  final class ExtensionNumberResponse extends
         .equals(other.getBaseTypeName());
     result = result && getExtensionNumberList()
         .equals(other.getExtensionNumberList());
+    result = result && unknownFields.equals(other.unknownFields);
     return result;
   }
 
@@ -246,7 +256,7 @@ public  final class ExtensionNumberResponse extends
       return memoizedHashCode;
     }
     int hash = 41;
-    hash = (19 * hash) + getDescriptorForType().hashCode();
+    hash = (19 * hash) + getDescriptor().hashCode();
     hash = (37 * hash) + BASE_TYPE_NAME_FIELD_NUMBER;
     hash = (53 * hash) + getBaseTypeName().hashCode();
     if (getExtensionNumberCount() > 0) {
@@ -258,6 +268,17 @@ public  final class ExtensionNumberResponse extends
     return hash;
   }
 
+  public static io.grpc.reflection.v1alpha.ExtensionNumberResponse parseFrom(
+      java.nio.ByteBuffer data)
+      throws com.google.protobuf.InvalidProtocolBufferException {
+    return PARSER.parseFrom(data);
+  }
+  public static io.grpc.reflection.v1alpha.ExtensionNumberResponse parseFrom(
+      java.nio.ByteBuffer data,
+      com.google.protobuf.ExtensionRegistryLite extensionRegistry)
+      throws com.google.protobuf.InvalidProtocolBufferException {
+    return PARSER.parseFrom(data, extensionRegistry);
+  }
   public static io.grpc.reflection.v1alpha.ExtensionNumberResponse parseFrom(
       com.google.protobuf.ByteString data)
       throws com.google.protobuf.InvalidProtocolBufferException {
@@ -420,7 +441,7 @@ public  final class ExtensionNumberResponse extends
     }
     public Builder setField(
         com.google.protobuf.Descriptors.FieldDescriptor field,
-        Object value) {
+        java.lang.Object value) {
       return (Builder) super.setField(field, value);
     }
     public Builder clearField(
@@ -433,12 +454,12 @@ public  final class ExtensionNumberResponse extends
     }
     public Builder setRepeatedField(
         com.google.protobuf.Descriptors.FieldDescriptor field,
-        int index, Object value) {
+        int index, java.lang.Object value) {
       return (Builder) super.setRepeatedField(field, index, value);
     }
     public Builder addRepeatedField(
         com.google.protobuf.Descriptors.FieldDescriptor field,
-        Object value) {
+        java.lang.Object value) {
       return (Builder) super.addRepeatedField(field, value);
     }
     public Builder mergeFrom(com.google.protobuf.Message other) {
@@ -466,6 +487,7 @@ public  final class ExtensionNumberResponse extends
         }
         onChanged();
       }
+      this.mergeUnknownFields(other.unknownFields);
       onChanged();
       return this;
     }
@@ -500,7 +522,7 @@ public  final class ExtensionNumberResponse extends
      * is &lt;package&gt;.&lt;type&gt;
      * </pre>
      *
-     * <code>optional string base_type_name = 1;</code>
+     * <code>string base_type_name = 1;</code>
      */
     public java.lang.String getBaseTypeName() {
       java.lang.Object ref = baseTypeName_;
@@ -520,7 +542,7 @@ public  final class ExtensionNumberResponse extends
      * is &lt;package&gt;.&lt;type&gt;
      * </pre>
      *
-     * <code>optional string base_type_name = 1;</code>
+     * <code>string base_type_name = 1;</code>
      */
     public com.google.protobuf.ByteString
         getBaseTypeNameBytes() {
@@ -541,7 +563,7 @@ public  final class ExtensionNumberResponse extends
      * is &lt;package&gt;.&lt;type&gt;
      * </pre>
      *
-     * <code>optional string base_type_name = 1;</code>
+     * <code>string base_type_name = 1;</code>
      */
     public Builder setBaseTypeName(
         java.lang.String value) {
@@ -559,7 +581,7 @@ public  final class ExtensionNumberResponse extends
      * is &lt;package&gt;.&lt;type&gt;
      * </pre>
      *
-     * <code>optional string base_type_name = 1;</code>
+     * <code>string base_type_name = 1;</code>
      */
     public Builder clearBaseTypeName() {
       
@@ -573,7 +595,7 @@ public  final class ExtensionNumberResponse extends
      * is &lt;package&gt;.&lt;type&gt;
      * </pre>
      *
-     * <code>optional string base_type_name = 1;</code>
+     * <code>string base_type_name = 1;</code>
      */
     public Builder setBaseTypeNameBytes(
         com.google.protobuf.ByteString value) {
@@ -654,12 +676,12 @@ public  final class ExtensionNumberResponse extends
     }
     public final Builder setUnknownFields(
         final com.google.protobuf.UnknownFieldSet unknownFields) {
-      return this;
+      return super.setUnknownFieldsProto3(unknownFields);
     }
 
     public final Builder mergeUnknownFields(
         final com.google.protobuf.UnknownFieldSet unknownFields) {
-      return this;
+      return super.mergeUnknownFields(unknownFields);
     }
 
 
@@ -682,7 +704,7 @@ public  final class ExtensionNumberResponse extends
         com.google.protobuf.CodedInputStream input,
         com.google.protobuf.ExtensionRegistryLite extensionRegistry)
         throws com.google.protobuf.InvalidProtocolBufferException {
-        return new ExtensionNumberResponse(input, extensionRegistry);
+      return new ExtensionNumberResponse(input, extensionRegistry);
     }
   };
 

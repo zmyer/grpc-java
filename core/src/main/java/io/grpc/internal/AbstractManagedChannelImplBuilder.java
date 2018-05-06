@@ -1,58 +1,37 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
-import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkArgument;
 
-import com.google.census.Census;
-import com.google.census.CensusContextFactory;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.MoreExecutors;
-
 import io.grpc.Attributes;
 import io.grpc.ClientInterceptor;
 import io.grpc.CompressorRegistry;
 import io.grpc.DecompressorRegistry;
-import io.grpc.Internal;
+import io.grpc.EquivalentAddressGroup;
 import io.grpc.LoadBalancer;
+import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.NameResolver;
 import io.grpc.NameResolverProvider;
-import io.grpc.PickFirstBalancerFactory;
-import io.grpc.ResolvedServerInfo;
-import io.grpc.ResolvedServerInfoGroup;
-
+import io.opencensus.trace.Tracing;
 import java.net.SocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -61,7 +40,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Executor;
-
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 
@@ -73,6 +51,14 @@ import javax.annotation.Nullable;
 public abstract class AbstractManagedChannelImplBuilder
         <T extends AbstractManagedChannelImplBuilder<T>> extends ManagedChannelBuilder<T> {
   private static final String DIRECT_ADDRESS_SCHEME = "directaddress";
+
+  public static ManagedChannelBuilder<?> forAddress(String name, int port) {
+    throw new UnsupportedOperationException("Subclass failed to hide static factory");
+  }
+
+  public static ManagedChannelBuilder<?> forTarget(String target) {
+    throw new UnsupportedOperationException("Subclass failed to hide static factory");
+  }
 
   /**
    * An idle timeout larger than this would disable idle mode.
@@ -92,38 +78,76 @@ public abstract class AbstractManagedChannelImplBuilder
   @VisibleForTesting
   static final long IDLE_MODE_MIN_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(1);
 
-  @Nullable
-  private Executor executor;
+  private static final ObjectPool<? extends Executor> DEFAULT_EXECUTOR_POOL =
+      SharedResourcePool.forResource(GrpcUtil.SHARED_CHANNEL_EXECUTOR);
+
+  private static final NameResolver.Factory DEFAULT_NAME_RESOLVER_FACTORY =
+      NameResolverProvider.asFactory();
+
+  private static final DecompressorRegistry DEFAULT_DECOMPRESSOR_REGISTRY =
+      DecompressorRegistry.getDefaultInstance();
+
+  private static final CompressorRegistry DEFAULT_COMPRESSOR_REGISTRY =
+      CompressorRegistry.getDefaultInstance();
+
+  private static final long DEFAULT_RETRY_BUFFER_SIZE_IN_BYTES = 1L << 24;  // 16M
+  private static final long DEFAULT_PER_RPC_BUFFER_LIMIT_IN_BYTES = 1L << 20; // 1M
+
+  ObjectPool<? extends Executor> executorPool = DEFAULT_EXECUTOR_POOL;
+
   private final List<ClientInterceptor> interceptors = new ArrayList<ClientInterceptor>();
 
-  private final String target;
+  // Access via getter, which may perform authority override as needed
+  private NameResolver.Factory nameResolverFactory = DEFAULT_NAME_RESOLVER_FACTORY;
+
+  final String target;
 
   @Nullable
   private final SocketAddress directServerAddress;
 
   @Nullable
-  private String userAgent;
+  String userAgent;
 
+  @VisibleForTesting
   @Nullable
-  private String authorityOverride;
+  String authorityOverride;
 
-  @Nullable
-  private NameResolver.Factory nameResolverFactory;
 
-  @Nullable
-  private LoadBalancer.Factory loadBalancerFactory;
+  @Nullable LoadBalancer.Factory loadBalancerFactory;
 
-  @Nullable
-  private DecompressorRegistry decompressorRegistry;
+  boolean fullStreamDecompression;
 
-  @Nullable
-  private CompressorRegistry compressorRegistry;
+  DecompressorRegistry decompressorRegistry = DEFAULT_DECOMPRESSOR_REGISTRY;
 
-  private long idleTimeoutMillis = IDLE_MODE_DEFAULT_TIMEOUT_MILLIS;
+  CompressorRegistry compressorRegistry = DEFAULT_COMPRESSOR_REGISTRY;
+
+  long idleTimeoutMillis = IDLE_MODE_DEFAULT_TIMEOUT_MILLIS;
+
+  int maxRetryAttempts = 5;
+  int maxHedgedAttempts = 5;
+  long retryBufferSize = DEFAULT_RETRY_BUFFER_SIZE_IN_BYTES;
+  long perRpcBufferLimit = DEFAULT_PER_RPC_BUFFER_LIMIT_IN_BYTES;
+  boolean retryEnabled = false; // TODO(zdapeng): default to true
+  // Temporarily disable retry when stats or tracing is enabled to avoid breakage, until we know
+  // what should be the desired behavior for retry + stats/tracing.
+  // TODO(zdapeng): delete me
+  boolean temporarilyDisableRetry;
+
+  Channelz channelz = Channelz.instance();
+
+  protected TransportTracer.Factory transportTracerFactory = TransportTracer.getDefaultFactory();
 
   private int maxInboundMessageSize = GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
 
-  // Can be overriden by subclasses.
+  @Nullable
+  BinaryLogProvider binlogProvider = BinaryLogProvider.provider();
+
+  /**
+   * Sets the maximum message size allowed for a single gRPC frame. If an inbound messages
+   * larger than this limit is received it will not be processed and the RPC will fail with
+   * RESOURCE_EXHAUSTED.
+   */
+  // Can be overridden by subclasses.
   @Override
   public T maxInboundMessageSize(int max) {
     checkArgument(max >= 0, "negative max");
@@ -135,8 +159,13 @@ public abstract class AbstractManagedChannelImplBuilder
     return maxInboundMessageSize;
   }
 
+  private boolean statsEnabled = true;
+  private boolean recordStartedRpcs = true;
+  private boolean recordFinishedRpcs = true;
+  private boolean tracingEnabled = true;
+
   @Nullable
-  private CensusContextFactory censusFactory;
+  private CensusStatsModule censusStatsOverride;
 
   protected AbstractManagedChannelImplBuilder(String target) {
     this.target = Preconditions.checkNotNull(target, "target");
@@ -171,7 +200,11 @@ public abstract class AbstractManagedChannelImplBuilder
 
   @Override
   public final T executor(Executor executor) {
-    this.executor = executor;
+    if (executor != null) {
+      this.executorPool = new FixedObjectPool<Executor>(executor);
+    } else {
+      this.executorPool = DEFAULT_EXECUTOR_POOL;
+    }
     return thisT();
   }
 
@@ -191,28 +224,46 @@ public abstract class AbstractManagedChannelImplBuilder
     Preconditions.checkState(directServerAddress == null,
         "directServerAddress is set (%s), which forbids the use of NameResolverFactory",
         directServerAddress);
-    this.nameResolverFactory = resolverFactory;
+    if (resolverFactory != null) {
+      this.nameResolverFactory = resolverFactory;
+    } else {
+      this.nameResolverFactory = DEFAULT_NAME_RESOLVER_FACTORY;
+    }
     return thisT();
   }
 
   @Override
   public final T loadBalancerFactory(LoadBalancer.Factory loadBalancerFactory) {
     Preconditions.checkState(directServerAddress == null,
-        "directServerAddress is set (%s), which forbids the use of LoadBalancerFactory",
+        "directServerAddress is set (%s), which forbids the use of LoadBalancer.Factory",
         directServerAddress);
     this.loadBalancerFactory = loadBalancerFactory;
     return thisT();
   }
 
   @Override
+  public final T enableFullStreamDecompression() {
+    this.fullStreamDecompression = true;
+    return thisT();
+  }
+
+  @Override
   public final T decompressorRegistry(DecompressorRegistry registry) {
-    this.decompressorRegistry = registry;
+    if (registry != null) {
+      this.decompressorRegistry = registry;
+    } else {
+      this.decompressorRegistry = DEFAULT_DECOMPRESSOR_REGISTRY;
+    }
     return thisT();
   }
 
   @Override
   public final T compressorRegistry(CompressorRegistry registry) {
-    this.compressorRegistry = registry;
+    if (registry != null) {
+      this.compressorRegistry = registry;
+    } else {
+      this.compressorRegistry = DEFAULT_COMPRESSOR_REGISTRY;
+    }
     return thisT();
   }
 
@@ -241,14 +292,81 @@ public abstract class AbstractManagedChannelImplBuilder
     return thisT();
   }
 
+  @Override
+  public final T maxRetryAttempts(int maxRetryAttempts) {
+    this.maxRetryAttempts = maxRetryAttempts;
+    return thisT();
+  }
+
+  @Override
+  public final T maxHedgedAttempts(int maxHedgedAttempts) {
+    this.maxHedgedAttempts = maxHedgedAttempts;
+    return thisT();
+  }
+
+  @Override
+  public final T retryBufferSize(long bytes) {
+    checkArgument(bytes > 0L, "retry buffer size must be positive");
+    retryBufferSize = bytes;
+    return thisT();
+  }
+
+  @Override
+  public final T perRpcBufferLimit(long bytes) {
+    checkArgument(bytes > 0L, "per RPC buffer limit must be positive");
+    perRpcBufferLimit = bytes;
+    return thisT();
+  }
+
+  @Override
+  public final T disableRetry() {
+    retryEnabled = false;
+    return thisT();
+  }
+
+  @Override
+  public final T enableRetry() {
+    retryEnabled = true;
+    return thisT();
+  }
+
   /**
-   * Override the default Census implementation.  This is meant to be used in tests.
+   * Override the default stats implementation.
    */
   @VisibleForTesting
-  @Internal
-  public T censusContextFactory(CensusContextFactory censusFactory) {
-    this.censusFactory = censusFactory;
+  protected final T overrideCensusStatsModule(CensusStatsModule censusStats) {
+    this.censusStatsOverride = censusStats;
     return thisT();
+  }
+
+  /**
+   * Disable or enable stats features.  Enabled by default.
+   */
+  protected void setStatsEnabled(boolean value) {
+    statsEnabled = value;
+  }
+
+  /**
+   * Disable or enable stats recording for RPC upstarts.  Effective only if {@link
+   * #setStatsEnabled} is set to true.  Enabled by default.
+   */
+  protected void setStatsRecordStartedRpcs(boolean value) {
+    recordStartedRpcs = value;
+  }
+
+  /**
+   * Disable or enable stats recording for RPC completions.  Effective only if {@link
+   * #setStatsEnabled} is set to true.  Enabled by default.
+   */
+  protected void setStatsRecordFinishedRpcs(boolean value) {
+    recordFinishedRpcs = value;
+  }
+
+  /**
+   * Disable or enable tracing features.  Enabled by default.
+   */
+  protected void setTracingEnabled(boolean value) {
+    tracingEnabled = value;
   }
 
   @VisibleForTesting
@@ -266,33 +384,45 @@ public abstract class AbstractManagedChannelImplBuilder
   }
 
   @Override
-  public ManagedChannelImpl build() {
-    ClientTransportFactory transportFactory = buildTransportFactory();
-    if (authorityOverride != null) {
-      transportFactory = new AuthorityOverridingTransportFactory(
-        transportFactory, authorityOverride);
-    }
-    NameResolver.Factory nameResolverFactory = this.nameResolverFactory;
-    if (nameResolverFactory == null) {
-      // Avoid loading the provider unless necessary, as a way to workaround a possibly-costly
-      // and poorly optimized getResource() call on Android. If any other piece of code calls
-      // getResource(), then this shouldn't be a problem unless called on the UI thread.
-      nameResolverFactory = NameResolverProvider.asFactory();
-    }
-    return new ManagedChannelImpl(
-        target,
+  public ManagedChannel build() {
+    return new ManagedChannelOrphanWrapper(new ManagedChannelImpl(
+        this,
+        buildTransportFactory(),
         // TODO(carl-mastrangelo): Allow clients to pass this in
         new ExponentialBackoffPolicy.Provider(),
-        nameResolverFactory,
-        getNameResolverParams(),
-        firstNonNull(loadBalancerFactory, PickFirstBalancerFactory.getInstance()),
-        transportFactory,
-        firstNonNull(decompressorRegistry, DecompressorRegistry.getDefaultInstance()),
-        firstNonNull(compressorRegistry, CompressorRegistry.getDefaultInstance()),
-        GrpcUtil.TIMER_SERVICE, GrpcUtil.STOPWATCH_SUPPLIER, idleTimeoutMillis,
-        executor, userAgent, interceptors,
-        firstNonNull(censusFactory,
-            firstNonNull(Census.getCensusContextFactory(), NoopCensusContextFactory.INSTANCE)));
+        SharedResourcePool.forResource(GrpcUtil.SHARED_CHANNEL_EXECUTOR),
+        GrpcUtil.STOPWATCH_SUPPLIER,
+        getEffectiveInterceptors(),
+        CallTracer.getDefaultFactory()));
+  }
+
+  // Temporarily disable retry when stats or tracing is enabled to avoid breakage, until we know
+  // what should be the desired behavior for retry + stats/tracing.
+  // TODO(zdapeng): FIX IT
+  @VisibleForTesting
+  final List<ClientInterceptor> getEffectiveInterceptors() {
+    List<ClientInterceptor> effectiveInterceptors =
+        new ArrayList<ClientInterceptor>(this.interceptors);
+    temporarilyDisableRetry = false;
+    if (statsEnabled) {
+      temporarilyDisableRetry = true;
+      CensusStatsModule censusStats = this.censusStatsOverride;
+      if (censusStats == null) {
+        censusStats = new CensusStatsModule(GrpcUtil.STOPWATCH_SUPPLIER, true);
+      }
+      // First interceptor runs last (see ClientInterceptors.intercept()), so that no
+      // other interceptor can override the tracer factory we set in CallOptions.
+      effectiveInterceptors.add(
+          0, censusStats.getClientInterceptor(recordStartedRpcs, recordFinishedRpcs));
+    }
+    if (tracingEnabled) {
+      temporarilyDisableRetry = true;
+      CensusTracingModule censusTracing =
+          new CensusTracingModule(Tracing.getTracer(),
+              Tracing.getPropagationComponent().getBinaryFormat());
+      effectiveInterceptors.add(0, censusTracing.getClientInterceptor());
+    }
+    return effectiveInterceptors;
   }
 
   /**
@@ -311,26 +441,14 @@ public abstract class AbstractManagedChannelImplBuilder
     return Attributes.EMPTY;
   }
 
-  private static class AuthorityOverridingTransportFactory implements ClientTransportFactory {
-    final ClientTransportFactory factory;
-    final String authorityOverride;
-
-    AuthorityOverridingTransportFactory(
-        ClientTransportFactory factory, String authorityOverride) {
-      this.factory = Preconditions.checkNotNull(factory, "factory should not be null");
-      this.authorityOverride = Preconditions.checkNotNull(
-        authorityOverride, "authorityOverride should not be null");
-    }
-
-    @Override
-    public ConnectionClientTransport newClientTransport(SocketAddress serverAddress,
-        String authority, @Nullable String userAgent) {
-      return factory.newClientTransport(serverAddress, authorityOverride, userAgent);
-    }
-
-    @Override
-    public void close() {
-      factory.close();
+  /**
+   * Returns a {@link NameResolver.Factory} for the channel.
+   */
+  NameResolver.Factory getNameResolverFactory() {
+    if (authorityOverride == null) {
+      return nameResolverFactory;
+    } else {
+      return new OverrideAuthorityNameResolverFactory(nameResolverFactory, authorityOverride);
     }
   }
 
@@ -353,8 +471,8 @@ public abstract class AbstractManagedChannelImplBuilder
 
         @Override
         public void start(final Listener listener) {
-          listener.onUpdate(Collections.singletonList(
-              ResolvedServerInfoGroup.builder().add(new ResolvedServerInfo(address)).build()),
+          listener.onAddresses(
+              Collections.singletonList(new EquivalentAddressGroup(address)),
               Attributes.EMPTY);
         }
 
@@ -367,5 +485,14 @@ public abstract class AbstractManagedChannelImplBuilder
     public String getDefaultScheme() {
       return DIRECT_ADDRESS_SCHEME;
     }
+  }
+
+  /**
+   * Returns the correctly typed version of the builder.
+   */
+  private T thisT() {
+    @SuppressWarnings("unchecked")
+    T thisT = (T) this;
+    return thisT;
   }
 }

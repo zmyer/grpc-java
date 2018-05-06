@@ -10,6 +10,7 @@ public  final class NestedTypeOuter extends
     com.google.protobuf.GeneratedMessageV3 implements
     // @@protoc_insertion_point(message_implements:grpc.reflection.testing.NestedTypeOuter)
     NestedTypeOuterOrBuilder {
+private static final long serialVersionUID = 0L;
   // Use NestedTypeOuter.newBuilder() to construct.
   private NestedTypeOuter(com.google.protobuf.GeneratedMessageV3.Builder<?> builder) {
     super(builder);
@@ -27,6 +28,9 @@ public  final class NestedTypeOuter extends
       com.google.protobuf.ExtensionRegistryLite extensionRegistry)
       throws com.google.protobuf.InvalidProtocolBufferException {
     this();
+    if (extensionRegistry == null) {
+      throw new java.lang.NullPointerException();
+    }
     com.google.protobuf.UnknownFieldSet.Builder unknownFields =
         com.google.protobuf.UnknownFieldSet.newBuilder();
     try {
@@ -38,8 +42,8 @@ public  final class NestedTypeOuter extends
             done = true;
             break;
           default: {
-            if (!parseUnknownField(input, unknownFields,
-                                   extensionRegistry, tag)) {
+            if (!parseUnknownField(
+                input, unknownFields, extensionRegistry, tag)) {
               done = true;
             }
             break;
@@ -79,6 +83,7 @@ public  final class NestedTypeOuter extends
       com.google.protobuf.GeneratedMessageV3 implements
       // @@protoc_insertion_point(message_implements:grpc.reflection.testing.NestedTypeOuter.Middle)
       MiddleOrBuilder {
+  private static final long serialVersionUID = 0L;
     // Use Middle.newBuilder() to construct.
     private Middle(com.google.protobuf.GeneratedMessageV3.Builder<?> builder) {
       super(builder);
@@ -96,6 +101,9 @@ public  final class NestedTypeOuter extends
         com.google.protobuf.ExtensionRegistryLite extensionRegistry)
         throws com.google.protobuf.InvalidProtocolBufferException {
       this();
+      if (extensionRegistry == null) {
+        throw new java.lang.NullPointerException();
+      }
       com.google.protobuf.UnknownFieldSet.Builder unknownFields =
           com.google.protobuf.UnknownFieldSet.newBuilder();
       try {
@@ -107,8 +115,8 @@ public  final class NestedTypeOuter extends
               done = true;
               break;
             default: {
-              if (!parseUnknownField(input, unknownFields,
-                                     extensionRegistry, tag)) {
+              if (!parseUnknownField(
+                  input, unknownFields, extensionRegistry, tag)) {
                 done = true;
               }
               break;
@@ -142,11 +150,11 @@ public  final class NestedTypeOuter extends
         com.google.protobuf.MessageOrBuilder {
 
       /**
-       * <code>required int32 ival = 1;</code>
+       * <code>optional int32 ival = 1;</code>
        */
       boolean hasIval();
       /**
-       * <code>required int32 ival = 1;</code>
+       * <code>optional int32 ival = 1;</code>
        */
       int getIval();
     }
@@ -157,6 +165,7 @@ public  final class NestedTypeOuter extends
         com.google.protobuf.GeneratedMessageV3 implements
         // @@protoc_insertion_point(message_implements:grpc.reflection.testing.NestedTypeOuter.Middle.Inner)
         InnerOrBuilder {
+    private static final long serialVersionUID = 0L;
       // Use Inner.newBuilder() to construct.
       private Inner(com.google.protobuf.GeneratedMessageV3.Builder<?> builder) {
         super(builder);
@@ -175,6 +184,9 @@ public  final class NestedTypeOuter extends
           com.google.protobuf.ExtensionRegistryLite extensionRegistry)
           throws com.google.protobuf.InvalidProtocolBufferException {
         this();
+        if (extensionRegistry == null) {
+          throw new java.lang.NullPointerException();
+        }
         int mutable_bitField0_ = 0;
         com.google.protobuf.UnknownFieldSet.Builder unknownFields =
             com.google.protobuf.UnknownFieldSet.newBuilder();
@@ -187,8 +199,8 @@ public  final class NestedTypeOuter extends
                 done = true;
                 break;
               default: {
-                if (!parseUnknownField(input, unknownFields,
-                                       extensionRegistry, tag)) {
+                if (!parseUnknownField(
+                    input, unknownFields, extensionRegistry, tag)) {
                   done = true;
                 }
                 break;
@@ -226,13 +238,13 @@ public  final class NestedTypeOuter extends
       public static final int IVAL_FIELD_NUMBER = 1;
       private int ival_;
       /**
-       * <code>required int32 ival = 1;</code>
+       * <code>optional int32 ival = 1;</code>
        */
       public boolean hasIval() {
         return ((bitField0_ & 0x00000001) == 0x00000001);
       }
       /**
-       * <code>required int32 ival = 1;</code>
+       * <code>optional int32 ival = 1;</code>
        */
       public int getIval() {
         return ival_;
@@ -244,10 +256,6 @@ public  final class NestedTypeOuter extends
         if (isInitialized == 1) return true;
         if (isInitialized == 0) return false;
 
-        if (!hasIval()) {
-          memoizedIsInitialized = 0;
-          return false;
-        }
         memoizedIsInitialized = 1;
         return true;
       }
@@ -274,7 +282,6 @@ public  final class NestedTypeOuter extends
         return size;
       }
 
-      private static final long serialVersionUID = 0L;
       @java.lang.Override
       public boolean equals(final java.lang.Object obj) {
         if (obj == this) {
@@ -301,7 +308,7 @@ public  final class NestedTypeOuter extends
           return memoizedHashCode;
         }
         int hash = 41;
-        hash = (19 * hash) + getDescriptorForType().hashCode();
+        hash = (19 * hash) + getDescriptor().hashCode();
         if (hasIval()) {
           hash = (37 * hash) + IVAL_FIELD_NUMBER;
           hash = (53 * hash) + getIval();
@@ -311,6 +318,17 @@ public  final class NestedTypeOuter extends
         return hash;
       }
 
+      public static io.grpc.reflection.testing.NestedTypeOuter.Middle.Inner parseFrom(
+          java.nio.ByteBuffer data)
+          throws com.google.protobuf.InvalidProtocolBufferException {
+        return PARSER.parseFrom(data);
+      }
+      public static io.grpc.reflection.testing.NestedTypeOuter.Middle.Inner parseFrom(
+          java.nio.ByteBuffer data,
+          com.google.protobuf.ExtensionRegistryLite extensionRegistry)
+          throws com.google.protobuf.InvalidProtocolBufferException {
+        return PARSER.parseFrom(data, extensionRegistry);
+      }
       public static io.grpc.reflection.testing.NestedTypeOuter.Middle.Inner parseFrom(
           com.google.protobuf.ByteString data)
           throws com.google.protobuf.InvalidProtocolBufferException {
@@ -464,7 +482,7 @@ public  final class NestedTypeOuter extends
         }
         public Builder setField(
             com.google.protobuf.Descriptors.FieldDescriptor field,
-            Object value) {
+            java.lang.Object value) {
           return (Builder) super.setField(field, value);
         }
         public Builder clearField(
@@ -477,12 +495,12 @@ public  final class NestedTypeOuter extends
         }
         public Builder setRepeatedField(
             com.google.protobuf.Descriptors.FieldDescriptor field,
-            int index, Object value) {
+            int index, java.lang.Object value) {
           return (Builder) super.setRepeatedField(field, index, value);
         }
         public Builder addRepeatedField(
             com.google.protobuf.Descriptors.FieldDescriptor field,
-            Object value) {
+            java.lang.Object value) {
           return (Builder) super.addRepeatedField(field, value);
         }
         public Builder mergeFrom(com.google.protobuf.Message other) {
@@ -505,9 +523,6 @@ public  final class NestedTypeOuter extends
         }
 
         public final boolean isInitialized() {
-          if (!hasIval()) {
-            return false;
-          }
           return true;
         }
 
@@ -532,19 +547,19 @@ public  final class NestedTypeOuter extends
 
         private int ival_ ;
         /**
-         * <code>required int32 ival = 1;</code>
+         * <code>optional int32 ival = 1;</code>
          */
         public boolean hasIval() {
           return ((bitField0_ & 0x00000001) == 0x00000001);
         }
         /**
-         * <code>required int32 ival = 1;</code>
+         * <code>optional int32 ival = 1;</code>
          */
         public int getIval() {
           return ival_;
         }
         /**
-         * <code>required int32 ival = 1;</code>
+         * <code>optional int32 ival = 1;</code>
          */
         public Builder setIval(int value) {
           bitField0_ |= 0x00000001;
@@ -553,7 +568,7 @@ public  final class NestedTypeOuter extends
           return this;
         }
         /**
-         * <code>required int32 ival = 1;</code>
+         * <code>optional int32 ival = 1;</code>
          */
         public Builder clearIval() {
           bitField0_ = (bitField0_ & ~0x00000001);
@@ -591,7 +606,7 @@ public  final class NestedTypeOuter extends
             com.google.protobuf.CodedInputStream input,
             com.google.protobuf.ExtensionRegistryLite extensionRegistry)
             throws com.google.protobuf.InvalidProtocolBufferException {
-            return new Inner(input, extensionRegistry);
+          return new Inner(input, extensionRegistry);
         }
       };
 
@@ -635,7 +650,6 @@ public  final class NestedTypeOuter extends
       return size;
     }
 
-    private static final long serialVersionUID = 0L;
     @java.lang.Override
     public boolean equals(final java.lang.Object obj) {
       if (obj == this) {
@@ -657,12 +671,23 @@ public  final class NestedTypeOuter extends
         return memoizedHashCode;
       }
       int hash = 41;
-      hash = (19 * hash) + getDescriptorForType().hashCode();
+      hash = (19 * hash) + getDescriptor().hashCode();
       hash = (29 * hash) + unknownFields.hashCode();
       memoizedHashCode = hash;
       return hash;
     }
 
+    public static io.grpc.reflection.testing.NestedTypeOuter.Middle parseFrom(
+        java.nio.ByteBuffer data)
+        throws com.google.protobuf.InvalidProtocolBufferException {
+      return PARSER.parseFrom(data);
+    }
+    public static io.grpc.reflection.testing.NestedTypeOuter.Middle parseFrom(
+        java.nio.ByteBuffer data,
+        com.google.protobuf.ExtensionRegistryLite extensionRegistry)
+        throws com.google.protobuf.InvalidProtocolBufferException {
+      return PARSER.parseFrom(data, extensionRegistry);
+    }
     public static io.grpc.reflection.testing.NestedTypeOuter.Middle parseFrom(
         com.google.protobuf.ByteString data)
         throws com.google.protobuf.InvalidProtocolBufferException {
@@ -807,7 +832,7 @@ public  final class NestedTypeOuter extends
       }
       public Builder setField(
           com.google.protobuf.Descriptors.FieldDescriptor field,
-          Object value) {
+          java.lang.Object value) {
         return (Builder) super.setField(field, value);
       }
       public Builder clearField(
@@ -820,12 +845,12 @@ public  final class NestedTypeOuter extends
       }
       public Builder setRepeatedField(
           com.google.protobuf.Descriptors.FieldDescriptor field,
-          int index, Object value) {
+          int index, java.lang.Object value) {
         return (Builder) super.setRepeatedField(field, index, value);
       }
       public Builder addRepeatedField(
           com.google.protobuf.Descriptors.FieldDescriptor field,
-          Object value) {
+          java.lang.Object value) {
         return (Builder) super.addRepeatedField(field, value);
       }
       public Builder mergeFrom(com.google.protobuf.Message other) {
@@ -895,7 +920,7 @@ public  final class NestedTypeOuter extends
           com.google.protobuf.CodedInputStream input,
           com.google.protobuf.ExtensionRegistryLite extensionRegistry)
           throws com.google.protobuf.InvalidProtocolBufferException {
-          return new Middle(input, extensionRegistry);
+        return new Middle(input, extensionRegistry);
       }
     };
 
@@ -939,7 +964,6 @@ public  final class NestedTypeOuter extends
     return size;
   }
 
-  private static final long serialVersionUID = 0L;
   @java.lang.Override
   public boolean equals(final java.lang.Object obj) {
     if (obj == this) {
@@ -961,12 +985,23 @@ public  final class NestedTypeOuter extends
       return memoizedHashCode;
     }
     int hash = 41;
-    hash = (19 * hash) + getDescriptorForType().hashCode();
+    hash = (19 * hash) + getDescriptor().hashCode();
     hash = (29 * hash) + unknownFields.hashCode();
     memoizedHashCode = hash;
     return hash;
   }
 
+  public static io.grpc.reflection.testing.NestedTypeOuter parseFrom(
+      java.nio.ByteBuffer data)
+      throws com.google.protobuf.InvalidProtocolBufferException {
+    return PARSER.parseFrom(data);
+  }
+  public static io.grpc.reflection.testing.NestedTypeOuter parseFrom(
+      java.nio.ByteBuffer data,
+      com.google.protobuf.ExtensionRegistryLite extensionRegistry)
+      throws com.google.protobuf.InvalidProtocolBufferException {
+    return PARSER.parseFrom(data, extensionRegistry);
+  }
   public static io.grpc.reflection.testing.NestedTypeOuter parseFrom(
       com.google.protobuf.ByteString data)
       throws com.google.protobuf.InvalidProtocolBufferException {
@@ -1111,7 +1146,7 @@ public  final class NestedTypeOuter extends
     }
     public Builder setField(
         com.google.protobuf.Descriptors.FieldDescriptor field,
-        Object value) {
+        java.lang.Object value) {
       return (Builder) super.setField(field, value);
     }
     public Builder clearField(
@@ -1124,12 +1159,12 @@ public  final class NestedTypeOuter extends
     }
     public Builder setRepeatedField(
         com.google.protobuf.Descriptors.FieldDescriptor field,
-        int index, Object value) {
+        int index, java.lang.Object value) {
       return (Builder) super.setRepeatedField(field, index, value);
     }
     public Builder addRepeatedField(
         com.google.protobuf.Descriptors.FieldDescriptor field,
-        Object value) {
+        java.lang.Object value) {
       return (Builder) super.addRepeatedField(field, value);
     }
     public Builder mergeFrom(com.google.protobuf.Message other) {
@@ -1199,7 +1234,7 @@ public  final class NestedTypeOuter extends
         com.google.protobuf.CodedInputStream input,
         com.google.protobuf.ExtensionRegistryLite extensionRegistry)
         throws com.google.protobuf.InvalidProtocolBufferException {
-        return new NestedTypeOuter(input, extensionRegistry);
+      return new NestedTypeOuter(input, extensionRegistry);
     }
   };
 

@@ -1,39 +1,26 @@
 /*
- * Copyright 2016, Google Inc. All rights reserved.
+ * Copyright 2016 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
-import com.google.common.annotations.VisibleForTesting;
+import static com.google.common.base.Preconditions.checkNotNull;
 
-import java.util.LinkedList;
+import com.google.common.annotations.VisibleForTesting;
+import java.util.ArrayDeque;
+import java.util.Queue;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.annotation.concurrent.GuardedBy;
@@ -41,19 +28,19 @@ import javax.annotation.concurrent.ThreadSafe;
 
 /**
  * The thread-less Channel Executor used to run the state mutation logic in {@link
- * ManagedChannelImpl}, {@link InternalSubchannel} and {@link io.grpc.LoadBalancer2}s.
+ * ManagedChannelImpl}, {@link InternalSubchannel} and {@link io.grpc.LoadBalancer}s.
  *
  * <p>Tasks are queued until {@link #drain} is called.  Tasks are guaranteed to be run in the same
  * order as they are submitted.
  */
 @ThreadSafe
-final class ChannelExecutor {
+class ChannelExecutor {
   private static final Logger log = Logger.getLogger(ChannelExecutor.class.getName());
 
   private final Object lock = new Object();
 
   @GuardedBy("lock")
-  private final LinkedList<Runnable> queue = new LinkedList<Runnable>();
+  private final Queue<Runnable> queue = new ArrayDeque<Runnable>();
   @GuardedBy("lock")
   private boolean draining;
 
@@ -64,7 +51,7 @@ final class ChannelExecutor {
    * <p>Upon returning, it guarantees that all tasks submitted by {@code executeLater()} before it
    * have been or will eventually be run, while not requiring any more calls to {@code drain()}.
    */
-  void drain() {
+  final void drain() {
     boolean drainLeaseAcquired = false;
     while (true) {
       Runnable runnable;
@@ -85,7 +72,7 @@ final class ChannelExecutor {
       try {
         runnable.run();
       } catch (Throwable t) {
-        log.log(Level.WARNING, "Runnable threw exception in ChannelExecutor", t);
+        handleUncaughtThrowable(t);
       }
     }
   }
@@ -95,17 +82,26 @@ final class ChannelExecutor {
    *
    * @return this ChannelExecutor
    */
-  ChannelExecutor executeLater(Runnable runnable) {
+  final ChannelExecutor executeLater(Runnable runnable) {
     synchronized (lock) {
-      queue.add(runnable);
+      queue.add(checkNotNull(runnable, "runnable is null"));
     }
     return this;
   }
 
   @VisibleForTesting
-  int numPendingTasks() {
+  final int numPendingTasks() {
     synchronized (lock) {
       return queue.size();
     }
+  }
+
+  /**
+   * Handle a throwable from a task.
+   *
+   * <p>The default implementation logs a warning.
+   */
+  void handleUncaughtThrowable(Throwable t) {
+    log.log(Level.WARNING, "Runnable threw exception in ChannelExecutor", t);
   }
 }

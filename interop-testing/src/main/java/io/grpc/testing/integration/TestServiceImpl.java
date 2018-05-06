@@ -1,40 +1,29 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.testing.integration;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Queues;
 import com.google.protobuf.ByteString;
-import com.google.protobuf.EmptyProtos;
-
+import io.grpc.ForwardingServerCall.SimpleForwardingServerCall;
+import io.grpc.Metadata;
+import io.grpc.ServerCall;
+import io.grpc.ServerCallHandler;
+import io.grpc.ServerInterceptor;
 import io.grpc.Status;
 import io.grpc.internal.LogExceptionRunnable;
 import io.grpc.stub.ServerCallStreamObserver;
@@ -47,14 +36,19 @@ import io.grpc.testing.integration.Messages.StreamingInputCallRequest;
 import io.grpc.testing.integration.Messages.StreamingInputCallResponse;
 import io.grpc.testing.integration.Messages.StreamingOutputCallRequest;
 import io.grpc.testing.integration.Messages.StreamingOutputCallResponse;
-
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.LinkedList;
+import java.util.ArrayDeque;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Queue;
 import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import javax.annotation.concurrent.GuardedBy;
 
 /**
  * Implementation of the business logic for the TestService. Uses an executor to schedule chunks
@@ -94,22 +88,10 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
         (ServerCallStreamObserver<SimpleResponse>) responseObserver;
     SimpleResponse.Builder responseBuilder = SimpleResponse.newBuilder();
     try {
-      switch (req.getResponseCompression()) {
-        case DEFLATE:
-          // fallthrough, just use gzip
-        case GZIP:
-          obs.setCompression("gzip");
-          break;
-        case NONE:
-          obs.setCompression("identity");
-          break;
-        case UNRECOGNIZED:
-          // fallthrough
-        default:
-          obs.onError(Status.INVALID_ARGUMENT
-              .withDescription("Unknown: " + req.getResponseCompression())
-              .asRuntimeException());
-          return;
+      if (req.hasResponseCompressed() && req.getResponseCompressed().getValue()) {
+        obs.setCompression("gzip");
+      } else {
+        obs.setCompression("identity");
       }
     } catch (IllegalArgumentException e) {
       obs.onError(Status.UNIMPLEMENTED
@@ -131,6 +113,14 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
           .setType(compressable ? PayloadType.COMPRESSABLE : PayloadType.UNCOMPRESSABLE)
           .setBody(payload);
     }
+
+    if (req.hasResponseStatus()) {
+      obs.onError(Status.fromCodeValue(req.getResponseStatus().getCode())
+          .withDescription(req.getResponseStatus().getMessage())
+          .asRuntimeException());
+      return;
+    }
+
     responseObserver.onNext(responseBuilder.build());
     responseObserver.onCompleted();
   }
@@ -186,18 +176,27 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
     return new StreamObserver<StreamingOutputCallRequest>() {
       @Override
       public void onNext(StreamingOutputCallRequest request) {
+        if (request.hasResponseStatus()) {
+          dispatcher.cancel();
+          dispatcher.onError(Status.fromCodeValue(request.getResponseStatus().getCode())
+              .withDescription(request.getResponseStatus().getMessage())
+              .asRuntimeException());
+          return;
+        }
         dispatcher.enqueue(toChunkQueue(request));
       }
 
       @Override
       public void onCompleted() {
-        // Tell the dispatcher that all input has been received.
-        dispatcher.completeInput();
+        if (!dispatcher.isCancelled()) {
+          // Tell the dispatcher that all input has been received.
+          dispatcher.completeInput();
+        }
       }
 
       @Override
       public void onError(Throwable cause) {
-        responseObserver.onError(cause);
+        dispatcher.onError(cause);
       }
     };
   }
@@ -209,7 +208,8 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
   @Override
   public StreamObserver<Messages.StreamingOutputCallRequest> halfDuplexCall(
       final StreamObserver<Messages.StreamingOutputCallResponse> responseObserver) {
-    final Queue<Chunk> chunks = new LinkedList<Chunk>();
+    final ResponseDispatcher dispatcher = new ResponseDispatcher(responseObserver);
+    final Queue<Chunk> chunks = new ArrayDeque<Chunk>();
     return new StreamObserver<StreamingOutputCallRequest>() {
       @Override
       public void onNext(StreamingOutputCallRequest request) {
@@ -219,12 +219,12 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
       @Override
       public void onCompleted() {
         // Dispatch all of the chunks in one shot.
-        new ResponseDispatcher(responseObserver).enqueue(chunks).completeInput();
+        dispatcher.enqueue(chunks).completeInput();
       }
 
       @Override
       public void onError(Throwable cause) {
-        responseObserver.onError(cause);
+        dispatcher.onError(cause);
       }
     };
   }
@@ -239,6 +239,7 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
     private final Queue<Chunk> chunks;
     private final StreamObserver<StreamingOutputCallResponse> responseStream;
     private boolean scheduled;
+    @GuardedBy("this") private boolean cancelled;
     private Throwable failure;
     private Runnable dispatchTask = new Runnable() {
       @Override
@@ -268,6 +269,11 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
       }
     };
 
+    /**
+     * The {@link StreamObserver} will be used to send the queue of response chunks. Since calls to
+     * {@link StreamObserver} must be synchronized across threads, no further calls should be made
+     * directly on {@code responseStream} after it is provided to the {@link ResponseDispatcher}.
+     */
     public ResponseDispatcher(StreamObserver<StreamingOutputCallResponse> responseStream) {
       this.chunks = Queues.newLinkedBlockingQueue();
       this.responseStream = responseStream;
@@ -296,10 +302,30 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
     }
 
     /**
+     * Allows the service to cancel the remaining responses.
+     */
+    public synchronized void cancel() {
+      Preconditions.checkState(!cancelled, "Dispatcher already cancelled");
+      chunks.clear();
+      cancelled = true;
+    }
+
+    public synchronized boolean isCancelled() {
+      return cancelled;
+    }
+
+    private synchronized void onError(Throwable cause) {
+      responseStream.onError(cause);
+    }
+
+    /**
      * Dispatches the current response chunk to the client. This is only called by the executor. At
      * any time, a given dispatch task should only be registered with the executor once.
      */
     private synchronized void dispatchChunk() {
+      if (cancelled) {
+        return;
+      }
       try {
         // Pop off the next chunk and send it to the client.
         Chunk chunk = chunks.remove();
@@ -335,7 +361,8 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
         Chunk nextChunk = chunks.peek();
         if (nextChunk != null) {
           scheduled = true;
-          executor.schedule(new LogExceptionRunnable(dispatchTask),
+          // TODO(ejona): cancel future if RPC is cancelled
+          Future<?> unused = executor.schedule(new LogExceptionRunnable(dispatchTask),
               nextChunk.delayMicroseconds, TimeUnit.MICROSECONDS);
           return;
         }
@@ -353,7 +380,7 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
    * Breaks down the request and creates a queue of response chunks for the given request.
    */
   public Queue<Chunk> toChunkQueue(StreamingOutputCallRequest request) {
-    Queue<Chunk> chunkQueue = new LinkedList<Chunk>();
+    Queue<Chunk> chunkQueue = new ArrayDeque<Chunk>();
     int offset = 0;
     boolean compressable = compressableResponse(request.getResponseType());
     for (ResponseParameters params : request.getResponseParametersList()) {
@@ -404,6 +431,7 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
   /**
    * Creates a buffer with data read from a file.
    */
+  @SuppressWarnings("Finally") // Not concerned about suppression; expected to be exceedingly rare
   private ByteString createBufferFromFile(String fileClassPath) {
     ByteString buffer = ByteString.EMPTY;
     InputStream inputStream = getClass().getResourceAsStream(fileClassPath);
@@ -418,8 +446,8 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
     } finally {
       try {
         inputStream.close();
-      } catch (IOException e) {
-        throw new RuntimeException(e);
+      } catch (IOException ignorable) {
+        // ignore
       }
     }
     return buffer;
@@ -459,5 +487,96 @@ public class TestServiceImpl extends TestServiceGrpc.TestServiceImplBase {
       begin = end % dataBuffer.size();
     }
     return payload;
+  }
+
+  /** Returns interceptors necessary for full service implementation. */
+  public static List<ServerInterceptor> interceptors() {
+    return Arrays.asList(
+        echoRequestHeadersInterceptor(Util.METADATA_KEY),
+        echoRequestMetadataInHeaders(Util.ECHO_INITIAL_METADATA_KEY),
+        echoRequestMetadataInTrailers(Util.ECHO_TRAILING_METADATA_KEY));
+  }
+
+  /**
+   * Echo the request headers from a client into response headers and trailers. Useful for
+   * testing end-to-end metadata propagation.
+   */
+  private static ServerInterceptor echoRequestHeadersInterceptor(final Metadata.Key<?>... keys) {
+    final Set<Metadata.Key<?>> keySet = new HashSet<Metadata.Key<?>>(Arrays.asList(keys));
+    return new ServerInterceptor() {
+      @Override
+      public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+          ServerCall<ReqT, RespT> call,
+          final Metadata requestHeaders,
+          ServerCallHandler<ReqT, RespT> next) {
+        return next.startCall(new SimpleForwardingServerCall<ReqT, RespT>(call) {
+              @Override
+              public void sendHeaders(Metadata responseHeaders) {
+                responseHeaders.merge(requestHeaders, keySet);
+                super.sendHeaders(responseHeaders);
+              }
+
+              @Override
+              public void close(Status status, Metadata trailers) {
+                trailers.merge(requestHeaders, keySet);
+                super.close(status, trailers);
+              }
+            }, requestHeaders);
+      }
+    };
+  }
+
+  /**
+   * Echoes request headers with the specified key(s) from a client into response headers only.
+   */
+  private static ServerInterceptor echoRequestMetadataInHeaders(final Metadata.Key<?>... keys) {
+    final Set<Metadata.Key<?>> keySet = new HashSet<Metadata.Key<?>>(Arrays.asList(keys));
+    return new ServerInterceptor() {
+      @Override
+      public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+          ServerCall<ReqT, RespT> call,
+          final Metadata requestHeaders,
+          ServerCallHandler<ReqT, RespT> next) {
+        return next.startCall(new SimpleForwardingServerCall<ReqT, RespT>(call) {
+          @Override
+          public void sendHeaders(Metadata responseHeaders) {
+            responseHeaders.merge(requestHeaders, keySet);
+            super.sendHeaders(responseHeaders);
+          }
+
+          @Override
+          public void close(Status status, Metadata trailers) {
+            super.close(status, trailers);
+          }
+        }, requestHeaders);
+      }
+    };
+  }
+
+  /**
+   * Echoes request headers with the specified key(s) from a client into response trailers only.
+   */
+  private static ServerInterceptor echoRequestMetadataInTrailers(final Metadata.Key<?>... keys) {
+    final Set<Metadata.Key<?>> keySet = new HashSet<Metadata.Key<?>>(Arrays.asList(keys));
+    return new ServerInterceptor() {
+      @Override
+      public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+          ServerCall<ReqT, RespT> call,
+          final Metadata requestHeaders,
+          ServerCallHandler<ReqT, RespT> next) {
+        return next.startCall(new SimpleForwardingServerCall<ReqT, RespT>(call) {
+          @Override
+          public void sendHeaders(Metadata responseHeaders) {
+            super.sendHeaders(responseHeaders);
+          }
+
+          @Override
+          public void close(Status status, Metadata trailers) {
+            trailers.merge(requestHeaders, keySet);
+            super.close(status, trailers);
+          }
+        }, requestHeaders);
+      }
+    };
   }
 }

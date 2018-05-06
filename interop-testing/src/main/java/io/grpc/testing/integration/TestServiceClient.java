@@ -1,55 +1,37 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.testing.integration;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.io.Files;
-
 import io.grpc.ManagedChannel;
+import io.grpc.alts.AltsChannelBuilder;
+import io.grpc.internal.AbstractManagedChannelImplBuilder;
 import io.grpc.internal.GrpcUtil;
+import io.grpc.internal.testing.TestUtils;
 import io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.NegotiationType;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.okhttp.OkHttpChannelBuilder;
 import io.grpc.okhttp.internal.Platform;
-import io.grpc.testing.TestUtils;
 import io.netty.handler.ssl.SslContext;
-
 import java.io.File;
 import java.io.FileInputStream;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.UnknownHostException;
 import java.nio.charset.Charset;
-
 import javax.net.ssl.SSLSocketFactory;
 
 /**
@@ -64,6 +46,8 @@ public class TestServiceClient {
    * The main application allowing this client to be launched from the command line.
    */
   public static void main(String[] args) throws Exception {
+    // Let Netty or OkHttp use Conscrypt if it is available.
+    TestUtils.installConscryptIfAvailable();
     final TestServiceClient client = new TestServiceClient();
     client.parseArgs(args);
     client.setUp();
@@ -93,15 +77,18 @@ public class TestServiceClient {
   private int serverPort = 8080;
   private String testCase = "empty_unary";
   private boolean useTls = true;
+  private boolean useAlts = false;
   private boolean useTestCa;
   private boolean useOkHttp;
   private String defaultServiceAccount;
   private String serviceAccountKeyFile;
   private String oauthScope;
+  private boolean fullStreamDecompression;
 
   private Tester tester = new Tester();
 
-  private void parseArgs(String[] args) {
+  @VisibleForTesting
+  void parseArgs(String[] args) {
     boolean usage = false;
     for (String arg : args) {
       if (!arg.startsWith("--")) {
@@ -131,6 +118,8 @@ public class TestServiceClient {
         testCase = value;
       } else if ("use_tls".equals(key)) {
         useTls = Boolean.parseBoolean(value);
+      } else if ("use_alts".equals(key)) {
+        useAlts = Boolean.parseBoolean(value);
       } else if ("use_test_ca".equals(key)) {
         useTestCa = Boolean.parseBoolean(value);
       } else if ("use_okhttp".equals(key)) {
@@ -147,11 +136,16 @@ public class TestServiceClient {
         serviceAccountKeyFile = value;
       } else if ("oauth_scope".equals(key)) {
         oauthScope = value;
+      } else if ("full_stream_decompression".equals(key)) {
+        fullStreamDecompression = Boolean.parseBoolean(value);
       } else {
         System.err.println("Unknown argument: " + key);
         usage = true;
         break;
       }
+    }
+    if (useAlts) {
+      useTls = false;
     }
     if (usage) {
       TestServiceClient c = new TestServiceClient();
@@ -166,6 +160,8 @@ public class TestServiceClient {
           + "\n    Valid options:"
           + validTestCasesHelpText()
           + "\n  --use_tls=true|false        Whether to use TLS. Default " + c.useTls
+          + "\n  --use_alts=true|false       Whether to use ALTS. Enable ALTS will disable TLS."
+          + "\n                              Default " + c.useTls
           + "\n  --use_test_ca=true|false    Whether to trust our fake CA. Requires --use_tls=true "
           + "\n                              to have effect. Default " + c.useTestCa
           + "\n  --use_okhttp=true|false     Whether to use OkHttp instead of Netty. Default "
@@ -175,12 +171,15 @@ public class TestServiceClient {
           + "\n  --service_account_key_file  Path to service account json key file."
             + c.serviceAccountKeyFile
           + "\n  --oauth_scope               Scope for OAuth tokens. Default " + c.oauthScope
+          + "\n  --full_stream_decompression Enable full-stream decompression. Default "
+            + c.fullStreamDecompression
       );
       System.exit(1);
     }
   }
 
-  private void setUp() {
+  @VisibleForTesting
+  void setUp() {
     tester.setUp();
   }
 
@@ -212,16 +211,45 @@ public class TestServiceClient {
         tester.emptyUnary();
         break;
 
+      case CACHEABLE_UNARY: {
+        tester.cacheableUnary();
+        break;
+      }
+
       case LARGE_UNARY:
         tester.largeUnary();
+        break;
+
+      case CLIENT_COMPRESSED_UNARY:
+        tester.clientCompressedUnary(true);
+        break;
+
+      case CLIENT_COMPRESSED_UNARY_NOPROBE:
+        tester.clientCompressedUnary(false);
+        break;
+
+      case SERVER_COMPRESSED_UNARY:
+        tester.serverCompressedUnary();
         break;
 
       case CLIENT_STREAMING:
         tester.clientStreaming();
         break;
 
+      case CLIENT_COMPRESSED_STREAMING:
+        tester.clientCompressedStreaming(true);
+        break;
+
+      case CLIENT_COMPRESSED_STREAMING_NOPROBE:
+        tester.clientCompressedStreaming(false);
+        break;
+
       case SERVER_STREAMING:
         tester.serverStreaming();
+        break;
+
+      case SERVER_COMPRESSED_STREAMING:
+        tester.serverCompressedStreaming();
         break;
 
       case PING_PONG:
@@ -237,7 +265,7 @@ public class TestServiceClient {
         break;
 
       case SERVICE_ACCOUNT_CREDS: {
-        String jsonKey = Files.toString(new File(serviceAccountKeyFile), UTF_8);
+        String jsonKey = Files.asCharSource(new File(serviceAccountKeyFile), UTF_8).read();
         FileInputStream credentialsStream = new FileInputStream(new File(serviceAccountKeyFile));
         tester.serviceAccountCreds(jsonKey, credentialsStream, oauthScope);
         break;
@@ -250,16 +278,26 @@ public class TestServiceClient {
       }
 
       case OAUTH2_AUTH_TOKEN: {
-        String jsonKey = Files.toString(new File(serviceAccountKeyFile), UTF_8);
+        String jsonKey = Files.asCharSource(new File(serviceAccountKeyFile), UTF_8).read();
         FileInputStream credentialsStream = new FileInputStream(new File(serviceAccountKeyFile));
         tester.oauth2AuthToken(jsonKey, credentialsStream, oauthScope);
         break;
       }
 
       case PER_RPC_CREDS: {
-        String jsonKey = Files.toString(new File(serviceAccountKeyFile), UTF_8);
+        String jsonKey = Files.asCharSource(new File(serviceAccountKeyFile), UTF_8).read();
         FileInputStream credentialsStream = new FileInputStream(new File(serviceAccountKeyFile));
         tester.perRpcCreds(jsonKey, credentialsStream, oauthScope);
+        break;
+      }
+
+      case CUSTOM_METADATA: {
+        tester.customMetadata();
+        break;
+      }
+
+      case STATUS_CODE_AND_MESSAGE: {
+        tester.statusCodeAndMessage();
         break;
       }
 
@@ -296,17 +334,11 @@ public class TestServiceClient {
   private class Tester extends AbstractInteropTest {
     @Override
     protected ManagedChannel createChannel() {
+      if (useAlts) {
+        return AltsChannelBuilder.forAddress(serverHost, serverPort).build();
+      }
+      AbstractManagedChannelImplBuilder<?> builder;
       if (!useOkHttp) {
-        InetAddress address;
-        try {
-          address = InetAddress.getByName(serverHost);
-          if (serverHostOverride != null) {
-            // Force the hostname to match the cert the server uses.
-            address = InetAddress.getByAddress(serverHostOverride, address.getAddress());
-          }
-        } catch (UnknownHostException ex) {
-          throw new RuntimeException(ex);
-        }
         SslContext sslContext = null;
         if (useTestCa) {
           try {
@@ -316,16 +348,23 @@ public class TestServiceClient {
             throw new RuntimeException(ex);
           }
         }
-        return NettyChannelBuilder.forAddress(new InetSocketAddress(address, serverPort))
-            .flowControlWindow(65 * 1024)
-            .negotiationType(useTls ? NegotiationType.TLS : NegotiationType.PLAINTEXT)
-            .sslContext(sslContext)
-            .build();
+        NettyChannelBuilder nettyBuilder =
+            NettyChannelBuilder.forAddress(serverHost, serverPort)
+                .flowControlWindow(65 * 1024)
+                .negotiationType(useTls ? NegotiationType.TLS : NegotiationType.PLAINTEXT)
+                .sslContext(sslContext);
+        if (serverHostOverride != null) {
+          nettyBuilder.overrideAuthority(serverHostOverride);
+        }
+        if (fullStreamDecompression) {
+          nettyBuilder.enableFullStreamDecompression();
+        }
+        builder = nettyBuilder;
       } else {
-        OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress(serverHost, serverPort);
+        OkHttpChannelBuilder okBuilder = OkHttpChannelBuilder.forAddress(serverHost, serverPort);
         if (serverHostOverride != null) {
           // Force the hostname to match the cert the server uses.
-          builder.overrideAuthority(
+          okBuilder.overrideAuthority(
               GrpcUtil.authorityFromHostAndPort(serverHostOverride, serverPort));
         }
         if (useTls) {
@@ -334,20 +373,28 @@ public class TestServiceClient {
                 ? TestUtils.newSslSocketFactoryForCa(Platform.get().getProvider(),
                     TestUtils.loadCert("ca.pem"))
                 : (SSLSocketFactory) SSLSocketFactory.getDefault();
-            builder.sslSocketFactory(factory);
+            okBuilder.sslSocketFactory(factory);
           } catch (Exception e) {
             throw new RuntimeException(e);
           }
         } else {
-          builder.usePlaintext(true);
+          okBuilder.usePlaintext();
         }
-        return builder.build();
+        if (fullStreamDecompression) {
+          okBuilder.enableFullStreamDecompression();
+        }
+        builder = okBuilder;
       }
+      io.grpc.internal.TestingAccessor.setStatsImplementation(
+          builder, createClientCensusStatsModule());
+      return builder.build();
     }
 
     @Override
     protected boolean metricsExpected() {
-      // Server-side metrics won't be found, because server is a separate process.
+      // Exact message size doesn't match when testing with Go servers:
+      // https://github.com/grpc/grpc-go/issues/1572
+      // TODO(zhangkun83): remove this override once the said issue is fixed.
       return false;
     }
   }

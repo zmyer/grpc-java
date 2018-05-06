@@ -1,32 +1,17 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
@@ -41,15 +26,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verifyZeroInteractions;
 
-import com.google.census.RpcConstants;
-
 import io.grpc.Codec;
-import io.grpc.Metadata;
-import io.grpc.Status;
-import io.grpc.internal.StatsTraceContext;
-import io.grpc.internal.testing.CensusTestUtils.FakeCensusContextFactory;
-import io.grpc.internal.testing.CensusTestUtils.MetricsRecord;
-
+import io.grpc.StreamTracer;
+import io.grpc.internal.testing.TestStreamTracer.TestBaseStreamTracer;
+import java.io.BufferedInputStream;
+import java.io.ByteArrayInputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.Arrays;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -59,12 +43,6 @@ import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
-import java.io.BufferedInputStream;
-import java.io.ByteArrayInputStream;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.util.Arrays;
-
 /**
  * Tests for {@link MessageFramer}.
  */
@@ -72,24 +50,27 @@ import java.util.Arrays;
 public class MessageFramerTest {
   @Mock
   private MessageFramer.Sink sink;
+
+  private final TestBaseStreamTracer tracer = new TestBaseStreamTracer();
   private MessageFramer framer;
 
   @Captor
   private ArgumentCaptor<ByteWritableBuffer> frameCaptor;
+  @Captor
+  private ArgumentCaptor<Long> wireSizeCaptor;
+  @Captor
+  private ArgumentCaptor<Long> uncompressedSizeCaptor;
   private BytesWritableBufferAllocator allocator =
       new BytesWritableBufferAllocator(1000, 1000);
-  private FakeCensusContextFactory censusCtxFactory;
   private StatsTraceContext statsTraceCtx;
 
   /** Set up for test. */
   @Before
   public void setUp() {
     MockitoAnnotations.initMocks(this);
-    censusCtxFactory = new FakeCensusContextFactory();
     // MessageDeframerTest tests with a client-side StatsTraceContext, so here we test with a
     // server-side StatsTraceContext.
-    statsTraceCtx = StatsTraceContext.newServerContext(
-        "service/method", censusCtxFactory, new Metadata(), GrpcUtil.STOPWATCH_SUPPLIER);
+    statsTraceCtx = new StatsTraceContext(new StreamTracer[]{tracer});
     framer = new MessageFramer(sink, allocator, statsTraceCtx);
   }
 
@@ -99,7 +80,7 @@ public class MessageFramerTest {
     verifyNoMoreInteractions(sink);
     framer.flush();
 
-    verify(sink).deliverFrame(toWriteBuffer(new byte[] {0, 0, 0, 0, 2, 3, 14}), false, true);
+    verify(sink).deliverFrame(toWriteBuffer(new byte[] {0, 0, 0, 0, 2, 3, 14}), false, true, 1);
     assertEquals(1, allocator.allocCount);
     verifyNoMoreInteractions(sink);
     checkStats(2, 2);
@@ -110,8 +91,8 @@ public class MessageFramerTest {
     writeUnknownLength(framer, new byte[]{3, 14});
     framer.flush();
     // Header is written first, then payload
-    verify(sink).deliverFrame(toWriteBuffer(new byte[] {0, 0, 0, 0, 2}), false, false);
-    verify(sink).deliverFrame(toWriteBuffer(new byte[] {3, 14}), false, true);
+    verify(sink).deliverFrame(toWriteBuffer(new byte[] {0, 0, 0, 0, 2}), false, false, 0);
+    verify(sink).deliverFrame(toWriteBuffer(new byte[] {3, 14}), false, true, 1);
     assertEquals(2, allocator.allocCount);
     verifyNoMoreInteractions(sink);
     checkStats(2, 2);
@@ -125,10 +106,10 @@ public class MessageFramerTest {
     verifyNoMoreInteractions(sink);
     framer.flush();
     verify(sink).deliverFrame(
-        toWriteBuffer(new byte[] {0, 0, 0, 0, 1, 3, 0, 0, 0, 0, 1, 14}), false, true);
+        toWriteBuffer(new byte[] {0, 0, 0, 0, 1, 3, 0, 0, 0, 0, 1, 14}), false, true, 2);
     verifyNoMoreInteractions(sink);
     assertEquals(1, allocator.allocCount);
-    checkStats(2, 2);
+    checkStats(1, 1, 1, 1);
   }
 
   @Test
@@ -137,7 +118,7 @@ public class MessageFramerTest {
     verifyNoMoreInteractions(sink);
     framer.close();
     verify(sink).deliverFrame(
-        toWriteBuffer(new byte[] {0, 0, 0, 0, 7, 3, 14, 1, 5, 9, 2, 6}), true, true);
+        toWriteBuffer(new byte[] {0, 0, 0, 0, 7, 3, 14, 1, 5, 9, 2, 6}), true, true, 1);
     verifyNoMoreInteractions(sink);
     assertEquals(1, allocator.allocCount);
     checkStats(7, 7);
@@ -146,10 +127,10 @@ public class MessageFramerTest {
   @Test
   public void closeWithoutBufferedFrameGivesNullBuffer() {
     framer.close();
-    verify(sink).deliverFrame(null, true, true);
+    verify(sink).deliverFrame(null, true, true, 0);
     verifyNoMoreInteractions(sink);
     assertEquals(0, allocator.allocCount);
-    checkStats(0, 0);
+    checkStats();
   }
 
   @Test
@@ -158,11 +139,11 @@ public class MessageFramerTest {
     framer = new MessageFramer(sink, allocator, statsTraceCtx);
     writeKnownLength(framer, new byte[]{3, 14, 1, 5, 9, 2, 6, 5});
     verify(sink).deliverFrame(
-        toWriteBuffer(new byte[] {0, 0, 0, 0, 8, 3, 14, 1, 5, 9, 2, 6}), false, false);
+        toWriteBuffer(new byte[] {0, 0, 0, 0, 8, 3, 14, 1, 5, 9, 2, 6}), false, false, 1);
     verifyNoMoreInteractions(sink);
 
     framer.flush();
-    verify(sink).deliverFrame(toWriteBuffer(new byte[] {5}), false, true);
+    verify(sink).deliverFrame(toWriteBuffer(new byte[] {5}), false, true, 0);
     verifyNoMoreInteractions(sink);
     assertEquals(2, allocator.allocCount);
     checkStats(8, 8);
@@ -175,21 +156,21 @@ public class MessageFramerTest {
     writeKnownLength(framer, new byte[]{3, 14, 1});
     writeKnownLength(framer, new byte[]{3});
     verify(sink).deliverFrame(
-            toWriteBuffer(new byte[] {0, 0, 0, 0, 3, 3, 14, 1, 0, 0, 0, 0}), false, false);
+            toWriteBuffer(new byte[] {0, 0, 0, 0, 3, 3, 14, 1, 0, 0, 0, 0}), false, false, 2);
     verifyNoMoreInteractions(sink);
 
     framer.flush();
-    verify(sink).deliverFrame(toWriteBufferWithMinSize(new byte[] {1, 3}, 12), false, true);
+    verify(sink).deliverFrame(toWriteBufferWithMinSize(new byte[] {1, 3}, 12), false, true, 0);
     verifyNoMoreInteractions(sink);
     assertEquals(2, allocator.allocCount);
-    checkStats(4, 4);
+    checkStats(3, 3, 1, 1);
   }
 
   @Test
   public void emptyPayloadYieldsFrame() throws Exception {
     writeKnownLength(framer, new byte[0]);
     framer.flush();
-    verify(sink).deliverFrame(toWriteBuffer(new byte[] {0, 0, 0, 0, 0}), false, true);
+    verify(sink).deliverFrame(toWriteBuffer(new byte[] {0, 0, 0, 0, 0}), false, true, 1);
     assertEquals(1, allocator.allocCount);
     checkStats(0, 0);
   }
@@ -199,7 +180,7 @@ public class MessageFramerTest {
     writeUnknownLength(framer, new byte[0]);
     verifyZeroInteractions(sink);
     framer.flush();
-    verify(sink).deliverFrame(toWriteBuffer(new byte[] {0, 0, 0, 0, 0}), false, true);
+    verify(sink).deliverFrame(toWriteBuffer(new byte[] {0, 0, 0, 0, 0}), false, true, 1);
     // One alloc for the header
     assertEquals(1, allocator.allocCount);
     checkStats(0, 0);
@@ -210,7 +191,7 @@ public class MessageFramerTest {
     writeKnownLength(framer, new byte[]{3, 14});
     framer.flush();
     framer.flush();
-    verify(sink).deliverFrame(toWriteBuffer(new byte[] {0, 0, 0, 0, 2, 3, 14}), false, true);
+    verify(sink).deliverFrame(toWriteBuffer(new byte[] {0, 0, 0, 0, 2, 3, 14}), false, true, 1);
     verifyNoMoreInteractions(sink);
     assertEquals(1, allocator.allocCount);
     checkStats(2, 2);
@@ -222,7 +203,7 @@ public class MessageFramerTest {
     framer = new MessageFramer(sink, allocator, statsTraceCtx);
     writeKnownLength(framer, new byte[1000]);
     framer.flush();
-    verify(sink).deliverFrame(frameCaptor.capture(), eq(false), eq(true));
+    verify(sink).deliverFrame(frameCaptor.capture(), eq(false), eq(true), eq(1));
     ByteWritableBuffer buffer = frameCaptor.getValue();
     assertEquals(1005, buffer.size());
 
@@ -244,9 +225,10 @@ public class MessageFramerTest {
     writeUnknownLength(framer, new byte[1000]);
     framer.flush();
     // Header and first chunk written with flush = false
-    verify(sink, times(2)).deliverFrame(frameCaptor.capture(), eq(false), eq(false));
+    verify(sink, times(2)).deliverFrame(frameCaptor.capture(), eq(false), eq(false), eq(0));
     // On flush third buffer written with flish = true
-    verify(sink).deliverFrame(frameCaptor.capture(), eq(false), eq(true));
+    // The message count is only bumped when a message is completely written.
+    verify(sink).deliverFrame(frameCaptor.capture(), eq(false), eq(true), eq(1));
 
     // header has fixed length of 5 and specifies correct length
     assertEquals(5, frameCaptor.getAllValues().get(0).readableBytes());
@@ -267,12 +249,14 @@ public class MessageFramerTest {
   public void compressed() throws Exception {
     allocator = new BytesWritableBufferAllocator(100, Integer.MAX_VALUE);
     // setMessageCompression should default to true
-    framer = new MessageFramer(sink, allocator, statsTraceCtx).setCompressor(new Codec.Gzip());
+    framer = new MessageFramer(sink, allocator, statsTraceCtx)
+        .setCompressor(new Codec.Gzip());
     writeKnownLength(framer, new byte[1000]);
     framer.flush();
     // The GRPC header is written first as a separate frame.
-    verify(sink).deliverFrame(frameCaptor.capture(), eq(false), eq(false));
-    verify(sink).deliverFrame(frameCaptor.capture(), eq(false), eq(true));
+    // The message count is only bumped when a message is completely written.
+    verify(sink).deliverFrame(frameCaptor.capture(), eq(false), eq(false), eq(0));
+    verify(sink).deliverFrame(frameCaptor.capture(), eq(false), eq(true), eq(1));
 
     // Check the header
     ByteWritableBuffer buffer = frameCaptor.getAllValues().get(0);
@@ -296,7 +280,7 @@ public class MessageFramerTest {
     writeKnownLength(framer, new byte[1000]);
     framer.flush();
     // The GRPC header is written first as a separate frame
-    verify(sink).deliverFrame(frameCaptor.capture(), eq(false), eq(true));
+    verify(sink).deliverFrame(frameCaptor.capture(), eq(false), eq(true), eq(1));
 
     // Check the header
     ByteWritableBuffer buffer = frameCaptor.getAllValues().get(0);
@@ -322,7 +306,7 @@ public class MessageFramerTest {
     writeKnownLength(framer, new byte[1000]);
     framer.flush();
     // The GRPC header is written first as a separate frame
-    verify(sink).deliverFrame(frameCaptor.capture(), eq(false), eq(true));
+    verify(sink).deliverFrame(frameCaptor.capture(), eq(false), eq(true), eq(1));
 
     // Check the header
     ByteWritableBuffer buffer = frameCaptor.getAllValues().get(0);
@@ -344,7 +328,8 @@ public class MessageFramerTest {
     MessageFramer.Sink reentrant = new MessageFramer.Sink() {
       int count = 0;
       @Override
-      public void deliverFrame(WritableBuffer frame, boolean endOfStream, boolean flush) {
+      public void deliverFrame(
+          WritableBuffer frame, boolean endOfStream, boolean flush, int numMessages) {
         if (count == 0) {
           framer.close();
           count++;
@@ -364,7 +349,7 @@ public class MessageFramerTest {
     framer.setMessageCompression(true);
     writeKnownLength(framer, new byte[]{});
     framer.flush();
-    verify(sink).deliverFrame(toWriteBuffer(new byte[] {0, 0, 0, 0, 0}), false, true);
+    verify(sink).deliverFrame(toWriteBuffer(new byte[] {0, 0, 0, 0, 0}), false, true, 1);
     checkStats(0, 0);
   }
 
@@ -387,21 +372,26 @@ public class MessageFramerTest {
     // TODO(carl-mastrangelo): add framer.flush() here.
   }
 
-  private void checkStats(long wireBytesSent, long uncompressedBytesSent) {
-    statsTraceCtx.callEnded(Status.OK);
-    MetricsRecord record = censusCtxFactory.pollRecord();
-    assertEquals(0, record.getMetricAsLongOrFail(
-            RpcConstants.RPC_SERVER_REQUEST_BYTES));
-    assertEquals(0, record.getMetricAsLongOrFail(
-            RpcConstants.RPC_SERVER_UNCOMPRESSED_REQUEST_BYTES));
-    assertEquals(wireBytesSent,
-        record.getMetricAsLongOrFail(RpcConstants.RPC_SERVER_RESPONSE_BYTES));
-    assertEquals(uncompressedBytesSent,
-        record.getMetricAsLongOrFail(RpcConstants.RPC_SERVER_UNCOMPRESSED_RESPONSE_BYTES));
-    assertNull(record.getMetric(RpcConstants.RPC_CLIENT_REQUEST_BYTES));
-    assertNull(record.getMetric(RpcConstants.RPC_CLIENT_RESPONSE_BYTES));
-    assertNull(record.getMetric(RpcConstants.RPC_CLIENT_UNCOMPRESSED_REQUEST_BYTES));
-    assertNull(record.getMetric(RpcConstants.RPC_CLIENT_UNCOMPRESSED_RESPONSE_BYTES));
+  /**
+   * @param sizes in the format {wire0, uncompressed0, wire1, uncompressed1, ...}
+   */
+  private void checkStats(long... sizes) {
+    assertEquals(0, sizes.length % 2);
+    int count = sizes.length / 2;
+    long expectedWireSize = 0;
+    long expectedUncompressedSize = 0;
+    for (int i = 0; i < count; i++) {
+      assertEquals("outboundMessage(" + i + ")", tracer.nextOutboundEvent());
+      assertEquals(
+          String.format("outboundMessageSent(%d, %d, %d)", i, sizes[i * 2], sizes[i * 2 + 1]),
+          tracer.nextOutboundEvent());
+      expectedWireSize += sizes[i * 2];
+      expectedUncompressedSize += sizes[i * 2 + 1];
+    }
+    assertNull(tracer.nextOutboundEvent());
+    assertNull(tracer.nextInboundEvent());
+    assertEquals(expectedWireSize, tracer.getOutboundWireSize());
+    assertEquals(expectedUncompressedSize, tracer.getOutboundUncompressedSize());
   }
 
   static class ByteWritableBuffer implements WritableBuffer {

@@ -10,9 +10,37 @@ On Android, use the [Play Services Provider](#tls-on-android). For non-Android s
 
 ## TLS on Android
 
-On Android we recommend the use of the [Play Services Dynamic Security Provider](http://appfoundry.be/blog/2014/11/18/Google-Play-Services-Dynamic-Security-Provider) to ensure your application has an up-to-date OpenSSL library with the necessary ciper-suites and a reliable ALPN implementation.
+On Android we recommend the use of the [Play Services Dynamic Security
+Provider](https://www.appfoundry.be/blog/2014/11/18/Google-Play-Services-Dynamic-Security-Provider/)
+to ensure your application has an up-to-date OpenSSL library with the necessary
+ciper-suites and a reliable ALPN implementation. This requires [updating the
+security provider at
+runtime](https://developer.android.com/training/articles/security-gms-provider.html).
 
-You may need to [update the security provider](https://developer.android.com/training/articles/security-gms-provider.html) to enable ALPN support, especially for Android versions < 5.0. If the provider fails to update, ALPN may not work.
+Although ALPN mostly works on newer Android releases (especially since 5.0),
+there are bugs and discovered security vulnerabilities that are only fixed by
+upgrading the security provider. Thus, we recommend using the Play Service
+Dynamic Security Provider for all Android versions.
+
+*Note: The Dynamic Security Provider must be installed **before** creating a gRPC OkHttp channel. gRPC's OkHttpProtocolNegotiator statically initializes the security protocol(s) available to gRPC, which means that changes to the security provider after the first channel is created will not be picked up by gRPC.*
+
+### Bundling Conscrypt
+
+If depending on Play Services is not an option for your app, then you may bundle
+[Conscrypt](https://conscrypt.org) with your application. Binaries are available
+on [Maven
+Central](https://search.maven.org/#search%7Cga%7C1%7Cg%3Aorg.conscrypt%20a%3Aconscrypt-android).
+
+Like the Play Services Dynamic Security Provider, you must still "install"
+Conscrypt before use.
+
+```java
+import org.conscrypt.Conscrypt;
+import java.security.Security;
+...
+
+Security.insertProviderAt(Conscrypt.newProvider(), 1);
+```
 
 ## TLS with OpenSSL
 
@@ -62,7 +90,7 @@ In Maven, you can use the [os-maven-plugin](https://github.com/trustin/os-maven-
     <dependency>
       <groupId>io.netty</groupId>
       <artifactId>netty-tcnative-boringssl-static</artifactId>
-      <version>1.1.33.Fork23</version>
+      <version>2.0.6.Final</version>
     </dependency>
   </dependencies>
 </project>
@@ -80,7 +108,7 @@ buildscript {
 }
 
 dependencies {
-    compile 'io.netty:netty-tcnative-boringssl-static:1.1.33.Fork23'
+    compile 'io.netty:netty-tcnative-boringssl-static:2.0.6.Final'
 }
 ```
 
@@ -115,7 +143,7 @@ In Maven, you can use the [os-maven-plugin](https://github.com/trustin/os-maven-
     <dependency>
       <groupId>io.netty</groupId>
       <artifactId>netty-tcnative</artifactId>
-      <version>1.1.33.Fork23</version>
+      <version>2.0.6.Final</version>
       <classifier>${tcnative.classifier}</classifier>
     </dependency>
   </dependencies>
@@ -126,7 +154,7 @@ In Maven, you can use the [os-maven-plugin](https://github.com/trustin/os-maven-
       <extension>
         <groupId>kr.motd.maven</groupId>
         <artifactId>os-maven-plugin</artifactId>
-        <version>1.4.0.Final</version>
+        <version>1.5.0.Final</version>
       </extension>
     </extensions>
     <plugins>
@@ -183,7 +211,7 @@ if (osdetector.os == "linux" && osdetector.release.isLike("fedora")) {
 }
 
 dependencies {
-    compile 'io.netty:netty-tcnative:1.1.33.Fork23:' + tcnative_classifier
+    compile 'io.netty:netty-tcnative:2.0.6.Final:' + tcnative_classifier
 }
 ```
 
@@ -207,7 +235,7 @@ No standard Java release has built-in support for ALPN today ([there is a tracki
 java -Xbootclasspath/p:/path/to/jetty/alpn/extension.jar ...
 ```
 
-Note that you must use the [release of the Jetty-ALPN jar](http://www.eclipse.org/jetty/documentation/current/alpn-chapter.html#alpn-versions) specific to the version of Java you are using. However, you can use the JVM agent [Jeety-ALPN-Agent](https://github.com/jetty-project/jetty-alpn-agent) to load the correct Jetty `alpn-boot` jar file for the current Java version. To do this, instead of adding an `Xbootclasspath` option, add a `javaagent` JVM option referencing the path to the Jetty `alpn-agent` jar.
+Note that you must use the [release of the Jetty-ALPN jar](http://www.eclipse.org/jetty/documentation/current/alpn-chapter.html#alpn-versions) specific to the version of Java you are using. However, you can use the JVM agent [Jetty-ALPN-Agent](https://github.com/jetty-project/jetty-alpn-agent) to load the correct Jetty `alpn-boot` jar file for the current Java version. To do this, instead of adding an `Xbootclasspath` option, add a `javaagent` JVM option referencing the path to the Jetty `alpn-agent` jar.
 
 ```sh
 java -javaagent:/path/to/jetty-alpn-agent.jar ...
@@ -266,25 +294,101 @@ Server server = NettyServerBuilder.forPort(8443)
         .build());
 ```
 
-Negotiated client certificates are available in the SSLSession, which is found in the SSL_SESSION_KEY attribute of <a href="https://github.com/grpc/grpc-java/blob/master/core/src/main/java/io/grpc/ServerCall.java">ServerCall</a>.  A server interceptor can provide details in the current Context.
+Negotiated client certificates are available in the SSLSession, which is found in the `TRANSPORT_ATTR_SSL_SESSION` attribute of <a href="https://github.com/grpc/grpc-java/blob/master/core/src/main/java/io/grpc/Grpc.java">Grpc</a>.  A server interceptor can provide details in the current Context.
 
 ```java
 public final static Context.Key<SSLSession> SSL_SESSION_CONTEXT = Context.key("SSLSession");
 
 @Override
-public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(MethodDescriptor<ReqT, RespT> method,
-    ServerCall<RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
-    SSLSession sslSession = call.attributes().get(ServerCall.SSL_SESSION_KEY);
+public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(ServerCall<RespT> call, 
+    Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+    SSLSession sslSession = call.attributes().get(Grpc.TRANSPORT_ATTR_SSL_SESSION);
     if (sslSession == null) {
-        return next.startCall(method, call, headers)
+        return next.startCall(call, headers)
     }
     return Contexts.interceptCall(
-        Context.current().withValue(SSL_SESSION_CONTEXT, clientContext),
-        method, call, headers, next);
+        Context.current().withValue(SSL_SESSION_CONTEXT, clientContext), call, headers, next);
 }
 ```
 
 [Mutual authentication]: http://en.wikipedia.org/wiki/Transport_Layer_Security#Client-authenticated_TLS_handshake
+
+## Troubleshooting
+
+If you received an error message "ALPN is not configured properly" or "Jetty ALPN/NPN has not been properly configured", it most likely means that:
+ - ALPN related dependencies are either not present in the classpath
+ - or that there is a classpath conflict
+ - or that a wrong version is used due to dependency management
+ - or you are on an unsupported platform (e.g., 32-bit OS, Alpine with `musl` libc). See [Transport Security](#transport-security-tls) for supported platforms.
+
+### Netty
+If you aren't using gRPC on Android devices, you are most likely using `grpc-netty` transport.
+
+If you are developing for Android and have a dependency on `grpc-netty`, you should remove it as `grpc-netty` is unsupported on Android. Use `grpc-okhttp` instead.
+
+If you are on a 32-bit operating system, or not on a [Transport Security supported platform](#transport-security-tls), you should use Jetty ALPN (and beware of potential issues), or you'll need to build your own 32-bit version of `netty-tcnative`.
+
+If you are using `musl` libc (e.g., with Alpine Linux), then
+`netty-tcnative-boringssl-static` won't work. There are several alternatives:
+ - Use [netty-tcnative-alpine](https://github.com/pires/netty-tcnative-alpine)
+ - Use a distribution with `glibc`
+
+If you are running inside of an embedded Tomcat runtime (e.g., Spring Boot),
+then some versions of `netty-tcnative-boringssl-static` will have conflicts and
+won't work. You must use gRPC 1.4.0 or later.
+
+Most dependency versioning problems can be solved by using
+`io.grpc:grpc-netty-shaded` instead of `io.grpc:grpc-netty`, although this also
+limits your usage of the Netty-specific APIs. `io.grpc:grpc-netty-shaded`
+includes the proper version of Netty and `netty-tcnative-boringssl-static` in a
+way that won't conflict with other Netty usages.
+
+Find the dependency tree (e.g., `mvn dependency:tree`), and look for versions of:
+ - `io.grpc:grpc-netty`
+ - `io.netty:netty-handler` (really, make sure all of io.netty except for
+   netty-tcnative has the same version)
+ - `io.netty:netty-tcnative-boringssl-static:jar` 
+
+If `netty-tcnative-boringssl-static` is missing, then you either need to add it as a dependency, or use alternative methods of providing ALPN capability by reading the *Transport Security (TLS)* section carefully.
+
+If you have both `netty-handler` and `netty-tcnative-boringssl-static` dependencies, then check the versions carefully. These versions could've been overridden by dependency management from another BOM. You would receive the "ALPN is not configured properly" exception if you are using incompatible versions.
+
+If you have other `netty` dependencies, such as `netty-all`, that are pulled in from other libraries, then ultimately you should make sure only one `netty` dependency is used to avoid classpath conflict. The easiest way is to exclude transitive Netty dependencies from all the immediate dependencies, e.g., in Maven use `<exclusions>`, and then add an explict Netty dependency in your project along with the corresponding `tcnative` versions. See the versions table below.
+
+If you are running in a runtime environment that also uses Netty (e.g., Hadoop, Spark, Spring Boot 2) and you have no control over the Netty version at all, then you should use a shaded gRPC Netty dependency to avoid classpath conflicts with other Netty versions in runtime the classpath:
+ - Remove `io.grpc:grpc-netty` dependency
+ - Add `io.grpc:grpc-netty-shaded` dependency
+
+Below are known to work version combinations:
+
+grpc-netty version | netty-handler version | netty-tcnative-boringssl-static version
+------------------ | --------------------- | ---------------------------------------
+1.0.0-1.0.1        | 4.1.3.Final           | 1.1.33.Fork19
+1.0.2-1.0.3        | 4.1.6.Final           | 1.1.33.Fork23
+1.1.x-1.3.x        | 4.1.8.Final           | 1.1.33.Fork26
+1.4.x              | 4.1.11.Final          | 2.0.1.Final
+1.5.x              | 4.1.12.Final          | 2.0.5.Final
+1.6.x              | 4.1.14.Final          | 2.0.5.Final
+1.7.x-1.8.x        | 4.1.16.Final          | 2.0.6.Final
+1.9.x-1.10.x       | 4.1.17.Final          | 2.0.7.Final
+1.11.x-            | 4.1.22.Final          | 2.0.7.Final
+
+_(grpc-netty-shaded avoids issues with keeping these versions in sync.)_
+
+### OkHttp
+If you are using gRPC on Android devices, you are most likely using `grpc-okhttp` transport.
+
+Find the dependency tree (e.g., `mvn dependency:tree`), and look for versions of:
+ - `io.grpc:grpc-okhttp`
+ - `com.squareup.okhttp:okhttp`
+
+If you don't have `grpc-okhttp`, you should add it as a dependency.
+
+If you have both `io.grpc:grpc-netty` and `io.grpc:grpc-okhttp`, you may also have issues. Remove `grpc-netty` if you are on Android.
+
+If you have `okhttp` version below 2.5.0, then it may not work with gRPC.
+
+It is OK to have both `okhttp` 2.x and 3.x since they have different group name and under different packages.
 
 # gRPC over plaintext
 

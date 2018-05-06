@@ -1,32 +1,17 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
@@ -38,26 +23,27 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.io.BaseEncoding;
-
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
-
 import javax.annotation.Nullable;
+import javax.annotation.concurrent.Immutable;
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
  * Provides access to read and write metadata values to be exchanged during a call.
+ *
+ * <p>Keys are allowed to be associated with more than one value.
  *
  * <p>This class is not thread safe, implementations should ensure that header reads and writes do
  * not occur in multiple threads concurrently.
@@ -115,21 +101,6 @@ public final class Metadata {
         @Override
         public String parseAsciiString(String serialized) {
           return serialized;
-        }
-      };
-
-  /** Simple metadata marshaller that encodes an integer as a signed decimal string. */
-  static final AsciiMarshaller<Integer> INTEGER_MARSHALLER =
-      new AsciiMarshaller<Integer>() {
-
-        @Override
-        public String toAsciiString(Integer value) {
-          return value.toString();
-        }
-
-        @Override
-        public Integer parseAsciiString(String serialized) {
-          return Integer.parseInt(serialized);
         }
       };
 
@@ -191,12 +162,16 @@ public final class Metadata {
   public Metadata() {}
 
   /** Returns the total number of key-value headers in this metadata, including duplicates. */
-  @Internal
-  public int headerCount() {
+  int headerCount() {
     return size;
   }
 
-  /** Returns true if a value is defined for the given key. */
+  /**
+   * Returns true if a value is defined for the given key.
+   *
+   * <p>This is done by linear search, so if it is followed by {@link #get} or {@link #getAll},
+   * prefer calling them directly and checking the return value against {@code null}.
+   */
   public boolean containsKey(Key<?> key) {
     for (int i = 0; i < size; i++) {
       if (bytesEqual(key.asciiName(), name(i))) {
@@ -268,10 +243,11 @@ public final class Metadata {
   }
 
   /**
-   * Returns all the metadata entries named 'name', in the order they were received, parsed as T or
+   * Returns all the metadata entries named 'name', in the order they were received, parsed as T, or
    * null if there are none. The iterator is not guaranteed to be "live." It may or may not be
    * accurate if Metadata is mutated.
    */
+  @Nullable
   public <T> Iterable<T> getAll(final Key<T> key) {
     for (int i = 0; i < size; i++) {
       if (bytesEqual(key.asciiName(), name(i))) {
@@ -371,7 +347,7 @@ public final class Metadata {
     List<T> ret = null;
     for (; readIdx < size; readIdx++) {
       if (bytesEqual(key.asciiName(), name(readIdx))) {
-        ret = ret != null ? ret : new LinkedList<T>();
+        ret = ret != null ? ret : new ArrayList<T>();
         ret.add(key.parseBytes(value(readIdx)));
         continue;
       }
@@ -436,20 +412,31 @@ public final class Metadata {
     return serialized;
   }
 
-  /** Perform a simple merge of two sets of metadata. */
+  /**
+   * Perform a simple merge of two sets of metadata.
+   *
+   * <p>This is a purely additive operation, because a single key can be associated with multiple
+   * values.
+   */
   public void merge(Metadata other) {
     if (other.isEmpty()) {
       return;
     }
     int remaining = cap() - len();
     if (isEmpty() || remaining < other.len()) {
-      expand(len() + other.len() - remaining);
+      expand(len() + other.len());
     }
     System.arraycopy(other.namesAndValues, 0, namesAndValues, len(), other.len());
     size += other.size;
   }
 
-  /** Merge values for the given set of keys into this set of metadata. */
+  /**
+   * Merge values from the given set of keys into this set of metadata. If a key is present in keys,
+   * then all of the associated values will be copied over.
+   *
+   * @param other The source of the new key values.
+   * @param keys The subset of matching key we want to copy, if they exist in the source.
+   */
   public void merge(Metadata other, Set<Key<?>> keys) {
     Preconditions.checkNotNull(other, "other");
     // Use ByteBuffer for equals and hashCode.
@@ -468,6 +455,7 @@ public final class Metadata {
     }
   }
 
+  @SuppressWarnings("BetaApi") // BaseEncoding is stable in Guava 20.0
   @Override
   public String toString() {
     StringBuilder sb = new StringBuilder("Metadata(");
@@ -511,7 +499,7 @@ public final class Metadata {
   }
 
   /**
-   * Marshaller for metadata values that are serialized into ASCII strings that contain only
+   * Marshaller for metadata values that are serialized into ASCII strings. The strings contain only
    * following characters:
    *
    * <ul>
@@ -557,7 +545,7 @@ public final class Metadata {
    * <li>special characters: {@code -_.}
    * </ul>
    *
-   * <p>This is a a strict subset of the HTTP field-name rules. Applications may not send or receive
+   * <p>This is a strict subset of the HTTP field-name rules. Applications may not send or receive
    * metadata with invalid key names. However, the gRPC library may preserve any metadata received
    * even if it does not conform to the above limitations. Additionally, if metadata contains non
    * conforming field names, they will still be sent. In this way, unknown metadata fields are
@@ -567,10 +555,14 @@ public final class Metadata {
    * <p>Note this has to be the subset of valid HTTP/2 token characters as defined in RFC7230
    * Section 3.2.6 and RFC5234 Section B.1
    *
+   * <p>Note that a key is immutable but it may not be deeply immutable, because the key depends on
+   * its marshaller, and the marshaller can be mutable though not recommended.
+   *
    * @see <a href="https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md">Wire Spec</a>
    * @see <a href="https://tools.ietf.org/html/rfc7230#section-3.2.6">RFC7230</a>
    * @see <a href="https://tools.ietf.org/html/rfc5234#appendix-B.1">RFC5234</a>
    */
+  @Immutable
   public abstract static class Key<T> {
 
     /** Valid characters for field names as defined in RFC7230 and RFC5234. */
@@ -593,11 +585,15 @@ public final class Metadata {
      *     <b>not</b> end with {@link #BINARY_HEADER_SUFFIX}
      */
     public static <T> Key<T> of(String name, AsciiMarshaller<T> marshaller) {
-      return new AsciiKey<T>(name, marshaller);
+      return of(name, false, marshaller);
     }
 
-    static <T> Key<T> of(String name, TrustedAsciiMarshaller<T> marshaller) {
-      return new TrustedAsciiKey<T>(name, marshaller);
+    static <T> Key<T> of(String name, boolean pseudo, AsciiMarshaller<T> marshaller) {
+      return new AsciiKey<T>(name, pseudo, marshaller);
+    }
+
+    static <T> Key<T> of(String name, boolean pseudo, TrustedAsciiMarshaller<T> marshaller) {
+      return new TrustedAsciiKey<T>(name, pseudo, marshaller);
     }
 
     private final String originalName;
@@ -620,13 +616,12 @@ public final class Metadata {
       return valid;
     }
 
-    private static String validateName(String n) {
+    private static String validateName(String n, boolean pseudo) {
       checkNotNull(n, "name");
-      checkArgument(n.length() != 0, "token must have at least 1 tchar");
+      checkArgument(!n.isEmpty(), "token must have at least 1 tchar");
       for (int i = 0; i < n.length(); i++) {
         char tChar = n.charAt(i);
-        // TODO(notcarl): remove this hack once pseudo headers are properly handled
-        if (tChar == ':' && i == 0) {
+        if (pseudo && tChar == ':' && i == 0) {
           continue;
         }
 
@@ -636,10 +631,9 @@ public final class Metadata {
       return n;
     }
 
-    private Key(String name) {
+    private Key(String name, boolean pseudo) {
       this.originalName = checkNotNull(name, "name");
-      // Intern the result for faster string identity checking.
-      this.name = validateName(this.originalName.toLowerCase(Locale.ROOT)).intern();
+      this.name = validateName(this.originalName.toLowerCase(Locale.ROOT), pseudo);
       this.nameBytes = this.name.getBytes(US_ASCII);
     }
 
@@ -670,6 +664,9 @@ public final class Metadata {
       return nameBytes;
     }
 
+    /**
+     * Returns true if the two objects are both Keys, and their names match (case insensitive).
+     */
     @Override
     public boolean equals(Object o) {
       if (this == o) {
@@ -714,7 +711,7 @@ public final class Metadata {
 
     /** Keys have a name and a binary marshaller used for serialization. */
     private BinaryKey(String name, BinaryMarshaller<T> marshaller) {
-      super(name);
+      super(name, false /* not pseudo */);
       checkArgument(
           name.endsWith(BINARY_HEADER_SUFFIX),
           "Binary header is named %s. It must end with %s",
@@ -739,8 +736,8 @@ public final class Metadata {
     private final AsciiMarshaller<T> marshaller;
 
     /** Keys have a name and an ASCII marshaller used for serialization. */
-    private AsciiKey(String name, AsciiMarshaller<T> marshaller) {
-      super(name);
+    private AsciiKey(String name, boolean pseudo, AsciiMarshaller<T> marshaller) {
+      super(name, pseudo);
       Preconditions.checkArgument(
           !name.endsWith(BINARY_HEADER_SUFFIX),
           "ASCII header is named %s.  Only binary headers may end with %s",
@@ -764,8 +761,8 @@ public final class Metadata {
     private final TrustedAsciiMarshaller<T> marshaller;
 
     /** Keys have a name and an ASCII marshaller used for serialization. */
-    private TrustedAsciiKey(String name, TrustedAsciiMarshaller<T> marshaller) {
-      super(name);
+    private TrustedAsciiKey(String name, boolean pseudo, TrustedAsciiMarshaller<T> marshaller) {
+      super(name, pseudo);
       Preconditions.checkArgument(
           !name.endsWith(BINARY_HEADER_SUFFIX),
           "ASCII header is named %s.  Only binary headers may end with %s",
@@ -789,6 +786,7 @@ public final class Metadata {
    * A specialized plain ASCII marshaller. Both input and output are assumed to be valid header
    * ASCII.
    */
+  @Immutable
   interface TrustedAsciiMarshaller<T> {
     /**
      * Serialize a metadata value to a ASCII string that contains only the characters listed in the

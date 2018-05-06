@@ -1,32 +1,17 @@
 /*
- * Copyright 2016, Google Inc. All rights reserved.
+ * Copyright 2016 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.auth;
@@ -44,6 +29,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.auth.Credentials;
+import com.google.auth.RequestMetadataCallback;
 import com.google.auth.oauth2.AccessToken;
 import com.google.auth.oauth2.OAuth2Credentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
@@ -51,15 +37,25 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.LinkedListMultimap;
 import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Multimaps;
-
 import io.grpc.Attributes;
-import io.grpc.CallCredentials.MetadataApplier;
 import io.grpc.CallCredentials;
+import io.grpc.CallCredentials.MetadataApplier;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.SecurityLevel;
 import io.grpc.Status;
-
+import io.grpc.testing.TestMethodDescriptors;
+import java.io.IOException;
+import java.net.URI;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Executor;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -70,16 +66,6 @@ import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
-
-import java.io.IOException;
-import java.net.URI;
-import java.security.KeyPair;
-import java.security.KeyPairGenerator;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Date;
-import java.util.List;
-import java.util.concurrent.Executor;
 
 /**
  * Tests for {@link GoogleAuthLibraryCallCredentials}.
@@ -93,19 +79,16 @@ public class GoogleAuthLibraryCallCredentialsTest {
       "Extra-Authorization-bin", Metadata.BINARY_BYTE_MARSHALLER);
 
   @Mock
-  private MethodDescriptor.Marshaller<String> stringMarshaller;
-
-  @Mock
-  private MethodDescriptor.Marshaller<Integer> intMarshaller;
-
-  @Mock
   private Credentials credentials;
 
   @Mock
   private MetadataApplier applier;
 
-  @Mock
-  private Executor executor;
+  private Executor executor = new Executor() {
+    @Override public void execute(Runnable r) {
+      pendingRunnables.add(r);
+    }
+  };
 
   @Captor
   private ArgumentCaptor<Metadata> headersCaptor;
@@ -113,8 +96,13 @@ public class GoogleAuthLibraryCallCredentialsTest {
   @Captor
   private ArgumentCaptor<Status> statusCaptor;
 
-  private MethodDescriptor<String, Integer> method;
-  private URI expectedUri;
+  private MethodDescriptor<Void, Void> method = MethodDescriptor.<Void, Void>newBuilder()
+      .setType(MethodDescriptor.MethodType.UNKNOWN)
+      .setFullMethodName("a.service/method")
+      .setRequestMarshaller(TestMethodDescriptors.voidMarshaller())
+      .setResponseMarshaller(TestMethodDescriptors.voidMarshaller())
+      .build();
+  private URI expectedUri = URI.create("https://testauthority/a.service");
 
   private final String authority = "testauthority";
   private final Attributes attrs = Attributes.newBuilder()
@@ -127,17 +115,32 @@ public class GoogleAuthLibraryCallCredentialsTest {
   @Before
   public void setUp() throws Exception {
     MockitoAnnotations.initMocks(this);
-    method = MethodDescriptor.create(
-        MethodDescriptor.MethodType.UNKNOWN, "a.service/method", stringMarshaller, intMarshaller);
-    expectedUri = new URI("https://testauthority/a.service");
     doAnswer(new Answer<Void>() {
-        @Override
-        public Void answer(InvocationOnMock invocation) {
-          Runnable r = (Runnable) invocation.getArguments()[0];
-          pendingRunnables.add(r);
+      @Override
+      public Void answer(InvocationOnMock invocation) {
+        Credentials mock = (Credentials) invocation.getMock();
+        URI uri = (URI) invocation.getArguments()[0];
+        RequestMetadataCallback callback = (RequestMetadataCallback) invocation.getArguments()[2];
+        Map<String, List<String>> metadata;
+        try {
+          // Default to calling the blocking method, since it is easier to mock
+          metadata = mock.getRequestMetadata(uri);
+        } catch (Exception ex) {
+          callback.onFailure(ex);
           return null;
         }
-      }).when(executor).execute(any(Runnable.class));
+        callback.onSuccess(metadata);
+        return null;
+      }
+    }).when(credentials).getRequestMetadata(
+        any(URI.class),
+        any(Executor.class),
+        any(RequestMetadataCallback.class));
+  }
+
+  @After
+  public void tearDown() {
+    assertEquals(0, pendingRunnables.size());
   }
 
   @Test
@@ -152,7 +155,6 @@ public class GoogleAuthLibraryCallCredentialsTest {
     GoogleAuthLibraryCallCredentials callCredentials =
         new GoogleAuthLibraryCallCredentials(credentials);
     callCredentials.applyRequestMetadata(method, attrs, executor, applier);
-    assertEquals(1, runPendingRunnables());
 
     verify(credentials).getRequestMetadata(eq(expectedUri));
     verify(applier).apply(headersCaptor.capture());
@@ -175,7 +177,6 @@ public class GoogleAuthLibraryCallCredentialsTest {
     GoogleAuthLibraryCallCredentials callCredentials =
         new GoogleAuthLibraryCallCredentials(credentials);
     callCredentials.applyRequestMetadata(method, attrs, executor, applier);
-    assertEquals(1, runPendingRunnables());
 
     verify(credentials).getRequestMetadata(eq(expectedUri));
     verify(applier).fail(statusCaptor.capture());
@@ -185,14 +186,29 @@ public class GoogleAuthLibraryCallCredentialsTest {
   }
 
   @Test
-  public void credentialsThrows() throws Exception {
-    IOException exception = new IOException("Broken");
+  public void credentialsFailsWithIoException() throws Exception {
+    Exception exception = new IOException("Broken");
     when(credentials.getRequestMetadata(eq(expectedUri))).thenThrow(exception);
 
     GoogleAuthLibraryCallCredentials callCredentials =
         new GoogleAuthLibraryCallCredentials(credentials);
     callCredentials.applyRequestMetadata(method, attrs, executor, applier);
-    assertEquals(1, runPendingRunnables());
+
+    verify(credentials).getRequestMetadata(eq(expectedUri));
+    verify(applier).fail(statusCaptor.capture());
+    Status status = statusCaptor.getValue();
+    assertEquals(Status.Code.UNAVAILABLE, status.getCode());
+    assertEquals(exception, status.getCause());
+  }
+
+  @Test
+  public void credentialsFailsWithRuntimeException() throws Exception {
+    Exception exception = new RuntimeException("Broken");
+    when(credentials.getRequestMetadata(eq(expectedUri))).thenThrow(exception);
+
+    GoogleAuthLibraryCallCredentials callCredentials =
+        new GoogleAuthLibraryCallCredentials(credentials);
+    callCredentials.applyRequestMetadata(method, attrs, executor, applier);
 
     verify(credentials).getRequestMetadata(eq(expectedUri));
     verify(applier).fail(statusCaptor.capture());
@@ -215,19 +231,18 @@ public class GoogleAuthLibraryCallCredentialsTest {
       callCredentials.applyRequestMetadata(method, attrs, executor, applier);
     }
 
-    assertEquals(3, runPendingRunnables());
     verify(credentials, times(3)).getRequestMetadata(eq(expectedUri));
 
     verify(applier, times(3)).apply(headersCaptor.capture());
     List<Metadata> headerList = headersCaptor.getAllValues();
     assertEquals(3, headerList.size());
 
-    assertEquals(0, headerList.get(0).headerCount());
+    assertEquals(0, headerList.get(0).keys().size());
 
     Iterable<String> authorization = headerList.get(1).getAll(AUTHORIZATION);
     assertArrayEquals(new String[]{"token1"}, Iterables.toArray(authorization, String.class));
 
-    assertEquals(0, headerList.get(2).headerCount());
+    assertEquals(0, headerList.get(2).keys().size());
   }
 
   @Test
@@ -262,7 +277,6 @@ public class GoogleAuthLibraryCallCredentialsTest {
             .set(CallCredentials.ATTR_AUTHORITY, "example.com:443")
             .build(),
         executor, applier);
-    assertEquals(1, runPendingRunnables());
     verify(credentials).getRequestMetadata(eq(new URI("https://example.com/a.service")));
 
     callCredentials.applyRequestMetadata(method,
@@ -271,13 +285,13 @@ public class GoogleAuthLibraryCallCredentialsTest {
             .set(CallCredentials.ATTR_AUTHORITY, "example.com:123")
             .build(),
         executor, applier);
-    assertEquals(1, runPendingRunnables());
     verify(credentials).getRequestMetadata(eq(new URI("https://example.com:123/a.service")));
   }
 
   @Test
   public void serviceAccountToJwt() throws Exception {
     KeyPair pair = KeyPairGenerator.getInstance("RSA").generateKeyPair();
+    @SuppressWarnings("deprecation")
     ServiceAccountCredentials credentials = new ServiceAccountCredentials(
         null, "email@example.com", pair.getPrivate(), null, null) {
       @Override
@@ -289,7 +303,7 @@ public class GoogleAuthLibraryCallCredentialsTest {
     GoogleAuthLibraryCallCredentials callCredentials =
         new GoogleAuthLibraryCallCredentials(credentials);
     callCredentials.applyRequestMetadata(method, attrs, executor, applier);
-    assertEquals(1, runPendingRunnables());
+    assertEquals(0, runPendingRunnables());
 
     verify(applier).apply(headersCaptor.capture());
     Metadata headers = headersCaptor.getValue();
@@ -304,6 +318,7 @@ public class GoogleAuthLibraryCallCredentialsTest {
   public void serviceAccountWithScopeNotToJwt() throws Exception {
     final AccessToken token = new AccessToken("allyourbase", new Date(Long.MAX_VALUE));
     KeyPair pair = KeyPairGenerator.getInstance("RSA").generateKeyPair();
+    @SuppressWarnings("deprecation")
     ServiceAccountCredentials credentials = new ServiceAccountCredentials(
         null, "email@example.com", pair.getPrivate(), null, Arrays.asList("somescope")) {
       @Override
@@ -334,7 +349,6 @@ public class GoogleAuthLibraryCallCredentialsTest {
     GoogleAuthLibraryCallCredentials callCredentials =
         new GoogleAuthLibraryCallCredentials(credentials, null);
     callCredentials.applyRequestMetadata(method, attrs, executor, applier);
-    assertEquals(1, runPendingRunnables());
 
     verify(credentials).getRequestMetadata(eq(expectedUri));
     verify(applier).apply(headersCaptor.capture());

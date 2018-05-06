@@ -1,98 +1,97 @@
 /*
- * Copyright 2016, Google Inc. All rights reserved.
+ * Copyright 2016 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
-import io.grpc.ConnectivityState;
+import static com.google.common.base.Preconditions.checkNotNull;
 
+import io.grpc.ConnectivityState;
+import io.grpc.ManagedChannel;
 import java.util.ArrayList;
 import java.util.concurrent.Executor;
-
+import javax.annotation.Nonnull;
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
- * Book-keeps the connectivity state and callbacks.
+ * Manages connectivity states of the channel. Used for {@link ManagedChannel#getState} to read the
+ * current state of the channel, for {@link ManagedChannel#notifyWhenStateChanged} to add
+ * listeners to state change events, and for {@link io.grpc.LoadBalancer.Helper#updateBalancingState
+ * LoadBalancer.Helper#updateBalancingState} to update the state and run the {@link #gotoState}s.
  */
 @NotThreadSafe
-class ConnectivityStateManager {
-  private ArrayList<StateCallbackEntry> callbacks;
+final class ConnectivityStateManager {
+  private ArrayList<Listener> listeners = new ArrayList<Listener>();
 
-  private ConnectivityState state;
+  private volatile ConnectivityState state = ConnectivityState.IDLE;
 
-  ConnectivityStateManager(ConnectivityState initialState) {
-    state = initialState;
-  }
-
+  /**
+   * Adds a listener for state change event.
+   *
+   * <p>The {@code executor} must be one that can run RPC call listeners.
+   */
   void notifyWhenStateChanged(Runnable callback, Executor executor, ConnectivityState source) {
-    StateCallbackEntry callbackEntry = new StateCallbackEntry(callback, executor);
+    checkNotNull(callback, "callback");
+    checkNotNull(executor, "executor");
+    checkNotNull(source, "source");
+
+    Listener stateChangeListener = new Listener(callback, executor);
     if (state != source) {
-      callbackEntry.runInExecutor();
+      stateChangeListener.runInExecutor();
     } else {
-      if (callbacks == null) {
-        callbacks = new ArrayList<StateCallbackEntry>();
-      }
-      callbacks.add(callbackEntry);
+      listeners.add(stateChangeListener);
     }
   }
 
-  // TODO(zhangkun83): return a runnable in order to escape transport set lock, in case direct
-  // executor is used?
-  void gotoState(ConnectivityState newState) {
-    if (state != newState) {
-      if (state == ConnectivityState.SHUTDOWN) {
-        throw new IllegalStateException("Cannot transition out of SHUTDOWN to " + newState);
-      }
+  /**
+   * Connectivity state is changed to the specified value. Will trigger some notifications that have
+   * been registered earlier by {@link ManagedChannel#notifyWhenStateChanged}.
+   */
+  void gotoState(@Nonnull ConnectivityState newState) {
+    checkNotNull(newState, "newState");
+    if (state != newState && state != ConnectivityState.SHUTDOWN) {
       state = newState;
-      if (callbacks == null) {
+      if (listeners.isEmpty()) {
         return;
       }
       // Swap out callback list before calling them, because a callback may register new callbacks,
       // if run in direct executor, can cause ConcurrentModificationException.
-      ArrayList<StateCallbackEntry> savedCallbacks = callbacks;
-      callbacks = null;
-      for (StateCallbackEntry callback : savedCallbacks) {
-        callback.runInExecutor();
+      ArrayList<Listener> savedListeners = listeners;
+      listeners = new ArrayList<Listener>();
+      for (Listener listener : savedListeners) {
+        listener.runInExecutor();
       }
     }
   }
 
+  /**
+   * Gets the current connectivity state of the channel. This method is threadsafe.
+   */
   ConnectivityState getState() {
-    return state;
+    ConnectivityState stateCopy = state;
+    if (stateCopy == null) {
+      throw new UnsupportedOperationException("Channel state API is not implemented");
+    }
+    return stateCopy;
   }
 
-  private static class StateCallbackEntry {
+  private static final class Listener {
     final Runnable callback;
     final Executor executor;
 
-    StateCallbackEntry(Runnable callback, Executor executor) {
+    Listener(Runnable callback, Executor executor) {
       this.callback = callback;
       this.executor = executor;
     }

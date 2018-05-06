@@ -1,32 +1,17 @@
 /*
- * Copyright 2016, Google Inc. All rights reserved.
+ * Copyright 2016 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
@@ -42,20 +27,17 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Mockito.mock;
 
 import io.grpc.internal.FakeClock;
-import io.grpc.testing.NoopServerCall;
-
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
-
+import io.grpc.internal.NoopServerCall;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
 
 /**
  * Tests for {@link Contexts}.
@@ -65,8 +47,6 @@ public class ContextsTest {
   private static Context.Key<Object> contextKey = Context.key("key");
   /** For use in comparing context by reference. */
   private Context uniqueContext = Context.ROOT.withValue(contextKey, new Object());
-  @SuppressWarnings("unchecked")
-  private MethodDescriptor<Object, Object> method = mock(MethodDescriptor.class);
   @SuppressWarnings("unchecked")
   private ServerCall<Object, Object> call = new NoopServerCall<Object, Object>();
   private Metadata headers = new Metadata();
@@ -108,7 +88,6 @@ public class ContextsTest {
           @Override
           public ServerCall.Listener<Object> startCall(
               ServerCall<Object, Object> call, Metadata headers) {
-            assertSame(ContextsTest.this.method, method);
             assertSame(ContextsTest.this.call, call);
             assertSame(ContextsTest.this.headers, headers);
             assertSame(uniqueContext, Context.current());
@@ -236,9 +215,9 @@ public class ContextsTest {
   public void statusFromCancelled_TimeoutExceptionShouldMapToDeadlineExceeded() {
     FakeClock fakeClock = new FakeClock();
     Context.CancellableContext cancellableContext = Context.current()
-        .withDeadlineAfter(100, TimeUnit.MILLISECONDS, fakeClock.getScheduledExecutorService());
+        .withDeadlineAfter(100, TimeUnit.NANOSECONDS, fakeClock.getScheduledExecutorService());
     fakeClock.forwardTime(System.nanoTime(), TimeUnit.NANOSECONDS);
-    fakeClock.forwardMillis(100);
+    fakeClock.forwardNanos(100);
 
     assertTrue(cancellableContext.isCancelled());
     assertThat(cancellableContext.cancellationCause(), instanceOf(TimeoutException.class));

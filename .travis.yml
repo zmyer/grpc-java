@@ -5,7 +5,7 @@ language: java
 env:
   global:
     - GRADLE_OPTS=-Xmx512m
-    - PROTOBUF_VERSION=3.1.0
+    - PROTOBUF_VERSION=3.5.1
     - LDFLAGS=-L/tmp/protobuf/lib
     - CXXFLAGS=-I/tmp/protobuf/include
     - LD_LIBRARY_PATH=/tmp/protobuf/lib
@@ -17,11 +17,11 @@ before_install:
     ln -s /tmp/gradle-wrapper $HOME/.gradle/wrapper
     # Work around https://github.com/travis-ci/travis-ci/issues/2317
   - if \[ "$TRAVIS_OS_NAME" = linux \]; then jdk_switcher use oraclejdk8; fi
-  - buildscripts/make_dependencies.sh # build protoc into /tmp/protobuf-${PROTOBUF_VERSION}
-  - ln -s "/tmp/protobuf-${PROTOBUF_VERSION}/$(uname -s)-$(uname -p)" /tmp/protobuf
+  - buildscripts/make_dependencies.sh # build protoc into /tmp/protobuf
   - mkdir -p $HOME/.gradle
   - echo "checkstyle.ignoreFailures=false" >> $HOME/.gradle/gradle.properties
   - echo "failOnWarnings=true" >> $HOME/.gradle/gradle.properties
+  - echo "errorProne=true" >> $HOME/.gradle/gradle.properties
 
 install:
   - ./gradlew assemble generateTestProto install
@@ -35,12 +35,16 @@ script:
   - ./gradlew check :grpc-all:jacocoTestReport
 
 after_success:
-  - if \[ "$TRAVIS_OS_NAME" = linux \]; then ./gradlew :grpc-all:coveralls; fi
+    # Upload to coveralls once, instead of for each job in the matrix
+  - if \[\[ "$TRAVIS_JOB_NUMBER" == *.1 \]\]; then ./gradlew :grpc-all:coveralls; fi
   - bash <(curl -s https://codecov.io/bash)
 
 os:
   - linux
-  - osx
+
+jdk:
+  - oraclejdk8
+  - oraclejdk9
 
 notifications:
   email: false

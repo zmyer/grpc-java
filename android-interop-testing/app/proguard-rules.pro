@@ -9,8 +9,15 @@
 
 # Add any project specific keep options here:
 
+-dontwarn android.test.**
 -dontwarn com.google.common.**
+-dontwarn javax.naming.**
 -dontwarn okio.**
+-dontwarn org.junit.**
 -dontwarn org.mockito.**
 -dontwarn sun.reflect.**
--dontwarn android.test.**
+# Ignores: can't find referenced class javax.lang.model.element.Modifier
+-dontwarn com.google.errorprone.annotations.**
+
+# Ignores: can't find referenced method from grpc-testing's compileOnly dependency on Truth
+-dontwarn io.grpc.testing.DeadlineSubject

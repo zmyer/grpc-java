@@ -1,38 +1,25 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Matchers.same;
@@ -44,15 +31,17 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import io.grpc.Attributes;
+import io.grpc.Attributes.Key;
 import io.grpc.Codec;
+import io.grpc.DecompressorRegistry;
 import io.grpc.Metadata;
 import io.grpc.Status;
-import io.grpc.internal.NoopClientStream;
-
+import io.grpc.internal.testing.SingleMessageProducer;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import org.junit.Before;
-import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
@@ -61,17 +50,12 @@ import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
-import java.io.ByteArrayInputStream;
-import java.io.InputStream;
-
 /**
  * Tests for {@link DelayedStream}.  Most of the state checking is enforced by
  * {@link ClientCallImpl} so we don't check it here.
  */
 @RunWith(JUnit4.class)
 public class DelayedStreamTest {
-  @Rule public final ExpectedException thrown = ExpectedException.none();
-
   @Mock private ClientStreamListener listener;
   @Mock private ClientStream realStream;
   @Captor private ArgumentCaptor<ClientStreamListener> listenerCaptor;
@@ -105,16 +89,11 @@ public class DelayedStreamTest {
     stream.start(mock(ClientStreamListener.class));
   }
 
-  @Test(expected = IllegalStateException.class)
-  public void setDecompressor_beforeSetStream() {
-    stream.start(listener);
-    stream.setDecompressor(Codec.Identity.NONE);
-  }
-
   @Test
   public void setStream_sendsAllMessages() {
     stream.start(listener);
     stream.setCompressor(Codec.Identity.NONE);
+    stream.setDecompressorRegistry(DecompressorRegistry.getDefaultInstance());
 
     stream.setMessageCompression(true);
     InputStream message = new ByteArrayInputStream(new byte[]{'a'});
@@ -123,10 +102,9 @@ public class DelayedStreamTest {
     stream.writeMessage(message);
 
     stream.setStream(realStream);
-    stream.setDecompressor(Codec.Identity.NONE);
 
     verify(realStream).setCompressor(Codec.Identity.NONE);
-    verify(realStream).setDecompressor(Codec.Identity.NONE);
+    verify(realStream).setDecompressorRegistry(DecompressorRegistry.getDefaultInstance());
 
     verify(realStream).setMessageCompression(true);
     verify(realStream).setMessageCompression(false);
@@ -199,6 +177,25 @@ public class DelayedStreamTest {
     when(realStream.isReady()).thenReturn(true);
     assertTrue(stream.isReady());
     verify(realStream, times(2)).isReady();
+  }
+
+  @Test
+  public void setStream_getAttributes() {
+    Attributes attributes =
+        Attributes.newBuilder().set(Key.<String>of("fakeKey"), "fakeValue").build();
+    when(realStream.getAttributes()).thenReturn(attributes);
+
+    stream.start(listener);
+
+    try {
+      stream.getAttributes(); // expect to throw IllegalStateException, otherwise fail()
+      fail();
+    } catch (IllegalStateException expected) {
+      // ignore
+    }
+
+    stream.setStream(realStream);
+    assertEquals(attributes, stream.getAttributes());
   }
 
   @Test
@@ -302,6 +299,8 @@ public class DelayedStreamTest {
     final Metadata headers = new Metadata();
     final InputStream message1 = mock(InputStream.class);
     final InputStream message2 = mock(InputStream.class);
+    final SingleMessageProducer producer1 = new SingleMessageProducer(message1);
+    final SingleMessageProducer producer2 = new SingleMessageProducer(message2);
     final Metadata trailers = new Metadata();
     final Status status = Status.UNKNOWN.withDescription("unique status");
 
@@ -312,9 +311,9 @@ public class DelayedStreamTest {
       public void start(ClientStreamListener passedListener) {
         passedListener.onReady();
         passedListener.headersRead(headers);
-        passedListener.messageRead(message1);
+        passedListener.messagesAvailable(producer1);
         passedListener.onReady();
-        passedListener.messageRead(message2);
+        passedListener.messagesAvailable(producer2);
         passedListener.closed(status, trailers);
 
         verifyNoMoreInteractions(listener);
@@ -322,9 +321,9 @@ public class DelayedStreamTest {
     });
     inOrder.verify(listener).onReady();
     inOrder.verify(listener).headersRead(headers);
-    inOrder.verify(listener).messageRead(message1);
+    inOrder.verify(listener).messagesAvailable(producer1);
     inOrder.verify(listener).onReady();
-    inOrder.verify(listener).messageRead(message2);
+    inOrder.verify(listener).messagesAvailable(producer2);
     inOrder.verify(listener).closed(status, trailers);
   }
 
@@ -332,6 +331,7 @@ public class DelayedStreamTest {
   public void listener_noQueued() {
     final Metadata headers = new Metadata();
     final InputStream message = mock(InputStream.class);
+    final SingleMessageProducer producer = new SingleMessageProducer(message);
     final Metadata trailers = new Metadata();
     final Status status = Status.UNKNOWN.withDescription("unique status");
 
@@ -343,10 +343,9 @@ public class DelayedStreamTest {
     verify(listener).onReady();
     delayedListener.headersRead(headers);
     verify(listener).headersRead(headers);
-    delayedListener.messageRead(message);
-    verify(listener).messageRead(message);
+    delayedListener.messagesAvailable(producer);
+    verify(listener).messagesAvailable(producer);
     delayedListener.closed(status, trailers);
     verify(listener).closed(status, trailers);
   }
-
 }

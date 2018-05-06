@@ -1,32 +1,17 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
@@ -34,15 +19,16 @@ package io.grpc;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
- * A Channel provides an abstraction over the transport layer that is designed to be consumed
- * by stub implementations. Channel and its associated types {@link ClientCall} and
- * {@link ClientCall.Listener} exchange parsed request and response objects whereas the
- * transport layer only works with serialized data.
+ * A virtual connection to a conceptual endpoint, to perform RPCs. A channel is free to have zero or
+ * many actual connections to the endpoint based on configuration, load, etc. A channel is also free
+ * to determine which actual endpoints to use and may change it every RPC, permitting client-side
+ * load balancing. Applications are generally expected to use stubs instead of calling this class
+ * directly.
  *
  * <p>Applications can add common cross-cutting behaviors to stubs by decorating Channel
  * implementations using {@link ClientInterceptor}. It is expected that most application
  * code will not use this class directly but rather work with stubs that have been bound to a
- * Channel that was decorated during application initialization,
+ * Channel that was decorated during application initialization.
  */
 @ThreadSafe
 public abstract class Channel {
@@ -55,7 +41,7 @@ public abstract class Channel {
    * @param methodDescriptor describes the name and parameter types of the operation to call.
    * @param callOptions runtime options to be applied to this call.
    * @return a {@link ClientCall} bound to the specified method.
-   *
+   * @since 1.0.0
    */
   public abstract <RequestT, ResponseT> ClientCall<RequestT, ResponseT> newCall(
       MethodDescriptor<RequestT, ResponseT> methodDescriptor, CallOptions callOptions);
@@ -63,6 +49,8 @@ public abstract class Channel {
   /**
    * The authority of the destination this channel connects to. Typically this is in the format
    * {@code host:port}.
+   *
+   * @since 1.0.0
    */
   public abstract String authority();
 }

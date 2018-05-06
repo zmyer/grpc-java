@@ -1,32 +1,17 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
@@ -35,18 +20,23 @@ import static io.grpc.ConnectivityState.CONNECTING;
 import static io.grpc.ConnectivityState.IDLE;
 import static io.grpc.ConnectivityState.READY;
 import static io.grpc.ConnectivityState.SHUTDOWN;
+import static io.grpc.ConnectivityState.TRANSIENT_FAILURE;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Stopwatch;
 import com.google.common.base.Supplier;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.SettableFuture;
 import com.google.errorprone.annotations.ForOverride;
-
+import io.grpc.CallOptions;
 import io.grpc.ConnectivityState;
 import io.grpc.ConnectivityStateInfo;
 import io.grpc.EquivalentAddressGroup;
+import io.grpc.Metadata;
+import io.grpc.MethodDescriptor;
 import io.grpc.Status;
-
+import io.grpc.internal.Channelz.ChannelStats;
 import java.net.SocketAddress;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -56,28 +46,26 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
  * Transports for a single {@link SocketAddress}.
- *
- * <p>This is the next version of {@link TransportSet} in development.
  */
 @ThreadSafe
-final class InternalSubchannel implements WithLogId {
+final class InternalSubchannel implements Instrumented<ChannelStats> {
   private static final Logger log = Logger.getLogger(InternalSubchannel.class.getName());
 
   private final LogId logId = LogId.allocate(getClass().getName());
-  private final EquivalentAddressGroup addressGroup;
   private final String authority;
   private final String userAgent;
   private final BackoffPolicy.Provider backoffPolicyProvider;
   private final Callback callback;
   private final ClientTransportFactory transportFactory;
   private final ScheduledExecutorService scheduledExecutor;
+  private final Channelz channelz;
+  private final CallTracer callsTracer;
 
   // File-specific convention: methods without GuardedBy("lock") MUST NOT be called under the lock.
   private final Object lock = new Object();
@@ -93,10 +81,18 @@ final class InternalSubchannel implements WithLogId {
   private final ChannelExecutor channelExecutor;
 
   @GuardedBy("lock")
-  private int nextAddressIndex;
+  private EquivalentAddressGroup addressGroup;
 
   /**
-   * The policy to control back off between reconnects. Non-{@code null} when last connect failed.
+   * The index of the address corresponding to pendingTransport/activeTransport, or 0 if both are
+   * null.
+   */
+  @GuardedBy("lock")
+  private int addressIndex;
+
+  /**
+   * The policy to control back off between reconnects. Non-{@code null} when a reconnect task is
+   * scheduled.
    */
   @GuardedBy("lock")
   private BackoffPolicy reconnectPolicy;
@@ -111,6 +107,9 @@ final class InternalSubchannel implements WithLogId {
   @Nullable
   private ScheduledFuture<?> reconnectTask;
 
+  @GuardedBy("lock")
+  private boolean reconnectCanceled;
+
   /**
    * All transports that are not terminated. At the very least the value of {@link #activeTransport}
    * will be present, but previously used transports that still have streams or are stopping may
@@ -121,8 +120,8 @@ final class InternalSubchannel implements WithLogId {
       new ArrayList<ConnectionClientTransport>();
 
   // Must only be used from channelExecutor
-  private final InUseStateAggregator2<ConnectionClientTransport> inUseStateAggregator =
-      new InUseStateAggregator2<ConnectionClientTransport>() {
+  private final InUseStateAggregator<ConnectionClientTransport> inUseStateAggregator =
+      new InUseStateAggregator<ConnectionClientTransport>() {
         @Override
         void handleInUse() {
           callback.onInUse(InternalSubchannel.this);
@@ -151,10 +150,14 @@ final class InternalSubchannel implements WithLogId {
   @GuardedBy("lock")
   private ConnectivityStateInfo state = ConnectivityStateInfo.forNonError(IDLE);
 
+  @GuardedBy("lock")
+  private Status shutdownReason;
+
   InternalSubchannel(EquivalentAddressGroup addressGroup, String authority, String userAgent,
       BackoffPolicy.Provider backoffPolicyProvider,
       ClientTransportFactory transportFactory, ScheduledExecutorService scheduledExecutor,
-      Supplier<Stopwatch> stopwatchSupplier, ChannelExecutor channelExecutor, Callback callback) {
+      Supplier<Stopwatch> stopwatchSupplier, ChannelExecutor channelExecutor, Callback callback,
+      Channelz channelz, CallTracer callsTracer) {
     this.addressGroup = Preconditions.checkNotNull(addressGroup, "addressGroup");
     this.authority = authority;
     this.userAgent = userAgent;
@@ -164,6 +167,8 @@ final class InternalSubchannel implements WithLogId {
     this.connectingTimer = stopwatchSupplier.get();
     this.channelExecutor = channelExecutor;
     this.callback = callback;
+    this.channelz = channelz;
+    this.callsTracer = callsTracer;
   }
 
   /**
@@ -199,17 +204,23 @@ final class InternalSubchannel implements WithLogId {
   private void startNewTransport() {
     Preconditions.checkState(reconnectTask == null, "Should have no reconnectTask scheduled");
 
-    if (nextAddressIndex == 0) {
+    if (addressIndex == 0) {
       connectingTimer.reset().start();
     }
     List<SocketAddress> addrs = addressGroup.getAddresses();
-    final SocketAddress address = addrs.get(nextAddressIndex++);
-    if (nextAddressIndex >= addrs.size()) {
-      nextAddressIndex = 0;
+    SocketAddress address = addrs.get(addressIndex);
+
+    ProxyParameters proxy = null;
+    if (address instanceof PairSocketAddress) {
+      proxy = ((PairSocketAddress) address).getAttributes().get(ProxyDetector.PROXY_PARAMS_KEY);
+      address = ((PairSocketAddress) address).getAddress();
     }
 
     ConnectionClientTransport transport =
-        transportFactory.newClientTransport(address, authority, userAgent);
+        new CallTracingTransport(
+            transportFactory.newClientTransport(address, authority, userAgent, proxy),
+            callsTracer);
+    channelz.addClientSocket(transport);
     if (log.isLoggable(Level.FINE)) {
       log.log(Level.FINE, "[{0}] Created {1} for {2}",
           new Object[] {logId, transport.getLogId(), address});
@@ -235,9 +246,9 @@ final class InternalSubchannel implements WithLogId {
         try {
           synchronized (lock) {
             reconnectTask = null;
-            if (state.getState() == SHUTDOWN) {
-              // Even though shutdown() will cancel this task, the task may have already started
-              // when it's being cancelled.
+            if (reconnectCanceled) {
+              // Even though cancelReconnectTask() will cancel this task, the task may have already
+              // started when it's being canceled.
               return;
             }
             gotoNonErrorState(CONNECTING);
@@ -255,16 +266,36 @@ final class InternalSubchannel implements WithLogId {
     if (reconnectPolicy == null) {
       reconnectPolicy = backoffPolicyProvider.get();
     }
-    long delayMillis =
-        reconnectPolicy.nextBackoffMillis() - connectingTimer.elapsed(TimeUnit.MILLISECONDS);
+    long delayNanos =
+        reconnectPolicy.nextBackoffNanos() - connectingTimer.elapsed(TimeUnit.NANOSECONDS);
     if (log.isLoggable(Level.FINE)) {
-      log.log(Level.FINE, "[{0}] Scheduling backoff for {1} ms", new Object[]{logId, delayMillis});
+      log.log(Level.FINE, "[{0}] Scheduling backoff for {1} ns", new Object[]{logId, delayNanos});
     }
     Preconditions.checkState(reconnectTask == null, "previous reconnectTask is not done");
+    reconnectCanceled = false;
     reconnectTask = scheduledExecutor.schedule(
         new LogExceptionRunnable(new EndOfCurrentBackoff()),
-        delayMillis,
-        TimeUnit.MILLISECONDS);
+        delayNanos,
+        TimeUnit.NANOSECONDS);
+  }
+
+  /**
+   * Immediately attempt to reconnect if the current state is TRANSIENT_FAILURE. Otherwise this
+   * method has no effect.
+   */
+  void resetConnectBackoff() {
+    try {
+      synchronized (lock) {
+        if (state.getState() != TRANSIENT_FAILURE) {
+          return;
+        }
+        cancelReconnectTask();
+        gotoNonErrorState(CONNECTING);
+        startNewTransport();
+      }
+    } finally {
+      channelExecutor.drain();
+    }
   }
 
   @GuardedBy("lock")
@@ -287,7 +318,45 @@ final class InternalSubchannel implements WithLogId {
     }
   }
 
-  public void shutdown() {
+  /** Replaces the existing addresses, avoiding unnecessary reconnects. */
+  public void updateAddresses(EquivalentAddressGroup newAddressGroup) {
+    ManagedClientTransport savedTransport = null;
+    try {
+      synchronized (lock) {
+        EquivalentAddressGroup oldAddressGroup = addressGroup;
+        addressGroup = newAddressGroup;
+        if (state.getState() == READY || state.getState() == CONNECTING) {
+          SocketAddress address = oldAddressGroup.getAddresses().get(addressIndex);
+          int newIndex = newAddressGroup.getAddresses().indexOf(address);
+          if (newIndex != -1) {
+            addressIndex = newIndex;
+          } else {
+            // Forced to drop the connection
+            if (state.getState() == READY) {
+              savedTransport = activeTransport;
+              activeTransport = null;
+              addressIndex = 0;
+              gotoNonErrorState(IDLE);
+            } else {
+              savedTransport = pendingTransport;
+              pendingTransport = null;
+              addressIndex = 0;
+              startNewTransport();
+            }
+          }
+        }
+      }
+    } finally {
+      channelExecutor.drain();
+    }
+    if (savedTransport != null) {
+      savedTransport.shutdown(
+          Status.UNAVAILABLE.withDescription(
+              "InternalSubchannel closed transport due to address change"));
+    }
+  }
+
+  public void shutdown(Status reason) {
     ManagedClientTransport savedActiveTransport;
     ConnectionClientTransport savedPendingTransport;
     try {
@@ -295,11 +364,13 @@ final class InternalSubchannel implements WithLogId {
         if (state.getState() == SHUTDOWN) {
           return;
         }
+        shutdownReason = reason;
         gotoNonErrorState(SHUTDOWN);
         savedActiveTransport = activeTransport;
         savedPendingTransport = pendingTransport;
         activeTransport = null;
         pendingTransport = null;
+        addressIndex = 0;
         if (transports.isEmpty()) {
           handleTermination();
           if (log.isLoggable(Level.FINE)) {
@@ -312,10 +383,10 @@ final class InternalSubchannel implements WithLogId {
       channelExecutor.drain();
     }
     if (savedActiveTransport != null) {
-      savedActiveTransport.shutdown();
+      savedActiveTransport.shutdown(reason);
     }
     if (savedPendingTransport != null) {
-      savedPendingTransport.shutdown();
+      savedPendingTransport.shutdown(reason);
     }
   }
 
@@ -340,7 +411,7 @@ final class InternalSubchannel implements WithLogId {
   }
 
   void shutdownNow(Status reason) {
-    shutdown();
+    shutdown(reason);
     Collection<ManagedClientTransport> transportsCopy;
     try {
       synchronized (lock) {
@@ -355,20 +426,42 @@ final class InternalSubchannel implements WithLogId {
   }
 
   EquivalentAddressGroup getAddressGroup() {
-    return addressGroup;
+    try {
+      synchronized (lock) {
+        return addressGroup;
+      }
+    } finally {
+      channelExecutor.drain();
+    }
   }
 
   @GuardedBy("lock")
   private void cancelReconnectTask() {
     if (reconnectTask != null) {
       reconnectTask.cancel(false);
+      reconnectCanceled = true;
       reconnectTask = null;
+      reconnectPolicy = null;
     }
   }
 
   @Override
   public LogId getLogId() {
     return logId;
+  }
+
+
+  @Override
+  public ListenableFuture<ChannelStats> getStats() {
+    SettableFuture<ChannelStats> ret = SettableFuture.create();
+    ChannelStats.Builder builder = new ChannelStats.Builder();
+    synchronized (lock) {
+      builder.setTarget(addressGroup.toString()).setState(getState());
+      builder.setSockets(new ArrayList<WithLogId>(transports));
+    }
+    callsTracer.updateBuilder(builder);
+    ret.set(builder.build());
+    return ret;
   }
 
   @VisibleForTesting
@@ -398,13 +491,12 @@ final class InternalSubchannel implements WithLogId {
         log.log(Level.FINE, "[{0}] {1} for {2} is ready",
             new Object[] {logId, transport.getLogId(), address});
       }
-      ConnectivityState savedState;
+      Status savedShutdownReason;
       try {
         synchronized (lock) {
-          savedState = state.getState();
+          savedShutdownReason = shutdownReason;
           reconnectPolicy = null;
-          nextAddressIndex = 0;
-          if (savedState == SHUTDOWN) {
+          if (savedShutdownReason != null) {
             // activeTransport should have already been set to null by shutdown(). We keep it null.
             Preconditions.checkState(activeTransport == null,
                 "Unexpected non-null activeTransport");
@@ -417,8 +509,8 @@ final class InternalSubchannel implements WithLogId {
       } finally {
         channelExecutor.drain();
       }
-      if (savedState == SHUTDOWN) {
-        transport.shutdown();
+      if (savedShutdownReason != null) {
+        transport.shutdown(savedShutdownReason);
       }
     }
 
@@ -441,11 +533,15 @@ final class InternalSubchannel implements WithLogId {
           if (activeTransport == transport) {
             gotoNonErrorState(IDLE);
             activeTransport = null;
+            addressIndex = 0;
           } else if (pendingTransport == transport) {
             Preconditions.checkState(state.getState() == CONNECTING,
                 "Expected state is CONNECTING, actual state is %s", state.getState());
+            addressIndex++;
             // Continue reconnect if there are still addresses to try.
-            if (nextAddressIndex == 0) {
+            if (addressIndex >= addressGroup.getAddresses().size()) {
+              pendingTransport = null;
+              addressIndex = 0;
               // Initiate backoff
               // Transition to TRANSIENT_FAILURE
               scheduleBackoff(s);
@@ -465,6 +561,7 @@ final class InternalSubchannel implements WithLogId {
         log.log(Level.FINE, "[{0}] {1} for {2} is terminated",
             new Object[] {logId, transport.getLogId(), address});
       }
+      channelz.removeClientSocket(transport);
       handleTransportInUseState(transport, false);
       try {
         synchronized (lock) {
@@ -513,5 +610,57 @@ final class InternalSubchannel implements WithLogId {
      */
     @ForOverride
     void onNotInUse(InternalSubchannel is) { }
+  }
+
+  @VisibleForTesting
+  static final class CallTracingTransport extends ForwardingConnectionClientTransport {
+    private final ConnectionClientTransport delegate;
+    private final CallTracer callTracer;
+
+    private CallTracingTransport(ConnectionClientTransport delegate, CallTracer callTracer) {
+      this.delegate = delegate;
+      this.callTracer = callTracer;
+    }
+
+    @Override
+    protected ConnectionClientTransport delegate() {
+      return delegate;
+    }
+
+    @Override
+    public ClientStream newStream(
+        MethodDescriptor<?, ?> method, Metadata headers, CallOptions callOptions) {
+      final ClientStream streamDelegate = super.newStream(method, headers, callOptions);
+      return new ForwardingClientStream() {
+        @Override
+        protected ClientStream delegate() {
+          return streamDelegate;
+        }
+
+        @Override
+        public void start(final ClientStreamListener listener) {
+          callTracer.reportCallStarted();
+          super.start(new ForwardingClientStreamListener() {
+            @Override
+            protected ClientStreamListener delegate() {
+              return listener;
+            }
+
+            @Override
+            public void closed(Status status, Metadata trailers) {
+              callTracer.reportCallEnded(status.isOk());
+              super.closed(status, trailers);
+            }
+
+            @Override
+            public void closed(
+                Status status, RpcProgress rpcProgress, Metadata trailers) {
+              callTracer.reportCallEnded(status.isOk());
+              super.closed(status, rpcProgress, trailers);
+            }
+          });
+        }
+      };
+    }
   }
 }

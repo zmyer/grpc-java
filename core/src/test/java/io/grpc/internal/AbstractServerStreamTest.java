@@ -1,51 +1,45 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.eq;
-import static org.mockito.Matchers.isA;
 import static org.mockito.Matchers.same;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
+import com.google.common.util.concurrent.SettableFuture;
+import io.grpc.InternalStatus;
 import io.grpc.Metadata;
 import io.grpc.Status;
+import io.grpc.internal.AbstractServerStream.TransportState;
 import io.grpc.internal.MessageFramerTest.ByteWritableBuffer;
-
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.LinkedList;
+import java.util.Queue;
+import java.util.concurrent.TimeUnit;
+import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -53,14 +47,12 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
 
-import java.io.ByteArrayInputStream;
-import java.io.InputStream;
-
 /**
  * Tests for {@link AbstractServerStream}.
  */
 @RunWith(JUnit4.class)
 public class AbstractServerStreamTest {
+  private static final int TIMEOUT_MS = 1000;
   private static final int MAX_MESSAGE_SIZE = 100;
 
   @Rule public final ExpectedException thrown = ExpectedException.none();
@@ -73,26 +65,107 @@ public class AbstractServerStreamTest {
   };
 
   private AbstractServerStream.Sink sink = mock(AbstractServerStream.Sink.class);
-  private AbstractServerStreamBase stream = new AbstractServerStreamBase(
-      allocator, sink, new AbstractServerStreamBase.TransportState(MAX_MESSAGE_SIZE));
+  private TransportTracer transportTracer;
+  private AbstractServerStreamBase stream;
   private final ArgumentCaptor<Metadata> metadataCaptor = ArgumentCaptor.forClass(Metadata.class);
+
+  @Before
+  public void setUp() {
+    transportTracer = new TransportTracer();
+    stream = new AbstractServerStreamBase(
+        allocator,
+        sink,
+        new AbstractServerStreamBase.TransportState(MAX_MESSAGE_SIZE, transportTracer));
+  }
 
   /**
    * Test for issue https://github.com/grpc/grpc-java/issues/1795
    */
   @Test
   public void frameShouldBeIgnoredAfterDeframerClosed() {
-    ServerStreamListener streamListener = mock(ServerStreamListener.class);
+    final Queue<InputStream> streamListenerMessageQueue = new LinkedList<InputStream>();
+    stream.transportState().setListener(new ServerStreamListenerBase() {
+      @Override
+      public void messagesAvailable(MessageProducer producer) {
+        InputStream message;
+        while ((message = producer.next()) != null) {
+          streamListenerMessageQueue.add(message);
+        }
+      }
+    });
     ReadableBuffer buffer = mock(ReadableBuffer.class);
 
-    stream.transportState().setListener(streamListener);
     // Close the deframer
+    stream.close(Status.OK, new Metadata());
     stream.transportState().complete();
     // Frame received after deframer closed, should be ignored and not trigger an exception
     stream.transportState().inboundDataReceived(buffer, true);
 
     verify(buffer).close();
-    verify(streamListener, times(0)).messageRead(any(InputStream.class));
+    assertNull("no message expected", streamListenerMessageQueue.poll());
+  }
+
+  @Test
+  public void queuedBytesInDeframerShouldNotBlockComplete() throws Exception {
+    final SettableFuture<Status> closedFuture = SettableFuture.create();
+    stream
+        .transportState()
+        .setListener(
+            new ServerStreamListenerBase() {
+              @Override
+              public void closed(Status status) {
+                closedFuture.set(status);
+              }
+            });
+
+    // Queue bytes in deframer
+    stream.transportState().inboundDataReceived(ReadableBuffers.wrap(new byte[] {1}), false);
+    stream.close(Status.OK, new Metadata());
+    stream.transportState().complete();
+
+    assertEquals(Status.OK, closedFuture.get(TIMEOUT_MS, TimeUnit.MILLISECONDS));
+  }
+
+  @Test
+  public void queuedBytesInDeframerShouldNotBlockTransportReportStatus() throws Exception {
+    final SettableFuture<Status> closedFuture = SettableFuture.create();
+    stream
+        .transportState()
+        .setListener(
+            new ServerStreamListenerBase() {
+              @Override
+              public void closed(Status status) {
+                closedFuture.set(status);
+              }
+            });
+
+    // Queue bytes in deframer
+    stream.transportState().inboundDataReceived(ReadableBuffers.wrap(new byte[] {1}), false);
+    stream.transportState().transportReportStatus(Status.CANCELLED);
+
+    assertEquals(Status.CANCELLED, closedFuture.get(TIMEOUT_MS, TimeUnit.MILLISECONDS));
+  }
+
+  @Test
+  public void partialMessageAtEndOfStreamShouldFail() throws Exception {
+    final SettableFuture<Status> closedFuture = SettableFuture.create();
+    stream
+        .transportState()
+        .setListener(
+            new ServerStreamListenerBase() {
+              @Override
+              public void closed(Status status) {
+                closedFuture.set(status);
+              }
+            });
+
+    // Queue a partial message in the deframer
+    stream.transportState().inboundDataReceived(ReadableBuffers.wrap(new byte[] {1}), true);
+    stream.transportState().requestMessagesFromDeframer(1);
+
+    Status status = closedFuture.get(TIMEOUT_MS, TimeUnit.MILLISECONDS);
+    assertEquals(Status.INTERNAL.getCode(), status.getCode());
+    assertEquals("Encountered end-of-stream mid-frame", status.getDescription());
   }
 
   /**
@@ -102,26 +175,29 @@ public class AbstractServerStreamTest {
   public void completeWithoutClose() {
     stream.transportState().setListener(new ServerStreamListenerBase());
     // Test that it doesn't throw an exception
+    stream.close(Status.OK, new Metadata());
     stream.transportState().complete();
   }
 
   @Test
   public void setListener_setOnlyOnce() {
-    stream.transportState().setListener(new ServerStreamListenerBase());
+    TransportState state = stream.transportState();
+    state.setListener(new ServerStreamListenerBase());
     thrown.expect(IllegalStateException.class);
 
-    stream.transportState().setListener(new ServerStreamListenerBase());
+    state.setListener(new ServerStreamListenerBase());
   }
 
   @Test
   public void listenerReady_onlyOnce() {
     stream.transportState().setListener(new ServerStreamListenerBase());
     stream.transportState().onStreamAllocated();
+
+    TransportState state = stream.transportState();
+
     thrown.expect(IllegalStateException.class);
-
-    stream.transportState().onStreamAllocated();
+    state.onStreamAllocated();
   }
-
 
   @Test
   public void listenerReady_readyCalled() {
@@ -134,21 +210,34 @@ public class AbstractServerStreamTest {
 
   @Test
   public void setListener_failsOnNull() {
-    thrown.expect(NullPointerException.class);
+    TransportState state = stream.transportState();
 
-    stream.transportState().setListener(null);
+    thrown.expect(NullPointerException.class);
+    state.setListener(null);
   }
 
+  // TODO(ericgribkoff) This test is only valid if deframeInTransportThread=true, as otherwise the
+  // message is queued.
+  /*
   @Test
   public void messageRead_listenerCalled() {
-    final ServerStreamListener streamListener = mock(ServerStreamListener.class);
-    stream.transportState().setListener(streamListener);
+    final Queue<InputStream> streamListenerMessageQueue = new LinkedList<InputStream>();
+    stream.transportState().setListener(new ServerStreamListenerBase() {
+      @Override
+      public void messagesAvailable(MessageProducer producer) {
+        InputStream message;
+        while ((message = producer.next()) != null) {
+          streamListenerMessageQueue.add(message);
+        }
+      }
+    });
 
     // Normally called by a deframe event.
     stream.transportState().messageRead(new ByteArrayInputStream(new byte[]{}));
 
-    verify(streamListener).messageRead(isA(InputStream.class));
+    assertNotNull(streamListenerMessageQueue.poll());
   }
+  */
 
   @Test
   public void writeHeaders_failsOnNullHeaders() {
@@ -181,7 +270,8 @@ public class AbstractServerStreamTest {
 
     stream.writeMessage(new ByteArrayInputStream(new byte[]{}));
 
-    verify(sink, never()).writeFrame(any(WritableBuffer.class), any(Boolean.class));
+    verify(sink, never())
+        .writeFrame(any(WritableBuffer.class), any(Boolean.class), any(Integer.class));
   }
 
   @Test
@@ -191,7 +281,15 @@ public class AbstractServerStreamTest {
     stream.writeMessage(new ByteArrayInputStream(new byte[]{}));
     stream.flush();
 
-    verify(sink).writeFrame(any(WritableBuffer.class), eq(true));
+    verify(sink).writeFrame(any(WritableBuffer.class), eq(true), eq(1));
+  }
+
+  @Test
+  public void writeMessage_closesStream() throws Exception {
+    stream.writeHeaders(new Metadata());
+    InputStream input = mock(InputStream.class, delegatesTo(new ByteArrayInputStream(new byte[1])));
+    stream.writeMessage(input);
+    verify(input).close();
   }
 
   @Test
@@ -212,7 +310,7 @@ public class AbstractServerStreamTest {
   public void close_sendsTrailers() {
     Metadata trailers = new Metadata();
     stream.close(Status.INTERNAL, trailers);
-    verify(sink).writeTrailers(any(Metadata.class), eq(false));
+    verify(sink).writeTrailers(any(Metadata.class), eq(false), eq(Status.INTERNAL));
   }
 
   @Test
@@ -220,19 +318,30 @@ public class AbstractServerStreamTest {
     // stream actually mutates trailers, so we can't check that the fields here are the same as
     // the captured ones.
     Metadata trailers = new Metadata();
-    trailers.put(Status.CODE_KEY, Status.OK);
-    trailers.put(Status.MESSAGE_KEY, "Everything's super.");
+    trailers.put(InternalStatus.CODE_KEY, Status.OK);
+    trailers.put(InternalStatus.MESSAGE_KEY, "Everything's super.");
 
-    stream.close(Status.INTERNAL.withDescription("bad"), trailers);
+    Status closeStatus = Status.INTERNAL.withDescription("bad");
+    stream.close(closeStatus, trailers);
 
-    verify(sink).writeTrailers(metadataCaptor.capture(), eq(false));
-    assertEquals(Status.Code.INTERNAL, metadataCaptor.getValue().get(Status.CODE_KEY).getCode());
-    assertEquals("bad", metadataCaptor.getValue().get(Status.MESSAGE_KEY));
+    verify(sink).writeTrailers(metadataCaptor.capture(), eq(false), eq(closeStatus));
+    assertEquals(
+        Status.Code.INTERNAL, metadataCaptor.getValue().get(InternalStatus.CODE_KEY).getCode());
+    assertEquals("bad", metadataCaptor.getValue().get(InternalStatus.MESSAGE_KEY));
   }
 
   private static class ServerStreamListenerBase implements ServerStreamListener {
     @Override
-    public void messageRead(InputStream message) {}
+    public void messagesAvailable(MessageProducer producer) {
+      InputStream message;
+      while ((message = producer.next()) != null) {
+        try {
+          message.close();
+        } catch (IOException e) {
+          // Continue to close other messages
+        }
+      }
+    }
 
     @Override
     public void onReady() {}
@@ -266,15 +375,23 @@ public class AbstractServerStreamTest {
     }
 
     static class TransportState extends AbstractServerStream.TransportState {
-      protected TransportState(int maxMessageSize) {
-        super(maxMessageSize, StatsTraceContext.NOOP);
+      protected TransportState(int maxMessageSize, TransportTracer transportTracer) {
+        super(maxMessageSize, StatsTraceContext.NOOP, transportTracer);
       }
 
       @Override
-      protected void deframeFailed(Throwable cause) {}
+      public void deframeFailed(Throwable cause) {
+        Status status = Status.fromThrowable(cause);
+        transportReportStatus(status);
+      }
 
       @Override
       public void bytesRead(int processedBytes) {}
+
+      @Override
+      public void runOnTransportThread(Runnable r) {
+        r.run();
+      }
     }
   }
 }

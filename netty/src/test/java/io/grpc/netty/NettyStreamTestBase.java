@@ -1,39 +1,26 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.netty;
 
+import static com.google.common.base.Charsets.US_ASCII;
 import static io.grpc.netty.NettyTestUtil.messageFrame;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyLong;
@@ -54,19 +41,17 @@ import io.netty.channel.ChannelPromise;
 import io.netty.channel.DefaultChannelPromise;
 import io.netty.channel.EventLoop;
 import io.netty.handler.codec.http2.Http2Stream;
-
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Queue;
+import java.util.concurrent.TimeUnit;
 import org.junit.Before;
 import org.junit.Test;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
-
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Base class for Netty stream unit tests.
@@ -84,12 +69,16 @@ public abstract class NettyStreamTestBase<T extends Stream> {
   @Mock
   private ChannelPipeline pipeline;
 
+  // ChannelFuture has too many methods to implement; we stubbed all necessary methods of Future.
+  @SuppressWarnings("DoNotMock")
   @Mock
   protected ChannelFuture future;
 
   @Mock
   protected EventLoop eventLoop;
 
+  // ChannelPromise has too many methods to implement; we stubbed all necessary methods of Future.
+  @SuppressWarnings("DoNotMock")
   @Mock
   protected ChannelPromise promise;
 
@@ -141,11 +130,12 @@ public abstract class NettyStreamTestBase<T extends Stream> {
       ((NettyClientStream) stream).transportState()
           .transportDataReceived(messageFrame(MESSAGE), false);
     }
-    ArgumentCaptor<InputStream> captor = ArgumentCaptor.forClass(InputStream.class);
-    verify(listener()).messageRead(captor.capture());
+
+    InputStream message = listenerMessageQueue().poll();
 
     // Verify that inbound flow control window update has been disabled for the stream.
-    assertEquals(MESSAGE, NettyTestUtil.toString(captor.getValue()));
+    assertEquals(MESSAGE, NettyTestUtil.toString(message));
+    assertNull("no additional message expected", listenerMessageQueue().poll());
   }
 
   @Test
@@ -201,7 +191,7 @@ public abstract class NettyStreamTestBase<T extends Stream> {
   }
 
   protected byte[] smallMessage() {
-    return MESSAGE.getBytes();
+    return MESSAGE.getBytes(US_ASCII);
   }
 
   protected byte[] largeMessage() {
@@ -219,6 +209,8 @@ public abstract class NettyStreamTestBase<T extends Stream> {
   protected abstract void sendHeadersIfServer();
 
   protected abstract StreamListener listener();
+
+  protected abstract Queue<InputStream> listenerMessageQueue();
 
   protected abstract void closeStream();
 

@@ -2,7 +2,10 @@ description = "gRPC: GRPCLB LoadBalancer plugin"
 
 buildscript {
     repositories {
-        mavenCentral()
+        maven {
+            // The google mirror is less flaky than mavenCentral()
+            url "https://maven-central.storage-download.googleapis.com/repos/central/data/"
+        }
     }
     dependencies {
         classpath libraries.protobuf_plugin
@@ -14,13 +17,9 @@ dependencies {
             project(':grpc-protobuf'),
             project(':grpc-stub'),
             libraries.protobuf
+    compileOnly libraries.javax_annotation
+    testCompile libraries.truth,
+                project(':grpc-core').sourceSets.test.output
 }
 
 configureProtoCompilation()
-
-idea {
-    module {
-        sourceDirs += file("${projectDir}/src/generated/main/grpc");
-        sourceDirs += file("${projectDir}/src/generated/main/java");
-    }
-}

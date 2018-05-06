@@ -1,54 +1,38 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.protobuf.lite;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.ExtensionRegistryLite;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.MessageLite;
 import com.google.protobuf.Parser;
-
 import io.grpc.ExperimentalApi;
 import io.grpc.KnownLength;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor.Marshaller;
 import io.grpc.MethodDescriptor.PrototypeMarshaller;
 import io.grpc.Status;
-import io.grpc.internal.GrpcUtil;
-
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.ref.Reference;
 import java.lang.ref.WeakReference;
 
@@ -61,6 +45,14 @@ public class ProtoLiteUtils {
   private static volatile ExtensionRegistryLite globalRegistry =
       ExtensionRegistryLite.getEmptyRegistry();
 
+  private static final int BUF_SIZE = 8192;
+
+  /**
+   * The same value as {@link io.grpc.internal.GrpcUtil#DEFAULT_MAX_MESSAGE_SIZE}.
+   */
+  @VisibleForTesting
+  static final int DEFAULT_MAX_MESSAGE_SIZE = 4 * 1024 * 1024;
+
   /**
    * Sets the global registry for proto marshalling shared across all servers and clients.
    *
@@ -72,7 +64,7 @@ public class ProtoLiteUtils {
    * {@link #setExtensionRegistry}, but not to modify the underlying object.
    *
    * <p>If you need custom parsing behavior for protos, you will need to make your own
-   * {@code MethodDescriptor.Marhsaller} for the time being.
+   * {@code MethodDescriptor.Marshaller} for the time being.
    *
    */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1787")
@@ -138,19 +130,26 @@ public class ProtoLiteUtils {
         try {
           if (stream instanceof KnownLength) {
             int size = stream.available();
-            if (size > 0 && size <= GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE) {
+            if (size > 0 && size <= DEFAULT_MAX_MESSAGE_SIZE) {
               // buf should not be used after this method has returned.
               byte[] buf = bufs.get().get();
               if (buf == null || buf.length < size) {
                 buf = new byte[size];
                 bufs.set(new WeakReference<byte[]>(buf));
               }
-              int chunkSize;
-              int position = 0;
-              while ((chunkSize = stream.read(buf, position, size - position)) != -1) {
-                position += chunkSize;
+
+              int remaining = size;
+              while (remaining > 0) {
+                int position = size - remaining;
+                int count = stream.read(buf, position, remaining);
+                if (count == -1) {
+                  break;
+                }
+                remaining -= count;
               }
-              if (size != position) {
+
+              if (remaining != 0) {
+                int position = size - remaining;
                 throw new RuntimeException("size inaccurate: " + size + " != " + position);
               }
               cis = CodedInputStream.newInstance(buf, 0, size);
@@ -210,6 +209,24 @@ public class ProtoLiteUtils {
         }
       }
     };
+  }
+
+  /** Copies the data from input stream to output stream. */
+  static long copy(InputStream from, OutputStream to) throws IOException {
+    // Copied from guava com.google.common.io.ByteStreams because its API is unstable (beta)
+    checkNotNull(from);
+    checkNotNull(to);
+    byte[] buf = new byte[BUF_SIZE];
+    long total = 0;
+    while (true) {
+      int r = from.read(buf);
+      if (r == -1) {
+        break;
+      }
+      to.write(buf, 0, r);
+      total += r;
+    }
+    return total;
   }
 
   private ProtoLiteUtils() {

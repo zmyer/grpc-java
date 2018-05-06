@@ -1,14 +1,17 @@
 gRPC-Java - An RPC library and framework
 ========================================
 
-gRPC-Java works with JDK 6. TLS usage typically requires using Java 8, or Play
-Services Dynamic Security Provider on Android. Please see the [Security
-Readme](SECURITY.md).
+gRPC-Java works with JDK 6. gRPC-Java clients are supported on Android API
+levels 14 and up (Ice Cream Sandwich and later). Deploying gRPC servers on an
+Android device is not supported.
+
+TLS usage typically requires using Java 8, or Play Services Dynamic Security
+Provider on Android. Please see the [Security Readme](SECURITY.md).
 
 <table>
   <tr>
     <td><b>Homepage:</b></td>
-    <td><a href="http://www.grpc.io/">www.grpc.io</a></td>
+    <td><a href="https://grpc.io/">grpc.io</a></td>
   </tr>
   <tr>
     <td><b>Mailing List:</b></td>
@@ -28,37 +31,37 @@ Download [the JARs][]. Or for Maven with non-Android, add to your `pom.xml`:
 <dependency>
   <groupId>io.grpc</groupId>
   <artifactId>grpc-netty</artifactId>
-  <version>1.0.1</version>
+  <version>1.11.0</version>
 </dependency>
 <dependency>
   <groupId>io.grpc</groupId>
   <artifactId>grpc-protobuf</artifactId>
-  <version>1.0.1</version>
+  <version>1.11.0</version>
 </dependency>
 <dependency>
   <groupId>io.grpc</groupId>
   <artifactId>grpc-stub</artifactId>
-  <version>1.0.1</version>
+  <version>1.11.0</version>
 </dependency>
 ```
 
 Or for Gradle with non-Android, add to your dependencies:
 ```gradle
-compile 'io.grpc:grpc-netty:1.0.1'
-compile 'io.grpc:grpc-protobuf:1.0.1'
-compile 'io.grpc:grpc-stub:1.0.1'
+compile 'io.grpc:grpc-netty:1.11.0'
+compile 'io.grpc:grpc-protobuf:1.11.0'
+compile 'io.grpc:grpc-stub:1.11.0'
 ```
 
 For Android client, use `grpc-okhttp` instead of `grpc-netty` and
 `grpc-protobuf-lite` or `grpc-protobuf-nano` instead of `grpc-protobuf`:
 ```gradle
-compile 'io.grpc:grpc-okhttp:1.0.1'
-compile 'io.grpc:grpc-protobuf-lite:1.0.1'
-compile 'io.grpc:grpc-stub:1.0.1'
+compile 'io.grpc:grpc-okhttp:1.11.0'
+compile 'io.grpc:grpc-protobuf-lite:1.11.0'
+compile 'io.grpc:grpc-stub:1.11.0'
 ```
 
 [the JARs]:
-http://search.maven.org/#search%7Cga%7C1%7Cg%3A%22io.grpc%22%20AND%20v%3A%221.0.1%22
+http://search.maven.org/#search%7Cga%7C1%7Cg%3A%22io.grpc%22%20AND%20v%3A%221.11.0%22
 
 Development snapshots are available in [Sonatypes's snapshot
 repository](https://oss.sonatype.org/content/repositories/snapshots/).
@@ -76,18 +79,18 @@ For protobuf-based codegen integrated with the Maven build system, you can use
     <extension>
       <groupId>kr.motd.maven</groupId>
       <artifactId>os-maven-plugin</artifactId>
-      <version>1.4.1.Final</version>
+      <version>1.5.0.Final</version>
     </extension>
   </extensions>
   <plugins>
     <plugin>
       <groupId>org.xolstice.maven.plugins</groupId>
       <artifactId>protobuf-maven-plugin</artifactId>
-      <version>0.5.0</version>
+      <version>0.5.1</version>
       <configuration>
-        <protocArtifact>com.google.protobuf:protoc:3.1.0:exe:${os.detected.classifier}</protocArtifact>
+        <protocArtifact>com.google.protobuf:protoc:3.5.1-1:exe:${os.detected.classifier}</protocArtifact>
         <pluginId>grpc-java</pluginId>
-        <pluginArtifact>io.grpc:protoc-gen-grpc-java:1.0.1:exe:${os.detected.classifier}</pluginArtifact>
+        <pluginArtifact>io.grpc:protoc-gen-grpc-java:1.11.0:exe:${os.detected.classifier}</pluginArtifact>
       </configuration>
       <executions>
         <execution>
@@ -117,17 +120,17 @@ buildscript {
   dependencies {
     // ASSUMES GRADLE 2.12 OR HIGHER. Use plugin version 0.7.5 with earlier
     // gradle versions
-    classpath 'com.google.protobuf:protobuf-gradle-plugin:0.8.0'
+    classpath 'com.google.protobuf:protobuf-gradle-plugin:0.8.3'
   }
 }
 
 protobuf {
   protoc {
-    artifact = "com.google.protobuf:protoc:3.1.0"
+    artifact = "com.google.protobuf:protoc:3.5.1-1"
   }
   plugins {
     grpc {
-      artifact = 'io.grpc:protoc-gen-grpc-java:1.0.1'
+      artifact = 'io.grpc:protoc-gen-grpc-java:1.11.0'
     }
   }
   generateProtoTasks {
@@ -230,8 +233,23 @@ gRPC comes with three Transport implementations:
 * [Server Stream Listener](https://github.com/google/grpc-java/blob/master/core/src/main/java/io/grpc/internal/ServerStreamListener.java)
 
 
-### Examples
+Examples
+--------
 
-Tests showing how these layers are composed to execute calls using protobuf
-messages can be found here
-https://github.com/google/grpc-java/tree/master/interop-testing/src/main/java/io/grpc/testing/integration
+The [examples](https://github.com/grpc/grpc-java/tree/master/examples)
+and the
+[Android example](https://github.com/grpc/grpc-java/tree/master/examples/android) are standalone projects that
+showcase the usage of gRPC.
+
+Tools
+-----
+
+APIs annotated with `@Internal` are for internal use by the gRPC library and
+should not be used by gRPC users. APIs annotated with `@ExperimentalApi` are
+subject to change in future releases, and library code that other projects
+may depend on should not use these APIs. We recommend using the
+[grpc-java-api-checker](https://github.com/grpc/grpc-java-api-checker)
+(an [Error Prone](https://github.com/google/error-prone) plugin)
+to check for usages of `@ExperimentalApi` and `@Internal` in any library code
+that depends on gRPC. It may also be used to check for `@Internal` usage or 
+unintended `@ExperimentalApi` consumption in non-library code.

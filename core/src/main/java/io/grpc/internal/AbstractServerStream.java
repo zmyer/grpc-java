@@ -1,42 +1,27 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
 import com.google.common.base.Preconditions;
-
 import io.grpc.Attributes;
+import io.grpc.Decompressor;
+import io.grpc.InternalStatus;
 import io.grpc.Metadata;
 import io.grpc.Status;
-
 import javax.annotation.Nullable;
 
 /**
@@ -44,7 +29,7 @@ import javax.annotation.Nullable;
  * implement {@link #transportState()} and {@link #abstractServerStreamSink()}. Must only be called
  * from the sending application thread.
  */
-public abstract class AbstractServerStream extends AbstractStream2
+public abstract class AbstractServerStream extends AbstractStream
     implements ServerStream, MessageFramer.Sink {
   /**
    * A sink for outbound operations, separated from the stream simply to avoid name
@@ -63,16 +48,18 @@ public abstract class AbstractServerStream extends AbstractStream2
      *
      * @param frame a buffer containing the chunk of data to be sent.
      * @param flush {@code true} if more data may not be arriving soon
+     * @param numMessages the number of messages this frame represents
      */
-    void writeFrame(@Nullable WritableBuffer frame, boolean flush);
+    void writeFrame(@Nullable WritableBuffer frame, boolean flush, int numMessages);
 
     /**
      * Sends trailers to the remote end point. This call implies end of stream.
      *
      * @param trailers metadata to be sent to the end point
      * @param headersSent {@code true} if response headers have already been sent.
+     * @param status the status that the call ended with
      */
-    void writeTrailers(Metadata trailers, boolean headersSent);
+    void writeTrailers(Metadata trailers, boolean headersSent, Status status);
 
     /**
      * Requests up to the given number of messages from the call to be delivered. This should end up
@@ -94,8 +81,8 @@ public abstract class AbstractServerStream extends AbstractStream2
   private boolean outboundClosed;
   private boolean headersSent;
 
-  protected AbstractServerStream(WritableBufferAllocator bufferAllocator,
-      StatsTraceContext statsTraceCtx) {
+  protected AbstractServerStream(
+      WritableBufferAllocator bufferAllocator, StatsTraceContext statsTraceCtx) {
     this.statsTraceCtx = Preconditions.checkNotNull(statsTraceCtx, "statsTraceCtx");
     framer = new MessageFramer(this, bufferAllocator, statsTraceCtx);
   }
@@ -128,10 +115,11 @@ public abstract class AbstractServerStream extends AbstractStream2
   }
 
   @Override
-  public final void deliverFrame(WritableBuffer frame, boolean endOfStream, boolean flush) {
+  public final void deliverFrame(
+      WritableBuffer frame, boolean endOfStream, boolean flush, int numMessages) {
     // Since endOfStream is triggered by the sending of trailers, avoid flush here and just flush
     // after the trailers.
-    abstractServerStreamSink().writeFrame(frame, endOfStream ? false : flush);
+    abstractServerStreamSink().writeFrame(frame, endOfStream ? false : flush, numMessages);
   }
 
   @Override
@@ -142,16 +130,20 @@ public abstract class AbstractServerStream extends AbstractStream2
       outboundClosed = true;
       endOfMessages();
       addStatusToTrailers(trailers, status);
-      abstractServerStreamSink().writeTrailers(trailers, headersSent);
+      // Safe to set without synchronization because access is tightly controlled.
+      // closedStatus is only set from here, and is read from a place that has happen-after
+      // guarantees with respect to here.
+      transportState().setClosedStatus(status);
+      abstractServerStreamSink().writeTrailers(trailers, headersSent, status);
     }
   }
 
   private void addStatusToTrailers(Metadata trailers, Status status) {
-    trailers.discardAll(Status.CODE_KEY);
-    trailers.discardAll(Status.MESSAGE_KEY);
-    trailers.put(Status.CODE_KEY, status);
+    trailers.discardAll(InternalStatus.CODE_KEY);
+    trailers.discardAll(InternalStatus.MESSAGE_KEY);
+    trailers.put(InternalStatus.CODE_KEY, status);
     if (status.getDescription() != null) {
-      trailers.put(Status.MESSAGE_KEY, status.getDescription());
+      trailers.put(InternalStatus.MESSAGE_KEY, status.getDescription());
     }
   }
 
@@ -165,8 +157,18 @@ public abstract class AbstractServerStream extends AbstractStream2
     return super.isReady();
   }
 
-  @Override public Attributes attributes() {
+  @Override
+  public final void setDecompressor(Decompressor decompressor) {
+    transportState().setDecompressor(Preconditions.checkNotNull(decompressor, "decompressor"));
+  }
+
+  @Override public Attributes getAttributes() {
     return Attributes.EMPTY;
+  }
+
+  @Override
+  public String getAuthority() {
+    return null;
   }
 
   @Override
@@ -179,14 +181,33 @@ public abstract class AbstractServerStream extends AbstractStream2
     return statsTraceCtx;
   }
 
-  /** This should only called from the transport thread. */
-  protected abstract static class TransportState extends AbstractStream2.TransportState {
+  /**
+   * This should only called from the transport thread (except for private interactions with
+   * {@code AbstractServerStream}).
+   */
+  protected abstract static class TransportState extends AbstractStream.TransportState {
     /** Whether listener.closed() has been called. */
     private boolean listenerClosed;
     private ServerStreamListener listener;
+    private final StatsTraceContext statsTraceCtx;
 
-    protected TransportState(int maxMessageSize, StatsTraceContext statsTraceCtx) {
-      super(maxMessageSize, statsTraceCtx);
+    private boolean endOfStream = false;
+    private boolean deframerClosed = false;
+    private boolean immediateCloseRequested = false;
+    private Runnable deframerClosedTask;
+    /** The status that the application used to close this stream. */
+    @Nullable
+    private Status closedStatus;
+
+    protected TransportState(
+        int maxMessageSize,
+        StatsTraceContext statsTraceCtx,
+        TransportTracer transportTracer) {
+      super(
+          maxMessageSize,
+          statsTraceCtx,
+          Preconditions.checkNotNull(transportTracer, "transportTracer"));
+      this.statsTraceCtx = Preconditions.checkNotNull(statsTraceCtx, "statsTraceCtx");
     }
 
     /**
@@ -201,15 +222,29 @@ public abstract class AbstractServerStream extends AbstractStream2
     @Override
     public final void onStreamAllocated() {
       super.onStreamAllocated();
+      getTransportTracer().reportRemoteStreamStarted();
     }
 
     @Override
-    public void deliveryStalled() {}
-
-    @Override
-    public void endOfStream() {
-      closeDeframer();
-      listener().halfClosed();
+    public void deframerClosed(boolean hasPartialMessage) {
+      deframerClosed = true;
+      if (endOfStream) {
+        if (!immediateCloseRequested && hasPartialMessage) {
+          // We've received the entire stream and have data available but we don't have
+          // enough to read the next frame ... this is bad.
+          deframeFailed(
+              Status.INTERNAL
+                  .withDescription("Encountered end-of-stream mid-frame")
+                  .asRuntimeException());
+          deframerClosedTask = null;
+          return;
+        }
+        listener.halfClosed();
+      }
+      if (deframerClosedTask != null) {
+        deframerClosedTask.run();
+        deframerClosedTask = null;
+      }
     }
 
     @Override
@@ -226,8 +261,13 @@ public abstract class AbstractServerStream extends AbstractStream2
      * @param endOfStream {@code true} if no more data will be received on the stream.
      */
     public void inboundDataReceived(ReadableBuffer frame, boolean endOfStream) {
+      Preconditions.checkState(!this.endOfStream, "Past end of stream");
       // Deframe the message. If a failure occurs, deframeFailed will be called.
-      deframe(frame, endOfStream);
+      deframe(frame);
+      if (endOfStream) {
+        this.endOfStream = true;
+        closeDeframer(false);
+      }
     }
 
     /**
@@ -240,9 +280,22 @@ public abstract class AbstractServerStream extends AbstractStream2
      *
      * @param status the error status. Must not be {@link Status#OK}.
      */
-    public final void transportReportStatus(Status status) {
+    public final void transportReportStatus(final Status status) {
       Preconditions.checkArgument(!status.isOk(), "status must not be OK");
-      closeListener(status);
+      if (deframerClosed) {
+        deframerClosedTask = null;
+        closeListener(status);
+      } else {
+        deframerClosedTask =
+            new Runnable() {
+              @Override
+              public void run() {
+                closeListener(status);
+              }
+            };
+        immediateCloseRequested = true;
+        closeDeframer(true);
+      }
     }
 
     /**
@@ -251,19 +304,52 @@ public abstract class AbstractServerStream extends AbstractStream2
      * #transportReportStatus}.
      */
     public void complete() {
-      closeListener(Status.OK);
+      if (deframerClosed) {
+        deframerClosedTask = null;
+        closeListener(Status.OK);
+      } else {
+        deframerClosedTask =
+            new Runnable() {
+              @Override
+              public void run() {
+                closeListener(Status.OK);
+              }
+            };
+        immediateCloseRequested = true;
+        closeDeframer(true);
+      }
     }
 
     /**
-     * Closes the listener if not previously closed and frees resources.
+     * Closes the listener if not previously closed and frees resources. {@code newStatus} is a
+     * status generated by gRPC. It is <b>not</b> the status the stream closed with.
      */
     private void closeListener(Status newStatus) {
+      // If newStatus is OK, the application must have already called AbstractServerStream.close()
+      // and the status passed in there was the actual status of the RPC.
+      // If newStatus non-OK, then the RPC ended some other way and the server application did
+      // not initiate the termination.
+      Preconditions.checkState(!newStatus.isOk() || closedStatus != null);
       if (!listenerClosed) {
+        if (!newStatus.isOk()) {
+          statsTraceCtx.streamClosed(newStatus);
+          getTransportTracer().reportStreamClosed(false);
+        } else {
+          statsTraceCtx.streamClosed(closedStatus);
+          getTransportTracer().reportStreamClosed(closedStatus.isOk());
+        }
         listenerClosed = true;
         onStreamDeallocated();
-        closeDeframer();
         listener().closed(newStatus);
       }
+    }
+
+    /**
+     * Stores the {@code Status} that the application used to close this stream.
+     */
+    private void setClosedStatus(Status closeStatus) {
+      Preconditions.checkState(closedStatus == null, "closedStatus can only be set once");
+      closedStatus = closeStatus;
     }
   }
 }

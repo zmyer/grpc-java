@@ -1,7 +1,3 @@
-plugins {
-    id "be.insaneprogramming.gradle.animalsniffer" version "1.4.0"
-}
-
 description = "gRPC: OkHttp"
 dependencies {
     compile project(':grpc-core'),
@@ -12,22 +8,23 @@ dependencies {
     testCompile project(':grpc-core').sourceSets.test.output,
                 project(':grpc-testing'),
                 project(':grpc-netty')
+    signature "org.codehaus.mojo.signature:java16:1.1@signature"
 }
 
 project.sourceSets {
     main {
         java {
-            srcDir "${projectDir}/third_party/okhttp/java"
+            srcDir "${projectDir}/third_party/okhttp/main/java"
+        }
+    }
+    test {
+        java {
+            srcDir "${projectDir}/third_party/okhttp/test/java"
         }
     }
 }
 
 checkstyleMain.exclude '**/io/grpc/okhttp/internal/**'
-
-// Configure the animal sniffer plugin
-animalsniffer {
-    signature = "org.codehaus.mojo.signature:java16:+@signature"
-}
 
 javadoc.exclude 'io/grpc/okhttp/internal/**'
 javadoc.options.links 'http://square.github.io/okhttp/2.x/okhttp/'

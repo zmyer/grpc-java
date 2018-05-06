@@ -1,48 +1,38 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
 import static org.junit.Assert.assertEquals;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import io.grpc.ForwardingTestUtil;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.util.Collections;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
-
-import java.io.IOException;
 
 /**
  * Tests for {@link ForwardingReadableBuffer}.
@@ -60,6 +50,15 @@ public class ForwardingReadableBufferTest {
   }
 
   @Test
+  public void allMethodsForwarded() throws Exception {
+    ForwardingTestUtil.testMethodsForwarded(
+        ReadableBuffer.class,
+        delegate,
+        buffer,
+        Collections.<Method>emptyList());
+  }
+
+  @Test
   public void readableBytes() {
     when(delegate.readableBytes()).thenReturn(1);
 
@@ -71,20 +70,6 @@ public class ForwardingReadableBufferTest {
     when(delegate.readUnsignedByte()).thenReturn(1);
 
     assertEquals(1, buffer.readUnsignedByte());
-  }
-
-  @Test
-  public void readUnsignedMedium() {
-    when(delegate.readUnsignedMedium()).thenReturn(1);
-
-    assertEquals(1, buffer.readUnsignedMedium());
-  }
-
-  @Test
-  public void readUnsignedShort() {
-    when(delegate.readUnsignedShort()).thenReturn(1);
-
-    assertEquals(1, buffer.readUnsignedShort());
   }
 
   @Test
@@ -103,23 +88,26 @@ public class ForwardingReadableBufferTest {
 
   @Test
   public void readBytes() {
-    buffer.readBytes(null, 1, 2);
+    byte[] dest = new byte[1];
+    buffer.readBytes(dest, 1, 2);
 
-    verify(delegate).readBytes(null, 1, 2);
+    verify(delegate).readBytes(dest, 1, 2);
   }
 
   @Test
   public void readBytes_overload1() {
-    buffer.readBytes(null);
+    ByteBuffer dest = mock(ByteBuffer.class);
+    buffer.readBytes(dest);
 
-    verify(delegate).readBytes(null);
+    verify(delegate).readBytes(dest);
   }
 
   @Test
   public void readBytes_overload2() throws IOException {
-    buffer.readBytes(null, 1);
+    OutputStream dest = mock(OutputStream.class);
+    buffer.readBytes(dest, 1);
 
-    verify(delegate).readBytes(null, 1);
+    verify(delegate).readBytes(dest, 1);
   }
 
   @Test
@@ -138,9 +126,10 @@ public class ForwardingReadableBufferTest {
 
   @Test
   public void array() {
-    when(delegate.array()).thenReturn(null);
+    byte[] array = new byte[1];
+    when(delegate.array()).thenReturn(array);
 
-    assertEquals(null, buffer.array());
+    assertEquals(array, buffer.array());
   }
 
   @Test

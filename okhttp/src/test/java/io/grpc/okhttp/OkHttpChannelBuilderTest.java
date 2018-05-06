@@ -1,52 +1,40 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.okhttp;
 
+import static io.grpc.internal.GrpcUtil.TIMER_SERVICE;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 
 import com.squareup.okhttp.ConnectionSpec;
-
 import io.grpc.NameResolver;
+import io.grpc.internal.ClientTransportFactory;
+import io.grpc.internal.FakeClock;
 import io.grpc.internal.GrpcUtil;
-
+import io.grpc.internal.SharedResourceHolder;
+import java.net.InetSocketAddress;
+import java.util.concurrent.ScheduledExecutorService;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.net.InetSocketAddress;
 
 /**
  * Tests for {@link OkHttpChannelBuilder}.
@@ -55,6 +43,30 @@ import java.net.InetSocketAddress;
 public class OkHttpChannelBuilderTest {
 
   @Rule public final ExpectedException thrown = ExpectedException.none();
+
+  @Test
+  public void authorityIsReadable() {
+    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("original", 1234);
+    assertEquals("original:1234", builder.build().authority());
+  }
+
+  @Test
+  public void overrideAuthorityIsReadableForAddress() {
+    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("original", 1234);
+    overrideAuthorityIsReadableHelper(builder, "override:5678");
+  }
+
+  @Test
+  public void overrideAuthorityIsReadableForTarget() {
+    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forTarget("original:1234");
+    overrideAuthorityIsReadableHelper(builder, "override:5678");
+  }
+
+  private void overrideAuthorityIsReadableHelper(OkHttpChannelBuilder builder,
+      String overrideAuthority) {
+    builder.overrideAuthority(overrideAuthority);
+    assertEquals(overrideAuthority, builder.build().authority());
+  }
 
   @Test
   public void overrideAllowsInvalidAuthority() {
@@ -72,13 +84,11 @@ public class OkHttpChannelBuilderTest {
 
   @Test
   public void failOverrideInvalidAuthority() {
-    thrown.expect(IllegalArgumentException.class);
-    thrown.expectMessage("Invalid authority:");
     OkHttpChannelBuilder builder = new OkHttpChannelBuilder("good", 1234);
 
-    builder.overrideAuthority("[invalidauthority")
-        .negotiationType(NegotiationType.PLAINTEXT)
-        .buildTransportFactory();
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("Invalid authority:");
+    builder.overrideAuthority("[invalidauthority");
   }
 
   @Test
@@ -104,14 +114,14 @@ public class OkHttpChannelBuilderTest {
 
   @Test
   public void usePlaintext_newClientTransportAllowed() {
-    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("host", 1234).usePlaintext(true);
+    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("host", 1234).usePlaintext();
     builder.buildTransportFactory().newClientTransport(new InetSocketAddress(5678),
-        "dummy_authority", "dummy_userAgent");
+        "dummy_authority", "dummy_userAgent", null /* proxy */);
   }
 
   @Test
   public void usePlaintextDefaultPort() {
-    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("host", 1234).usePlaintext(true);
+    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("host", 1234).usePlaintext();
     assertEquals(GrpcUtil.DEFAULT_PORT_PLAINTEXT,
         builder.getNameResolverParams().get(NameResolver.Factory.PARAMS_DEFAULT_PORT).intValue());
   }
@@ -121,8 +131,37 @@ public class OkHttpChannelBuilderTest {
     OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("host", 1234);
     assertNotNull(builder.createSocketFactory());
 
-    builder.usePlaintext(true);
+    builder.usePlaintext();
     assertNull(builder.createSocketFactory());
+  }
+
+  @Test
+  public void scheduledExecutorService_default() {
+    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forTarget("foo");
+    ClientTransportFactory clientTransportFactory = builder.buildTransportFactory();
+    assertSame(
+        SharedResourceHolder.get(TIMER_SERVICE),
+        clientTransportFactory.getScheduledExecutorService());
+
+    SharedResourceHolder.release(
+        TIMER_SERVICE, clientTransportFactory.getScheduledExecutorService());
+    clientTransportFactory.close();
+  }
+
+  @Test
+  public void scheduledExecutorService_custom() {
+    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forTarget("foo");
+    ScheduledExecutorService scheduledExecutorService =
+        new FakeClock().getScheduledExecutorService();
+
+    OkHttpChannelBuilder builder1 = builder.scheduledExecutorService(scheduledExecutorService);
+    assertSame(builder, builder1);
+
+    ClientTransportFactory clientTransportFactory = builder1.buildTransportFactory();
+
+    assertSame(scheduledExecutorService, clientTransportFactory.getScheduledExecutorService());
+
+    clientTransportFactory.close();
   }
 }
 

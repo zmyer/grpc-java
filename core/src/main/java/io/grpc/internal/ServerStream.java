@@ -1,39 +1,26 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
 import io.grpc.Attributes;
+import io.grpc.Decompressor;
 import io.grpc.Metadata;
 import io.grpc.Status;
+import javax.annotation.Nullable;
 
 /**
  * Extension of {@link Stream} to support server-side termination semantics.
@@ -56,6 +43,10 @@ public interface ServerStream extends Stream {
    * {@link io.grpc.Status.Code#OK} implies normal termination of the
    * stream. Any other value implies abnormal termination.
    *
+   * <p>Attempts to read from or write to the stream after closing
+   * should be ignored by implementations, and should not throw
+   * exceptions.
+   *
    * @param status details of the closure
    * @param trailers an additional block of metadata to pass to the client on stream closure.
    */
@@ -69,13 +60,27 @@ public interface ServerStream extends Stream {
   void cancel(Status status);
 
   /**
+   * Sets the decompressor on the deframer. If the transport does not support compression, this may
+   * do nothing.
+   *
+   * @param decompressor the decompressor to use.
+   */
+  void setDecompressor(Decompressor decompressor);
+
+  /**
    * Attributes describing stream.  This is inherited from the transport attributes, and used
-   * as the basis of {@link io.grpc.ServerCall#attributes}.
+   * as the basis of {@link io.grpc.ServerCall#getAttributes}.
    *
    * @return Attributes container
    */
-  Attributes attributes();
+  Attributes getAttributes();
 
+  /**
+   * Gets the authority this stream is addressed to.
+   * @return the authority string. {@code null} if not available.
+   */
+  @Nullable
+  String getAuthority();
 
   /**
    * Sets the server stream listener.

@@ -1,35 +1,22 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.stub;
+
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import io.grpc.CallOptions;
 import io.grpc.Channel;
@@ -41,7 +28,6 @@ import io.grpc.ForwardingClientCallListener.SimpleForwardingClientCallListener;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
-
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -59,9 +45,7 @@ public final class MetadataUtils {
    * @return an implementation of the stub with {@code extraHeaders} bound to each call.
    */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1789")
-  public static <T extends AbstractStub<T>> T attachHeaders(
-      T stub,
-      final Metadata extraHeaders) {
+  public static <T extends AbstractStub<T>> T attachHeaders(T stub, Metadata extraHeaders) {
     return stub.withInterceptors(newAttachHeadersInterceptor(extraHeaders));
   }
 
@@ -71,22 +55,39 @@ public final class MetadataUtils {
    * @param extraHeaders the headers to be passed by each call that is processed by the returned
    *                     interceptor
    */
-  public static ClientInterceptor newAttachHeadersInterceptor(final Metadata extraHeaders) {
-    return new ClientInterceptor() {
-      @Override
-      public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
-          MethodDescriptor<ReqT, RespT> method,
-          CallOptions callOptions,
-          Channel next) {
-        return new SimpleForwardingClientCall<ReqT, RespT>(next.newCall(method, callOptions)) {
-          @Override
-          public void start(Listener<RespT> responseListener, Metadata headers) {
-            headers.merge(extraHeaders);
-            super.start(responseListener, headers);
-          }
-        };
+  public static ClientInterceptor newAttachHeadersInterceptor(Metadata extraHeaders) {
+    return new HeaderAttachingClientInterceptor(extraHeaders);
+  }
+
+  private static final class HeaderAttachingClientInterceptor implements ClientInterceptor {
+
+    private final Metadata extraHeaders;
+
+    // Non private to avoid synthetic class
+    HeaderAttachingClientInterceptor(Metadata extraHeaders) {
+      this.extraHeaders = checkNotNull(extraHeaders, extraHeaders);
+    }
+
+    @Override
+    public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
+        MethodDescriptor<ReqT, RespT> method, CallOptions callOptions, Channel next) {
+      return new HeaderAttachingClientCall<ReqT, RespT>(next.newCall(method, callOptions));
+    }
+
+    private final class HeaderAttachingClientCall<ReqT, RespT>
+        extends SimpleForwardingClientCall<ReqT, RespT> {
+
+      // Non private to avoid synthetic class
+      HeaderAttachingClientCall(ClientCall<ReqT, RespT> call) {
+        super(call);
       }
-    };
+
+      @Override
+      public void start(Listener<RespT> responseListener, Metadata headers) {
+        headers.merge(extraHeaders);
+        super.start(responseListener, headers);
+      }
+    }
   }
 
   /**
@@ -115,35 +116,62 @@ public final class MetadataUtils {
    * @return an implementation of the channel with captures installed.
    */
   public static ClientInterceptor newCaptureMetadataInterceptor(
-      final AtomicReference<Metadata> headersCapture,
-      final AtomicReference<Metadata> trailersCapture) {
-    return new ClientInterceptor() {
-      @Override
-      public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
-          MethodDescriptor<ReqT, RespT> method,
-          CallOptions callOptions,
-          Channel next) {
-        return new SimpleForwardingClientCall<ReqT, RespT>(next.newCall(method, callOptions)) {
-          @Override
-          public void start(Listener<RespT> responseListener, Metadata headers) {
-            headersCapture.set(null);
-            trailersCapture.set(null);
-            super.start(new SimpleForwardingClientCallListener<RespT>(responseListener) {
-              @Override
-              public void onHeaders(Metadata headers) {
-                headersCapture.set(headers);
-                super.onHeaders(headers);
-              }
+      AtomicReference<Metadata> headersCapture, AtomicReference<Metadata> trailersCapture) {
+    return new MetadataCapturingClientInterceptor(headersCapture, trailersCapture);
+  }
 
-              @Override
-              public void onClose(Status status, Metadata trailers) {
-                trailersCapture.set(trailers);
-                super.onClose(status, trailers);
-              }
-            }, headers);
-          }
-        };
+  private static final class MetadataCapturingClientInterceptor implements ClientInterceptor {
+
+    final AtomicReference<Metadata> headersCapture;
+    final AtomicReference<Metadata> trailersCapture;
+
+    // Non private to avoid synthetic class
+    MetadataCapturingClientInterceptor(
+        AtomicReference<Metadata> headersCapture, AtomicReference<Metadata> trailersCapture) {
+      this.headersCapture = checkNotNull(headersCapture, "headersCapture");
+      this.trailersCapture = checkNotNull(trailersCapture, "trailersCapture");
+    }
+
+    @Override
+    public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
+        MethodDescriptor<ReqT, RespT> method, CallOptions callOptions, Channel next) {
+      return new MetadataCapturingClientCall<ReqT, RespT>(next.newCall(method, callOptions));
+    }
+
+    private final class MetadataCapturingClientCall<ReqT, RespT>
+        extends SimpleForwardingClientCall<ReqT, RespT> {
+
+      // Non private to avoid synthetic class
+      MetadataCapturingClientCall(ClientCall<ReqT, RespT> call) {
+        super(call);
       }
-    };
+
+      @Override
+      public void start(ClientCall.Listener<RespT> responseListener, Metadata headers) {
+        headersCapture.set(null);
+        trailersCapture.set(null);
+        super.start(new MetadataCapturingClientCallListener(responseListener), headers);
+      }
+
+      private final class MetadataCapturingClientCallListener
+          extends SimpleForwardingClientCallListener<RespT> {
+
+        MetadataCapturingClientCallListener(ClientCall.Listener<RespT> responseListener) {
+          super(responseListener);
+        }
+
+        @Override
+        public void onHeaders(Metadata headers) {
+          headersCapture.set(headers);
+          super.onHeaders(headers);
+        }
+
+        @Override
+        public void onClose(Status status, Metadata trailers) {
+          trailersCapture.set(trailers);
+          super.onClose(status, trailers);
+        }
+      }
+    }
   }
 }

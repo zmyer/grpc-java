@@ -1,43 +1,29 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.base.Objects;
-import com.google.common.base.Preconditions;
-
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.IdentityHashMap;
+import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
-
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.Immutable;
 
@@ -48,11 +34,13 @@ import javax.annotation.concurrent.Immutable;
 @Immutable
 public final class Attributes {
 
-  private final HashMap<Key<?>, Object> data = new HashMap<Key<?>, Object>();
+  private final Map<Key<?>, Object> data;
 
-  public static final Attributes EMPTY = new Attributes();
+  public static final Attributes EMPTY = new Attributes(Collections.<Key<?>, Object>emptyMap());
 
-  private Attributes() {
+  private Attributes(Map<Key<?>, Object> data) {
+    assert data != null;
+    this.data = data;
   }
 
   /**
@@ -77,16 +65,22 @@ public final class Attributes {
    * Create a new builder that is pre-populated with the content from a given container.
    */
   public static Builder newBuilder(Attributes base) {
-    return newBuilder().setAll(base);
+    checkNotNull(base, "base");
+    return new Builder(base);
   }
 
   /**
    * Create a new builder.
    */
   public static Builder newBuilder() {
-    return new Builder();
+    return new Builder(EMPTY);
   }
 
+  /**
+   * Key for an key-value pair.
+   * @param <T> type of the value in the key-value pair
+   */
+  @Immutable
   public static final class Key<T> {
     private final String name;
 
@@ -135,7 +129,18 @@ public final class Attributes {
       return false;
     }
     Attributes that = (Attributes) o;
-    return Objects.equal(data, that.data);
+    if (data.size() != that.data.size()) {
+      return false;
+    }
+    for (Entry<Key<?>, Object> e : data.entrySet()) {
+      if (!that.data.containsKey(e.getKey())) {
+        return false;
+      }
+      if (!Objects.equal(e.getValue(), that.data.get(e.getKey()))) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -152,31 +157,49 @@ public final class Attributes {
     return data.hashCode();
   }
 
+  /**
+   * The helper class to build an Attributes instance.
+   */
   public static final class Builder {
-    private Attributes product;
+    private Attributes base;
+    private Map<Key<?>, Object> newdata;
 
-    private Builder() {
-      this.product = new Attributes();
+    private Builder(Attributes base) {
+      assert base != null;
+      this.base = base;
+    }
+
+    private Map<Key<?>, Object> data(int size) {
+      if (newdata == null) {
+        newdata = new IdentityHashMap<Key<?>, Object>(size);
+      }
+      return newdata;
     }
 
     public <T> Builder set(Key<T> key, T value) {
-      product.data.put(key, value);
+      data(1).put(key, value);
       return this;
     }
 
     public <T> Builder setAll(Attributes other) {
-      product.data.putAll(other.data);
+      data(other.data.size()).putAll(other.data);
       return this;
     }
 
     /**
-     * Build the attributes. Can only be called once.
+     * Build the attributes.
      */
     public Attributes build() {
-      Preconditions.checkState(product != null, "Already built");
-      Attributes result = product;
-      product = null;
-      return result;
+      if (newdata != null) {
+        for (Entry<Key<?>, Object> entry : base.data.entrySet()) {
+          if (!newdata.containsKey(entry.getKey())) {
+            newdata.put(entry.getKey(), entry.getValue());
+          }
+        }
+        base = new Attributes(newdata);
+        newdata = null;
+      }
+      return base;
     }
   }
 }

@@ -1,70 +1,51 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.testing.integration;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 import com.google.common.base.Throwables;
-import com.google.protobuf.EmptyProtos.Empty;
-
 import com.squareup.okhttp.ConnectionSpec;
-import com.squareup.okhttp.TlsVersion;
-
 import io.grpc.ManagedChannel;
+import io.grpc.internal.AbstractServerImplBuilder;
 import io.grpc.internal.GrpcUtil;
+import io.grpc.internal.testing.StreamRecorder;
+import io.grpc.internal.testing.TestUtils;
 import io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.okhttp.OkHttpChannelBuilder;
 import io.grpc.okhttp.internal.Platform;
 import io.grpc.stub.StreamObserver;
-import io.grpc.testing.StreamRecorder;
-import io.grpc.testing.TestUtils;
+import io.grpc.testing.integration.EmptyProtos.Empty;
 import io.netty.handler.ssl.OpenSsl;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.ssl.SupportedCipherSuiteFilter;
-
-import org.junit.AfterClass;
+import java.io.IOException;
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.SSLPeerUnverifiedException;
+import javax.net.ssl.SSLSession;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.io.IOException;
-
-import javax.net.ssl.SSLPeerUnverifiedException;
 
 /**
  * Integration tests for GRPC over Http2 using the OkHttp framework.
@@ -72,9 +53,18 @@ import javax.net.ssl.SSLPeerUnverifiedException;
 @RunWith(JUnit4.class)
 public class Http2OkHttpTest extends AbstractInteropTest {
 
-  /** Starts the server with HTTPS. */
+  private static final String BAD_HOSTNAME = "I.am.a.bad.hostname";
+
   @BeforeClass
-  public static void startServer() throws Exception {
+  public static void loadConscrypt() throws Exception {
+    // Load conscrypt if it is available. Either Conscrypt or Jetty ALPN needs to be available for
+    // OkHttp to negotiate.
+    TestUtils.installConscryptIfAvailable();
+  }
+
+  @Override
+  protected AbstractServerImplBuilder<?> getServerBuilder() {
+    // Starts the server with HTTPS.
     try {
       SslProvider sslProvider = SslContext.defaultServerProvider();
       if (sslProvider == SslProvider.OPENSSL && !OpenSsl.isAlpnSupported()) {
@@ -86,41 +76,40 @@ public class Http2OkHttpTest extends AbstractInteropTest {
           .forServer(TestUtils.loadCert("server1.pem"), TestUtils.loadCert("server1.key"));
       GrpcSslContexts.configure(contextBuilder, sslProvider);
       contextBuilder.ciphers(TestUtils.preferredTestCiphers(), SupportedCipherSuiteFilter.INSTANCE);
-      startStaticServer(NettyServerBuilder.forPort(0)
+      return NettyServerBuilder.forPort(0)
           .flowControlWindow(65 * 1024)
-          .maxMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
-          .sslContext(contextBuilder.build()));
+          .maxInboundMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
+          .sslContext(contextBuilder.build());
     } catch (IOException ex) {
       throw new RuntimeException(ex);
     }
   }
 
-  @AfterClass
-  public static void stopServer() throws Exception {
-    stopStaticServer();
-  }
-
   @Override
   protected ManagedChannel createChannel() {
-    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("127.0.0.1", getPort())
+    return createChannelBuilder().build();
+  }
+
+  private OkHttpChannelBuilder createChannelBuilder() {
+    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("localhost", getPort())
         .maxInboundMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
-        .connectionSpec(new ConnectionSpec.Builder(OkHttpChannelBuilder.DEFAULT_CONNECTION_SPEC)
+        .connectionSpec(new ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
             .cipherSuites(TestUtils.preferredTestCiphers().toArray(new String[0]))
-            .tlsVersions(ConnectionSpec.MODERN_TLS.tlsVersions().toArray(new TlsVersion[0]))
             .build())
-        .censusContextFactory(getClientCensusFactory())
         .overrideAuthority(GrpcUtil.authorityFromHostAndPort(
             TestUtils.TEST_SERVER_HOST, getPort()));
+    io.grpc.internal.TestingAccessor.setStatsImplementation(
+        builder, createClientCensusStatsModule());
     try {
       builder.sslSocketFactory(TestUtils.newSslSocketFactoryForCa(Platform.get().getProvider(),
-              TestUtils.loadCert("ca.pem")));
+          TestUtils.loadCert("ca.pem")));
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
-    return builder.build();
+    return builder;
   }
 
-  @Test(timeout = 10000)
+  @Test
   public void receivedDataForFinishedStream() throws Exception {
     Messages.ResponseParameters.Builder responseParameters =
         Messages.ResponseParameters.newBuilder()
@@ -145,29 +134,73 @@ public class Http2OkHttpTest extends AbstractInteropTest {
     assertEquals(EMPTY, blockingStub.emptyCall(EMPTY));
   }
 
-  @Test(timeout = 10000)
+  @Test
   public void wrongHostNameFailHostnameVerification() throws Exception {
-    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("127.0.0.1", getPort())
-        .connectionSpec(new ConnectionSpec.Builder(OkHttpChannelBuilder.DEFAULT_CONNECTION_SPEC)
-            .cipherSuites(TestUtils.preferredTestCiphers().toArray(new String[0]))
-            .tlsVersions(ConnectionSpec.MODERN_TLS.tlsVersions().toArray(new TlsVersion[0]))
-            .build())
+    ManagedChannel channel = createChannelBuilder()
         .overrideAuthority(GrpcUtil.authorityFromHostAndPort(
-            "I.am.a.bad.hostname", getPort()));
-    ManagedChannel channel = builder.sslSocketFactory(
-        TestUtils.newSslSocketFactoryForCa(Platform.get().getProvider(),
-            TestUtils.loadCert("ca.pem"))).build();
+            BAD_HOSTNAME, getPort()))
+        .build();
     TestServiceGrpc.TestServiceBlockingStub blockingStub =
         TestServiceGrpc.newBlockingStub(channel);
 
+    Throwable actualThrown = null;
     try {
       blockingStub.emptyCall(Empty.getDefaultInstance());
-      fail("The rpc should have been failed due to hostname verification");
     } catch (Throwable t) {
-      Throwable cause = Throwables.getRootCause(t);
-      assertTrue("Failed by unexpected exception: " + cause,
-          cause instanceof SSLPeerUnverifiedException);
+      actualThrown = t;
     }
+    assertNotNull("The rpc should have been failed due to hostname verification", actualThrown);
+    Throwable cause = Throwables.getRootCause(actualThrown);
+    assertTrue(
+        "Failed by unexpected exception: " + cause, cause instanceof SSLPeerUnverifiedException);
+    channel.shutdown();
+  }
+
+  @Test
+  public void hostnameVerifierWithBadHostname() throws Exception {
+    ManagedChannel channel = createChannelBuilder()
+        .overrideAuthority(GrpcUtil.authorityFromHostAndPort(
+            BAD_HOSTNAME, getPort()))
+        .hostnameVerifier(new HostnameVerifier() {
+          @Override
+          public boolean verify(String hostname, SSLSession session) {
+            return true;
+          }
+        })
+        .build();
+    TestServiceGrpc.TestServiceBlockingStub blockingStub =
+        TestServiceGrpc.newBlockingStub(channel);
+
+    blockingStub.emptyCall(Empty.getDefaultInstance());
+
+    channel.shutdown();
+  }
+
+  @Test
+  public void hostnameVerifierWithCorrectHostname() throws Exception {
+    ManagedChannel channel = createChannelBuilder()
+        .overrideAuthority(GrpcUtil.authorityFromHostAndPort(
+            TestUtils.TEST_SERVER_HOST, getPort()))
+        .hostnameVerifier(new HostnameVerifier() {
+          @Override
+          public boolean verify(String hostname, SSLSession session) {
+            return false;
+          }
+        })
+        .build();
+    TestServiceGrpc.TestServiceBlockingStub blockingStub =
+        TestServiceGrpc.newBlockingStub(channel);
+
+    Throwable actualThrown = null;
+    try {
+      blockingStub.emptyCall(Empty.getDefaultInstance());
+    } catch (Throwable t) {
+      actualThrown = t;
+    }
+    assertNotNull("The rpc should have been failed due to hostname verification", actualThrown);
+    Throwable cause = Throwables.getRootCause(actualThrown);
+    assertTrue(
+        "Failed by unexpected exception: " + cause, cause instanceof SSLPeerUnverifiedException);
     channel.shutdown();
   }
 }

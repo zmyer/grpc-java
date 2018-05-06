@@ -1,32 +1,17 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.netty;
@@ -34,32 +19,38 @@ package io.grpc.netty;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
-import static io.grpc.internal.GrpcUtil.DEFAULT_KEEPALIVE_DELAY_NANOS;
 import static io.grpc.internal.GrpcUtil.DEFAULT_KEEPALIVE_TIMEOUT_NANOS;
+import static io.grpc.internal.GrpcUtil.DEFAULT_KEEPALIVE_TIME_NANOS;
+import static io.grpc.internal.GrpcUtil.KEEPALIVE_TIME_NANOS_DISABLED;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import io.grpc.Attributes;
 import io.grpc.ExperimentalApi;
+import io.grpc.Internal;
 import io.grpc.NameResolver;
 import io.grpc.internal.AbstractManagedChannelImplBuilder;
+import io.grpc.internal.AtomicBackoff;
 import io.grpc.internal.ClientTransportFactory;
 import io.grpc.internal.ConnectionClientTransport;
 import io.grpc.internal.GrpcUtil;
+import io.grpc.internal.KeepAliveManager;
+import io.grpc.internal.ProxyParameters;
 import io.grpc.internal.SharedResourceHolder;
+import io.grpc.internal.TransportTracer;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.ssl.SslContext;
-
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-
+import javax.annotation.CheckReturnValue;
 import javax.annotation.Nullable;
 import javax.net.ssl.SSLException;
 
@@ -67,9 +58,12 @@ import javax.net.ssl.SSLException;
  * A builder to help simplify construction of channels using the Netty transport.
  */
 @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1784")
+@CanIgnoreReturnValue
 public final class NettyChannelBuilder
     extends AbstractManagedChannelImplBuilder<NettyChannelBuilder> {
   public static final int DEFAULT_FLOW_CONTROL_WINDOW = 1048576; // 1MiB
+
+  private static final long AS_LARGE_AS_INFINITE = TimeUnit.DAYS.toNanos(1000L);
 
   private final Map<ChannelOption<?>, Object> channelOptions =
       new HashMap<ChannelOption<?>, Object>();
@@ -83,9 +77,9 @@ public final class NettyChannelBuilder
   private SslContext sslContext;
   private int flowControlWindow = DEFAULT_FLOW_CONTROL_WINDOW;
   private int maxHeaderListSize = GrpcUtil.DEFAULT_MAX_HEADER_LIST_SIZE;
-  private boolean enableKeepAlive;
-  private long keepAliveDelayNanos;
-  private long keepAliveTimeoutNanos;
+  private long keepAliveTimeNanos = KEEPALIVE_TIME_NANOS_DISABLED;
+  private long keepAliveTimeoutNanos = DEFAULT_KEEPALIVE_TIMEOUT_NANOS;
+  private boolean keepAliveWithoutCalls;
   private TransportCreationParamsFilterFactory dynamicParamsFactory;
 
   /**
@@ -94,6 +88,7 @@ public final class NettyChannelBuilder
    * generally be preferred over this method, since that API permits delaying DNS lookups and
    * noticing changes to DNS.
    */
+  @CheckReturnValue
   public static NettyChannelBuilder forAddress(SocketAddress serverAddress) {
     return new NettyChannelBuilder(serverAddress);
   }
@@ -101,6 +96,7 @@ public final class NettyChannelBuilder
   /**
    * Creates a new builder with the given host and port.
    */
+  @CheckReturnValue
   public static NettyChannelBuilder forAddress(String host, int port) {
     return new NettyChannelBuilder(host, port);
   }
@@ -109,22 +105,27 @@ public final class NettyChannelBuilder
    * Creates a new builder with the given target string that will be resolved by
    * {@link io.grpc.NameResolver}.
    */
+  @CheckReturnValue
   public static NettyChannelBuilder forTarget(String target) {
     return new NettyChannelBuilder(target);
   }
 
+  @CheckReturnValue
   NettyChannelBuilder(String host, int port) {
     this(GrpcUtil.authorityFromHostAndPort(host, port));
   }
 
+  @CheckReturnValue
   NettyChannelBuilder(String target) {
     super(target);
   }
 
+  @CheckReturnValue
   NettyChannelBuilder(SocketAddress address) {
     super(address, getAuthorityFromAddress(address));
   }
 
+  @CheckReturnValue
   private static String getAuthorityFromAddress(SocketAddress address) {
     if (address instanceof InetSocketAddress) {
       InetSocketAddress inetAddress = (InetSocketAddress) address;
@@ -211,8 +212,10 @@ public final class NettyChannelBuilder
   }
 
   /**
-   * Sets the maximum size of header list allowed to be received on the channel. If not called,
-   * defaults to {@link GrpcUtil#DEFAULT_MAX_HEADER_LIST_SIZE}.
+   * Sets the maximum size of header list allowed to be received. This is cumulative size of the
+   * headers with some overhead, as defined for
+   * <a href="http://httpwg.org/specs/rfc7540.html#rfc.section.6.5.2">
+   * HTTP/2's SETTINGS_MAX_HEADER_LIST_SIZE</a>. The default is 8 KiB.
    */
   public NettyChannelBuilder maxHeaderListSize(int maxHeaderListSize) {
     checkArgument(maxHeaderListSize > 0, "maxHeaderListSize must be > 0");
@@ -223,8 +226,11 @@ public final class NettyChannelBuilder
   /**
    * Equivalent to using {@link #negotiationType(NegotiationType)} with {@code PLAINTEXT} or
    * {@code PLAINTEXT_UPGRADE}.
+   *
+   * @deprecated use {@link #usePlaintext()} instead.
    */
   @Override
+  @Deprecated
   public NettyChannelBuilder usePlaintext(boolean skipNegotiation) {
     if (skipNegotiation) {
       negotiationType(NegotiationType.PLAINTEXT);
@@ -234,40 +240,105 @@ public final class NettyChannelBuilder
     return this;
   }
 
+  /**
+   * Equivalent to using {@link #negotiationType(NegotiationType)} with {@code PLAINTEXT}.
+   */
+  @Override
+  public NettyChannelBuilder usePlaintext() {
+    negotiationType(NegotiationType.PLAINTEXT);
+    return this;
+  }
+
+  /**
+   * Equivalent to using {@link #negotiationType(NegotiationType)} with {@code TLS}.
+   */
+  @Override
+  public NettyChannelBuilder useTransportSecurity() {
+    negotiationType(NegotiationType.TLS);
+    return this;
+  }
 
   /**
    * Enable keepalive with default delay and timeout.
+   *
+   * @deprecated Please use {@link #keepAliveTime} and {@link #keepAliveTimeout} instead
    */
+  @Deprecated
   public final NettyChannelBuilder enableKeepAlive(boolean enable) {
-    enableKeepAlive = enable;
     if (enable) {
-      keepAliveDelayNanos = DEFAULT_KEEPALIVE_DELAY_NANOS;
-      keepAliveTimeoutNanos = DEFAULT_KEEPALIVE_TIMEOUT_NANOS;
+      return keepAliveTime(DEFAULT_KEEPALIVE_TIME_NANOS, TimeUnit.NANOSECONDS);
     }
-    return this;
+    return keepAliveTime(KEEPALIVE_TIME_NANOS_DISABLED, TimeUnit.NANOSECONDS);
   }
 
   /**
    * Enable keepalive with custom delay and timeout.
+   *
+   * @deprecated Please use {@link #keepAliveTime} and {@link #keepAliveTimeout} instead
    */
-  public final NettyChannelBuilder enableKeepAlive(boolean enable, long keepAliveDelay,
+  @Deprecated
+  public final NettyChannelBuilder enableKeepAlive(boolean enable, long keepAliveTime,
       TimeUnit delayUnit, long keepAliveTimeout, TimeUnit timeoutUnit) {
-    enableKeepAlive = enable;
     if (enable) {
-      keepAliveDelayNanos = delayUnit.toNanos(keepAliveDelay);
-      keepAliveTimeoutNanos = timeoutUnit.toNanos(keepAliveTimeout);
+      return keepAliveTime(keepAliveTime, delayUnit)
+          .keepAliveTimeout(keepAliveTimeout, timeoutUnit);
+    }
+    return keepAliveTime(KEEPALIVE_TIME_NANOS_DISABLED, TimeUnit.NANOSECONDS);
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * @since 1.3.0
+   */
+  @Override
+  public NettyChannelBuilder keepAliveTime(long keepAliveTime, TimeUnit timeUnit) {
+    checkArgument(keepAliveTime > 0L, "keepalive time must be positive");
+    keepAliveTimeNanos = timeUnit.toNanos(keepAliveTime);
+    keepAliveTimeNanos = KeepAliveManager.clampKeepAliveTimeInNanos(keepAliveTimeNanos);
+    if (keepAliveTimeNanos >= AS_LARGE_AS_INFINITE) {
+      // Bump keepalive time to infinite. This disables keepalive.
+      keepAliveTimeNanos = KEEPALIVE_TIME_NANOS_DISABLED;
     }
     return this;
   }
 
+  /**
+   * {@inheritDoc}
+   *
+   * @since 1.3.0
+   */
   @Override
-  protected ClientTransportFactory buildTransportFactory() {
-    return new NettyTransportFactory(dynamicParamsFactory, channelType, channelOptions,
-        negotiationType, sslContext, eventLoopGroup, flowControlWindow, maxInboundMessageSize(),
-        maxHeaderListSize, enableKeepAlive, keepAliveDelayNanos, keepAliveTimeoutNanos);
+  public NettyChannelBuilder keepAliveTimeout(long keepAliveTimeout, TimeUnit timeUnit) {
+    checkArgument(keepAliveTimeout > 0L, "keepalive timeout must be positive");
+    keepAliveTimeoutNanos = timeUnit.toNanos(keepAliveTimeout);
+    keepAliveTimeoutNanos = KeepAliveManager.clampKeepAliveTimeoutInNanos(keepAliveTimeoutNanos);
+    return this;
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * @since 1.3.0
+   */
+  @Override
+  public NettyChannelBuilder keepAliveWithoutCalls(boolean enable) {
+    keepAliveWithoutCalls = enable;
+    return this;
   }
 
   @Override
+  @CheckReturnValue
+  @Internal
+  protected ClientTransportFactory buildTransportFactory() {
+    return new NettyTransportFactory(dynamicParamsFactory, channelType, channelOptions,
+        negotiationType, sslContext, eventLoopGroup, flowControlWindow, maxInboundMessageSize(),
+        maxHeaderListSize, keepAliveTimeNanos, keepAliveTimeoutNanos, keepAliveWithoutCalls,
+        transportTracerFactory.create());
+  }
+
+  @Override
+  @CheckReturnValue
   protected Attributes getNameResolverParams() {
     int defaultPort;
     switch (negotiationType) {
@@ -290,7 +361,23 @@ public final class NettyChannelBuilder
   }
 
   @VisibleForTesting
+  @CheckReturnValue
   static ProtocolNegotiator createProtocolNegotiator(
+      String authority,
+      NegotiationType negotiationType,
+      SslContext sslContext,
+      ProxyParameters proxy) {
+    ProtocolNegotiator negotiator =
+        createProtocolNegotiatorByType(authority, negotiationType, sslContext);
+    if (proxy != null) {
+      negotiator = ProtocolNegotiators.httpProxy(
+          proxy.proxyAddress, proxy.username, proxy.password, negotiator);
+    }
+    return negotiator;
+  }
+
+  @CheckReturnValue
+  private static ProtocolNegotiator createProtocolNegotiatorByType(
       String authority,
       NegotiationType negotiationType,
       SslContext sslContext) {
@@ -300,24 +387,20 @@ public final class NettyChannelBuilder
       case PLAINTEXT_UPGRADE:
         return ProtocolNegotiators.plaintextUpgrade();
       case TLS:
-        if (sslContext == null) {
-          try {
-            sslContext = GrpcSslContexts.forClient().build();
-          } catch (SSLException ex) {
-            throw new RuntimeException(ex);
-          }
-        }
         return ProtocolNegotiators.tls(sslContext, authority);
       default:
         throw new IllegalArgumentException("Unsupported negotiationType: " + negotiationType);
     }
   }
 
+  @CheckReturnValue
   interface OverrideAuthorityChecker {
     String checkAuthority(String authority);
   }
 
   @Override
+  @CheckReturnValue
+  @Internal
   protected String checkAuthority(String authority) {
     if (authorityChecker != null) {
       return authorityChecker.checkAuthority(authority);
@@ -329,11 +412,37 @@ public final class NettyChannelBuilder
     this.dynamicParamsFactory = checkNotNull(factory, "factory");
   }
 
-  interface TransportCreationParamsFilterFactory {
-    TransportCreationParamsFilter create(
-        SocketAddress targetServerAddress, String authority, @Nullable String userAgent);
+  @Override
+  protected void setTracingEnabled(boolean value) {
+    super.setTracingEnabled(value);
   }
 
+  @Override
+  protected void setStatsEnabled(boolean value) {
+    super.setStatsEnabled(value);
+  }
+
+  @Override
+  protected void setStatsRecordStartedRpcs(boolean value) {
+    super.setStatsRecordStartedRpcs(value);
+  }
+
+  @VisibleForTesting
+  NettyChannelBuilder setTransportTracerFactory(TransportTracer.Factory transportTracerFactory) {
+    this.transportTracerFactory = transportTracerFactory;
+    return this;
+  }
+
+  interface TransportCreationParamsFilterFactory {
+    @CheckReturnValue
+    TransportCreationParamsFilter create(
+        SocketAddress targetServerAddress,
+        String authority,
+        @Nullable String userAgent,
+        @Nullable ProxyParameters proxy);
+  }
+
+  @CheckReturnValue
   interface TransportCreationParamsFilter {
     SocketAddress getTargetServerAddress();
 
@@ -347,50 +456,47 @@ public final class NettyChannelBuilder
   /**
    * Creates Netty transports. Exposed for internal use, as it should be private.
    */
+  @CheckReturnValue
   private static final class NettyTransportFactory implements ClientTransportFactory {
     private final TransportCreationParamsFilterFactory transportCreationParamsFilterFactory;
     private final Class<? extends Channel> channelType;
     private final Map<ChannelOption<?>, ?> channelOptions;
     private final NegotiationType negotiationType;
-    private final SslContext sslContext;
     private final EventLoopGroup group;
     private final boolean usingSharedGroup;
     private final int flowControlWindow;
     private final int maxMessageSize;
     private final int maxHeaderListSize;
-    private final boolean enableKeepAlive;
-    private final long keepAliveDelayNanos;
+    private final AtomicBackoff keepAliveTimeNanos;
     private final long keepAliveTimeoutNanos;
+    private final boolean keepAliveWithoutCalls;
+    private final TransportTracer transportTracer;
 
     private boolean closed;
 
     NettyTransportFactory(TransportCreationParamsFilterFactory transportCreationParamsFilterFactory,
         Class<? extends Channel> channelType, Map<ChannelOption<?>, ?> channelOptions,
         NegotiationType negotiationType, SslContext sslContext, EventLoopGroup group,
-        int flowControlWindow, int maxMessageSize, int maxHeaderListSize, boolean enableKeepAlive,
-        long keepAliveDelayNanos, long keepAliveTimeoutNanos) {
+        int flowControlWindow, int maxMessageSize, int maxHeaderListSize,
+        long keepAliveTimeNanos, long keepAliveTimeoutNanos, boolean keepAliveWithoutCalls,
+        TransportTracer transportTracer) {
       this.channelType = channelType;
       this.negotiationType = negotiationType;
       this.channelOptions = new HashMap<ChannelOption<?>, Object>(channelOptions);
-      this.sslContext = sslContext;
+      this.transportTracer = transportTracer;
 
       if (transportCreationParamsFilterFactory == null) {
-        transportCreationParamsFilterFactory = new TransportCreationParamsFilterFactory() {
-          @Override
-          public TransportCreationParamsFilter create(
-              SocketAddress targetServerAddress, String authority, String userAgent) {
-            return new DynamicNettyTransportParams(targetServerAddress, authority, userAgent);
-          }
-        };
+        transportCreationParamsFilterFactory =
+            new DefaultNettyTransportCreationParamsFilterFactory(sslContext);
       }
       this.transportCreationParamsFilterFactory = transportCreationParamsFilterFactory;
 
       this.flowControlWindow = flowControlWindow;
       this.maxMessageSize = maxMessageSize;
       this.maxHeaderListSize = maxHeaderListSize;
-      this.enableKeepAlive = enableKeepAlive;
-      this.keepAliveDelayNanos = keepAliveDelayNanos;
+      this.keepAliveTimeNanos = new AtomicBackoff("keepalive time nanos", keepAliveTimeNanos);
       this.keepAliveTimeoutNanos = keepAliveTimeoutNanos;
+      this.keepAliveWithoutCalls = keepAliveWithoutCalls;
       usingSharedGroup = group == null;
       if (usingSharedGroup) {
         // The group was unspecified, using the shared group.
@@ -402,20 +508,32 @@ public final class NettyChannelBuilder
 
     @Override
     public ConnectionClientTransport newClientTransport(
-        SocketAddress serverAddress, String authority, @Nullable String userAgent) {
+        SocketAddress serverAddress, String authority, @Nullable String userAgent,
+        @Nullable ProxyParameters proxy) {
       checkState(!closed, "The transport factory is closed.");
 
       TransportCreationParamsFilter dparams =
-          transportCreationParamsFilterFactory.create(serverAddress, authority, userAgent);
+          transportCreationParamsFilterFactory.create(serverAddress, authority, userAgent, proxy);
 
+      final AtomicBackoff.State keepAliveTimeNanosState = keepAliveTimeNanos.getState();
+      Runnable tooManyPingsRunnable = new Runnable() {
+        @Override
+        public void run() {
+          keepAliveTimeNanosState.backoff();
+        }
+      };
       NettyClientTransport transport = new NettyClientTransport(
           dparams.getTargetServerAddress(), channelType, channelOptions, group,
           dparams.getProtocolNegotiator(), flowControlWindow,
-          maxMessageSize, maxHeaderListSize, dparams.getAuthority(), dparams.getUserAgent());
-      if (enableKeepAlive) {
-        transport.enableKeepAlive(true, keepAliveDelayNanos, keepAliveTimeoutNanos);
-      }
+          maxMessageSize, maxHeaderListSize, keepAliveTimeNanosState.get(), keepAliveTimeoutNanos,
+          keepAliveWithoutCalls, dparams.getAuthority(), dparams.getUserAgent(),
+          tooManyPingsRunnable, transportTracer);
       return transport;
+    }
+
+    @Override
+    public ScheduledExecutorService getScheduledExecutorService() {
+      return group;
     }
 
     @Override
@@ -430,37 +548,69 @@ public final class NettyChannelBuilder
       }
     }
 
-    private final class DynamicNettyTransportParams implements TransportCreationParamsFilter {
+    private final class DefaultNettyTransportCreationParamsFilterFactory
+        implements TransportCreationParamsFilterFactory {
+      private final SslContext sslContext;
 
-      private final SocketAddress targetServerAddress;
-      private final String authority;
-      @Nullable private final String userAgent;
-
-      private DynamicNettyTransportParams(
-          SocketAddress targetServerAddress, String authority, String userAgent) {
-        this.targetServerAddress = targetServerAddress;
-        this.authority = authority;
-        this.userAgent = userAgent;
+      private DefaultNettyTransportCreationParamsFilterFactory(SslContext sslContext) {
+        if (negotiationType == NegotiationType.TLS && sslContext == null) {
+          try {
+            sslContext = GrpcSslContexts.forClient().build();
+          } catch (SSLException ex) {
+            throw new RuntimeException(ex);
+          }
+        }
+        this.sslContext = sslContext;
       }
 
       @Override
-      public SocketAddress getTargetServerAddress() {
-        return targetServerAddress;
+      public TransportCreationParamsFilter create(
+          SocketAddress targetServerAddress,
+          String authority,
+          String userAgent,
+          ProxyParameters proxyParams) {
+        return new DynamicNettyTransportParams(
+            targetServerAddress, authority, userAgent, proxyParams);
       }
 
-      @Override
-      public String getAuthority() {
-        return authority;
-      }
+      @CheckReturnValue
+      private final class DynamicNettyTransportParams implements TransportCreationParamsFilter {
 
-      @Override
-      public String getUserAgent() {
-        return userAgent;
-      }
+        private final SocketAddress targetServerAddress;
+        private final String authority;
+        @Nullable private final String userAgent;
+        private ProxyParameters proxyParams;
 
-      @Override
-      public ProtocolNegotiator getProtocolNegotiator() {
-        return createProtocolNegotiator(authority, negotiationType, sslContext);
+        private DynamicNettyTransportParams(
+            SocketAddress targetServerAddress,
+            String authority,
+            String userAgent,
+            ProxyParameters proxyParams) {
+          this.targetServerAddress = targetServerAddress;
+          this.authority = authority;
+          this.userAgent = userAgent;
+          this.proxyParams = proxyParams;
+        }
+
+        @Override
+        public SocketAddress getTargetServerAddress() {
+          return targetServerAddress;
+        }
+
+        @Override
+        public String getAuthority() {
+          return authority;
+        }
+
+        @Override
+        public String getUserAgent() {
+          return userAgent;
+        }
+
+        @Override
+        public ProtocolNegotiator getProtocolNegotiator() {
+          return createProtocolNegotiator(authority, negotiationType, sslContext, proxyParams);
+        }
       }
     }
   }

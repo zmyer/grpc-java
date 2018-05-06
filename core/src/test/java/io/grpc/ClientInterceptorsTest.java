@@ -1,32 +1,17 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
@@ -38,11 +23,11 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.isA;
 import static org.mockito.Matchers.same;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -51,7 +36,10 @@ import static org.mockito.Mockito.when;
 import io.grpc.ClientInterceptors.CheckedForwardingClientCall;
 import io.grpc.ForwardingClientCall.SimpleForwardingClientCall;
 import io.grpc.ForwardingClientCallListener.SimpleForwardingClientCallListener;
-
+import io.grpc.testing.TestMethodDescriptors;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -60,10 +48,6 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
-
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
 
 /** Unit tests for {@link ClientInterceptors}. */
 @RunWith(JUnit4.class)
@@ -74,8 +58,7 @@ public class ClientInterceptorsTest {
 
   private BaseClientCall call = new BaseClientCall();
 
-  @Mock
-  private MethodDescriptor<String, Integer> method;
+  private final MethodDescriptor<Void, Void> method = TestMethodDescriptors.voidMethod();
 
   /**
    * Sets up mocks.
@@ -109,7 +92,8 @@ public class ClientInterceptorsTest {
 
   @Test
   public void channelAndInterceptorCalled() {
-    ClientInterceptor interceptor = spy(new NoopInterceptor());
+    ClientInterceptor interceptor =
+        mock(ClientInterceptor.class, delegatesTo(new NoopInterceptor()));
     Channel intercepted = ClientInterceptors.intercept(channel, interceptor);
     CallOptions callOptions = CallOptions.DEFAULT;
     // First call
@@ -233,15 +217,16 @@ public class ClientInterceptorsTest {
     final CallOptions initialCallOptions = CallOptions.DEFAULT.withDeadlineAfter(100, NANOSECONDS);
     final CallOptions newCallOptions = initialCallOptions.withDeadlineAfter(300, NANOSECONDS);
     assertNotSame(initialCallOptions, newCallOptions);
-    ClientInterceptor interceptor = spy(new ClientInterceptor() {
-      @Override
-      public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
-          MethodDescriptor<ReqT, RespT> method,
-          CallOptions callOptions,
-          Channel next) {
-        return next.newCall(method, newCallOptions);
-      }
-    });
+    ClientInterceptor interceptor =
+        mock(ClientInterceptor.class, delegatesTo(new ClientInterceptor() {
+          @Override
+          public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
+              MethodDescriptor<ReqT, RespT> method,
+              CallOptions callOptions,
+              Channel next) {
+            return next.newCall(method, newCallOptions);
+          }
+        }));
     Channel intercepted = ClientInterceptors.intercept(channel, interceptor);
     intercepted.newCall(method, initialCallOptions);
     verify(interceptor).interceptCall(
@@ -270,8 +255,8 @@ public class ClientInterceptorsTest {
     };
     Channel intercepted = ClientInterceptors.intercept(channel, interceptor);
     @SuppressWarnings("unchecked")
-    ClientCall.Listener<Integer> listener = mock(ClientCall.Listener.class);
-    ClientCall<String, Integer> interceptedCall = intercepted.newCall(method, CallOptions.DEFAULT);
+    ClientCall.Listener<Void> listener = mock(ClientCall.Listener.class);
+    ClientCall<Void, Void> interceptedCall = intercepted.newCall(method, CallOptions.DEFAULT);
     // start() on the intercepted call will eventually reach the call created by the real channel
     interceptedCall.start(listener, new Metadata());
     // The headers passed to the real channel call will contain the information inserted by the
@@ -306,8 +291,8 @@ public class ClientInterceptorsTest {
     };
     Channel intercepted = ClientInterceptors.intercept(channel, interceptor);
     @SuppressWarnings("unchecked")
-    ClientCall.Listener<Integer> listener = mock(ClientCall.Listener.class);
-    ClientCall<String, Integer> interceptedCall = intercepted.newCall(method, CallOptions.DEFAULT);
+    ClientCall.Listener<Void> listener = mock(ClientCall.Listener.class);
+    ClientCall<Void, Void> interceptedCall = intercepted.newCall(method, CallOptions.DEFAULT);
     interceptedCall.start(listener, new Metadata());
     // Capture the underlying call listener that will receive headers from the transport.
 
@@ -330,16 +315,16 @@ public class ClientInterceptorsTest {
       }
     };
     Channel intercepted = ClientInterceptors.intercept(channel, interceptor);
-    ClientCall<String, Integer> interceptedCall = intercepted.newCall(method, CallOptions.DEFAULT);
+    ClientCall<Void, Void> interceptedCall = intercepted.newCall(method, CallOptions.DEFAULT);
     assertNotSame(call, interceptedCall);
     @SuppressWarnings("unchecked")
-    ClientCall.Listener<Integer> listener = mock(ClientCall.Listener.class);
+    ClientCall.Listener<Void> listener = mock(ClientCall.Listener.class);
     Metadata headers = new Metadata();
     interceptedCall.start(listener, headers);
     assertSame(listener, call.listener);
     assertSame(headers, call.headers);
-    interceptedCall.sendMessage("request");
-    assertThat(call.messages).containsExactly("request");
+    interceptedCall.sendMessage(null /*request*/);
+    assertThat(call.messages).containsExactly((Void) null /*request*/);
     interceptedCall.halfClose();
     assertTrue(call.halfClosed);
     interceptedCall.request(1);
@@ -368,11 +353,11 @@ public class ClientInterceptorsTest {
     };
     Channel intercepted = ClientInterceptors.intercept(channel, interceptor);
     @SuppressWarnings("unchecked")
-    ClientCall.Listener<Integer> listener = mock(ClientCall.Listener.class);
-    ClientCall<String, Integer> interceptedCall = intercepted.newCall(method, CallOptions.DEFAULT);
+    ClientCall.Listener<Void> listener = mock(ClientCall.Listener.class);
+    ClientCall<Void, Void> interceptedCall = intercepted.newCall(method, CallOptions.DEFAULT);
     assertNotSame(call, interceptedCall);
     interceptedCall.start(listener, new Metadata());
-    interceptedCall.sendMessage("request");
+    interceptedCall.sendMessage(null /*request*/);
     interceptedCall.halfClose();
     interceptedCall.request(1);
     call.done = true;
@@ -413,7 +398,8 @@ public class ClientInterceptorsTest {
     CallOptions.Key<String> customOption = CallOptions.Key.of("custom", null);
     CallOptions callOptions = CallOptions.DEFAULT.withOption(customOption, "value");
     ArgumentCaptor<CallOptions> passedOptions = ArgumentCaptor.forClass(CallOptions.class);
-    ClientInterceptor interceptor = spy(new NoopInterceptor());
+    ClientInterceptor interceptor =
+        mock(ClientInterceptor.class, delegatesTo(new NoopInterceptor()));
 
     Channel intercepted = ClientInterceptors.intercept(channel, interceptor);
 

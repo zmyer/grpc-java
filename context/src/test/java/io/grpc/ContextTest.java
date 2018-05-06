@@ -1,36 +1,22 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
 
+import static io.grpc.Context.cancellableAncestor;
 import static org.hamcrest.core.IsInstanceOf.instanceOf;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -44,19 +30,15 @@ import static org.junit.Assert.fail;
 
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
-
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
-
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -67,6 +49,12 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
 
 /**
  * Tests for {@link Context}.
@@ -107,13 +95,14 @@ public class ContextTest {
   @After
   public void tearDown() throws Exception {
     scheduler.shutdown();
+    assertEquals(Context.ROOT, Context.current());
   }
 
   @Test
   public void defaultContext() throws Exception {
     final SettableFuture<Context> contextOfNewThread = SettableFuture.create();
     Context contextOfThisThread = Context.ROOT.withValue(PET, "dog");
-    contextOfThisThread.attach();
+    Context toRestore = contextOfThisThread.attach();
     new Thread(new Runnable() {
       @Override
       public void run() {
@@ -123,16 +112,22 @@ public class ContextTest {
     assertNotNull(contextOfNewThread.get(5, TimeUnit.SECONDS));
     assertNotSame(contextOfThisThread, contextOfNewThread.get());
     assertSame(contextOfThisThread, Context.current());
+    contextOfThisThread.detach(toRestore);
   }
 
   @Test
   public void rootCanBeAttached() {
     Context fork = Context.ROOT.fork();
-    fork.attach();
-    Context.ROOT.attach();
+    Context toRestore1 = fork.attach();
+    Context toRestore2 = Context.ROOT.attach();
     assertTrue(Context.ROOT.isCurrent());
-    fork.attach();
+
+    Context toRestore3 = fork.attach();
     assertTrue(fork.isCurrent());
+
+    fork.detach(toRestore3);
+    Context.ROOT.detach(toRestore2);
+    fork.detach(toRestore1);
   }
 
   @Test
@@ -237,14 +232,14 @@ public class ContextTest {
     Context base = Context.current().withValues(PET, "dog", COLOR, "blue");
     Context child = base.withValues(PET, "cat", FOOD, "cheese", FAVORITE, fav);
 
-    child.attach();
+    Context toRestore = child.attach();
 
     assertEquals("cat", PET.get());
     assertEquals("cheese", FOOD.get());
     assertEquals("blue", COLOR.get());
     assertEquals(fav, FAVORITE.get());
 
-    base.attach();
+    child.detach(toRestore);
   }
 
   @Test
@@ -253,7 +248,7 @@ public class ContextTest {
     Context base = Context.current().withValues(PET, "dog", COLOR, "blue");
     Context child = base.withValues(PET, "cat", FOOD, "cheese", FAVORITE, fav, LUCKY, 7);
 
-    child.attach();
+    Context toRestore = child.attach();
 
     assertEquals("cat", PET.get());
     assertEquals("cheese", FOOD.get());
@@ -261,7 +256,7 @@ public class ContextTest {
     assertEquals(fav, FAVORITE.get());
     assertEquals(7, (int) LUCKY.get());
 
-    base.attach();
+    child.detach(toRestore);
   }
 
   @Test
@@ -394,11 +389,14 @@ public class ContextTest {
     assertSame(t, child.cancellationCause());
   }
 
+  // Context#isCurrent() and Context.CancellableContext#isCurrent() are intended
+  // to be visible only for testing. The deprecation is meant for users.
+  @SuppressWarnings("deprecation")
   @Test
   public void cancellableContextIsAttached() {
     Context.CancellableContext base = Context.current().withValue(FOOD, "fish").withCancellation();
     assertFalse(base.isCurrent());
-    base.attach();
+    Context toRestore = base.attach();
 
     Context attached = Context.current();
     assertSame("fish", FOOD.get());
@@ -415,7 +413,7 @@ public class ContextTest {
     assertSame(t, attached.cancellationCause());
     assertSame(attached, listenerNotifedContext);
 
-    Context.ROOT.attach();
+    base.detach(toRestore);
   }
 
   @Test
@@ -464,7 +462,7 @@ public class ContextTest {
     assertSame(current, observed);
     assertSame(current, Context.current());
 
-    final Error err = new Error();
+    final TestError err = new TestError();
     try {
       base.wrap(new Runnable() {
         @Override
@@ -473,7 +471,7 @@ public class ContextTest {
         }
       }).run();
       fail("Expected exception");
-    } catch (Error ex) {
+    } catch (TestError ex) {
       assertSame(err, ex);
     }
     assertSame(current, Context.current());
@@ -504,7 +502,7 @@ public class ContextTest {
     assertSame(current, observed);
     assertSame(current, Context.current());
 
-    final Error err = new Error();
+    final TestError err = new TestError();
     try {
       base.wrap(new Callable<Object>() {
         @Override
@@ -513,7 +511,7 @@ public class ContextTest {
         }
       }).call();
       fail("Excepted exception");
-    } catch (Error ex) {
+    } catch (TestError ex) {
       assertSame(err, ex);
     }
     assertSame(current, Context.current());
@@ -759,4 +757,251 @@ public class ContextTest {
     assertTrue(context.isCancelled());
     assertThat(context.cancellationCause(), instanceOf(TimeoutException.class));
   }
+
+  /**
+   * Tests initializing the {@link Context} class with a custom logger which uses Context's storage
+   * when logging.
+   */
+  @Test
+  public void initContextWithCustomClassLoaderWithCustomLogger() throws Exception {
+    StaticTestingClassLoader classLoader =
+        new StaticTestingClassLoader(
+            getClass().getClassLoader(), Pattern.compile("io\\.grpc\\.[^.]+"));
+    Class<?> runnable =
+        classLoader.loadClass(LoadMeWithStaticTestingClassLoader.class.getName());
+
+    ((Runnable) runnable.getDeclaredConstructor().newInstance()).run();
+  }
+
+  /**
+   * Ensure that newly created threads can attach/detach a context.
+   * The current test thread already has a context manually attached in {@link #setUp()}.
+   */
+  @Test
+  public void newThreadAttachContext() throws Exception {
+    Context parent = Context.current().withValue(COLOR, "blue");
+    parent.call(new Callable<Object>() {
+      @Override
+      public Object call() throws Exception {
+        assertEquals("blue", COLOR.get());
+
+        final Context child = Context.current().withValue(COLOR, "red");
+        Future<String> workerThreadVal = scheduler
+            .submit(new Callable<String>() {
+              @Override
+              public String call() {
+                Context initial = Context.current();
+                assertNotNull(initial);
+                Context toRestore = child.attach();
+                try {
+                  assertNotNull(toRestore);
+                  return COLOR.get();
+                } finally {
+                  child.detach(toRestore);
+                  assertEquals(initial, Context.current());
+                }
+              }
+            });
+        assertEquals("red", workerThreadVal.get());
+
+        assertEquals("blue", COLOR.get());
+        return null;
+      }
+    });
+  }
+
+  /**
+   * Similar to {@link #newThreadAttachContext()} but without giving the new thread a specific ctx.
+   */
+  @Test
+  public void newThreadWithoutContext() throws Exception {
+    Context parent = Context.current().withValue(COLOR, "blue");
+    parent.call(new Callable<Object>() {
+      @Override
+      public Object call() throws Exception {
+        assertEquals("blue", COLOR.get());
+
+        Future<String> workerThreadVal = scheduler
+            .submit(new Callable<String>() {
+              @Override
+              public String call() {
+                assertNotNull(Context.current());
+                return COLOR.get();
+              }
+            });
+        assertEquals(null, workerThreadVal.get());
+
+        assertEquals("blue", COLOR.get());
+        return null;
+      }
+    });
+  }
+
+  @Test
+  public void storageReturnsNullTest() throws Exception {
+    Field storage = Context.class.getDeclaredField("storage");
+    assertTrue(Modifier.isFinal(storage.getModifiers()));
+    // use reflection to forcibly change the storage object to a test object
+    storage.setAccessible(true);
+    Object o = storage.get(null);
+    @SuppressWarnings("unchecked")
+    AtomicReference<Context.Storage> storageRef = (AtomicReference<Context.Storage>) o;
+    Context.Storage originalStorage = storageRef.get();
+    try {
+      storageRef.set(new Context.Storage() {
+        @Override
+        public Context doAttach(Context toAttach) {
+          return null;
+        }
+
+        @Override
+        public void detach(Context toDetach, Context toRestore) {
+          // noop
+        }
+
+        @Override
+        public Context current() {
+          return null;
+        }
+      });
+      // current() returning null gets transformed into ROOT
+      assertEquals(Context.ROOT, Context.current());
+
+      // doAttach() returning null gets transformed into ROOT
+      Context blueContext = Context.current().withValue(COLOR, "blue");
+      Context toRestore = blueContext.attach();
+      assertEquals(Context.ROOT, toRestore);
+
+      // final sanity check
+      blueContext.detach(toRestore);
+      assertEquals(Context.ROOT, Context.current());
+    } finally {
+      // undo the changes
+      storageRef.set(originalStorage);
+      storage.setAccessible(false);
+    }
+  }
+
+  @Test
+  public void cancellableAncestorTest() {
+    assertEquals(null, cancellableAncestor(null));
+
+    Context c = Context.current();
+    assertFalse(c.canBeCancelled());
+    assertEquals(null, cancellableAncestor(c));
+
+    Context.CancellableContext withCancellation = c.withCancellation();
+    assertEquals(withCancellation, cancellableAncestor(withCancellation));
+
+    Context child = withCancellation.withValue(COLOR, "blue");
+    assertFalse(child instanceof Context.CancellableContext);
+    assertEquals(withCancellation, cancellableAncestor(child));
+
+    Context grandChild = child.withValue(COLOR, "red");
+    assertFalse(grandChild instanceof Context.CancellableContext);
+    assertEquals(withCancellation, cancellableAncestor(grandChild));
+  }
+
+  @Test
+  public void cancellableAncestorIntegrationTest() {
+    Context base = Context.current();
+
+    Context blue = base.withValue(COLOR, "blue");
+    assertNull(blue.cancellableAncestor);
+    Context.CancellableContext cancellable = blue.withCancellation();
+    assertNull(cancellable.cancellableAncestor);
+    Context childOfCancel = cancellable.withValue(PET, "cat");
+    assertSame(cancellable, childOfCancel.cancellableAncestor);
+    Context grandChildOfCancel = childOfCancel.withValue(FOOD, "lasagna");
+    assertSame(cancellable, grandChildOfCancel.cancellableAncestor);
+
+    Context.CancellableContext cancellable2 = childOfCancel.withCancellation();
+    assertSame(cancellable, cancellable2.cancellableAncestor);
+    Context childOfCancellable2 = cancellable2.withValue(PET, "dog");
+    assertSame(cancellable2, childOfCancellable2.cancellableAncestor);
+  }
+
+  @Test
+  public void cancellableAncestorFork() {
+    Context.CancellableContext cancellable = Context.current().withCancellation();
+    Context fork = cancellable.fork();
+    assertNull(fork.cancellableAncestor);
+  }
+
+  @Test
+  public void cancellableContext_closeCancelsWithNullCause() throws Exception {
+    Context.CancellableContext cancellable = Context.current().withCancellation();
+    cancellable.close();
+    assertTrue(cancellable.isCancelled());
+    assertNull(cancellable.cancellationCause());
+  }
+
+  @Test
+  public void errorWhenAncestryLengthLong() {
+    final AtomicReference<LogRecord> logRef = new AtomicReference<LogRecord>();
+    Handler handler = new Handler() {
+      @Override
+      public void publish(LogRecord record) {
+        logRef.set(record);
+      }
+
+      @Override
+      public void flush() {
+      }
+
+      @Override
+      public void close() throws SecurityException {
+      }
+    };
+    Logger logger = Logger.getLogger(Context.class.getName());
+    try {
+      logger.addHandler(handler);
+      Context ctx = Context.current();
+      for (int i = 0; i < Context.CONTEXT_DEPTH_WARN_THRESH ; i++) {
+        assertNull(logRef.get());
+        ctx = ctx.fork();
+      }
+      ctx = ctx.fork();
+      assertNotNull(logRef.get());
+      assertNotNull(logRef.get().getThrown());
+      assertEquals(Level.SEVERE, logRef.get().getLevel());
+    } finally {
+      logger.removeHandler(handler);
+    }
+  }
+
+  // UsedReflectively
+  public static final class LoadMeWithStaticTestingClassLoader implements Runnable {
+    @Override
+    public void run() {
+      Logger logger = Logger.getLogger(Context.class.getName());
+      logger.setLevel(Level.ALL);
+      Handler handler = new Handler() {
+        @Override
+        public void publish(LogRecord record) {
+          Context ctx = Context.current();
+          Context previous = ctx.attach();
+          ctx.detach(previous);
+        }
+
+        @Override
+        public void flush() {
+        }
+
+        @Override
+        public void close() throws SecurityException {
+        }
+      };
+      logger.addHandler(handler);
+
+      try {
+        assertNotNull(Context.ROOT);
+      } finally {
+        logger.removeHandler(handler);
+      }
+    }
+  }
+
+  /** Allows more precise catch blocks than plain Error to avoid catching AssertionError. */
+  private static final class TestError extends Error {}
 }

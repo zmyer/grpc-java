@@ -1,48 +1,31 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.Math.min;
-
-import com.google.common.io.ByteStreams;
 
 import io.grpc.Codec;
 import io.grpc.Compressor;
 import io.grpc.Drainable;
 import io.grpc.KnownLength;
 import io.grpc.Status;
-
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -50,14 +33,16 @@ import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
-
 import javax.annotation.Nullable;
 
 /**
  * Encodes gRPC messages to be delivered via the transport layer which implements {@link
  * MessageFramer.Sink}.
  */
-public class MessageFramer {
+public class MessageFramer implements Framer {
+
+  private static final int NO_MAX_OUTBOUND_MESSAGE_SIZE = -1;
+
   /**
    * Sink implemented by the transport layer to receive frames and forward them to their
    * destination.
@@ -70,8 +55,13 @@ public class MessageFramer {
      *              closed and there is no data to deliver.
      * @param endOfStream whether the frame is the last one for the GRPC stream
      * @param flush {@code true} if more data may not be arriving soon
+     * @param numMessages the number of messages that this series of frames represents
      */
-    void deliverFrame(@Nullable WritableBuffer frame, boolean endOfStream, boolean flush);
+    void deliverFrame(
+        @Nullable WritableBuffer frame,
+        boolean endOfStream,
+        boolean flush,
+        int numMessages);
   }
 
   private static final int HEADER_LENGTH = 5;
@@ -79,6 +69,8 @@ public class MessageFramer {
   private static final byte COMPRESSED = 1;
 
   private final Sink sink;
+  // effectively final.  Can only be set once.
+  private int maxOutboundMessageSize = NO_MAX_OUTBOUND_MESSAGE_SIZE;
   private WritableBuffer buffer;
   private Compressor compressor = Codec.Identity.NONE;
   private boolean messageCompression = true;
@@ -86,7 +78,13 @@ public class MessageFramer {
   private final byte[] headerScratch = new byte[HEADER_LENGTH];
   private final WritableBufferAllocator bufferAllocator;
   private final StatsTraceContext statsTraceCtx;
+  // transportTracer is nullable until it is integrated with client transports
   private boolean closed;
+
+  // Tracing and stats-related states
+  private int messagesBuffered;
+  private int currentMessageSeqNo = -1;
+  private long currentMessageWireSize;
 
   /**
    * Creates a {@code MessageFramer}.
@@ -94,21 +92,29 @@ public class MessageFramer {
    * @param sink the sink used to deliver frames to the transport
    * @param bufferAllocator allocates buffers that the transport can commit to the wire.
    */
-  public MessageFramer(Sink sink, WritableBufferAllocator bufferAllocator,
-      StatsTraceContext statsTraceCtx) {
+  public MessageFramer(
+      Sink sink, WritableBufferAllocator bufferAllocator, StatsTraceContext statsTraceCtx) {
     this.sink = checkNotNull(sink, "sink");
     this.bufferAllocator = checkNotNull(bufferAllocator, "bufferAllocator");
     this.statsTraceCtx = checkNotNull(statsTraceCtx, "statsTraceCtx");
   }
 
-  MessageFramer setCompressor(Compressor compressor) {
+  @Override
+  public MessageFramer setCompressor(Compressor compressor) {
     this.compressor = checkNotNull(compressor, "Can't pass an empty compressor");
     return this;
   }
 
-  MessageFramer setMessageCompression(boolean enable) {
+  @Override
+  public MessageFramer setMessageCompression(boolean enable) {
     messageCompression = enable;
     return this;
+  }
+
+  @Override
+  public void setMaxOutboundMessageSize(int maxSize) {
+    checkState(maxOutboundMessageSize == NO_MAX_OUTBOUND_MESSAGE_SIZE, "max size already set");
+    maxOutboundMessageSize = maxSize;
   }
 
   /**
@@ -116,8 +122,13 @@ public class MessageFramer {
    *
    * @param message contains the message to be written out. It will be completely consumed.
    */
+  @Override
   public void writePayload(InputStream message) {
     verifyNotClosed();
+    messagesBuffered++;
+    currentMessageSeqNo++;
+    currentMessageWireSize = 0;
+    statsTraceCtx.outboundMessage(currentMessageSeqNo);
     boolean compressed = messageCompression && compressor != Codec.Identity.NONE;
     int written = -1;
     int messageLength = -2;
@@ -145,21 +156,29 @@ public class MessageFramer {
       String err = String.format("Message length inaccurate %s != %s", written, messageLength);
       throw Status.INTERNAL.withDescription(err).asRuntimeException();
     }
-    statsTraceCtx.uncompressedBytesSent(written);
+    statsTraceCtx.outboundUncompressedSize(written);
+    statsTraceCtx.outboundWireSize(currentMessageWireSize);
+    statsTraceCtx.outboundMessageSent(currentMessageSeqNo, currentMessageWireSize, written);
   }
 
   private int writeUncompressed(InputStream message, int messageLength) throws IOException {
     if (messageLength != -1) {
-      statsTraceCtx.wireBytesSent(messageLength);
+      currentMessageWireSize = messageLength;
       return writeKnownLengthUncompressed(message, messageLength);
     }
     BufferChainOutputStream bufferChain = new BufferChainOutputStream();
     int written = writeToOutputStream(message, bufferChain);
+    if (maxOutboundMessageSize >= 0 && written > maxOutboundMessageSize) {
+      throw Status.RESOURCE_EXHAUSTED
+          .withDescription(
+              String.format("message too large %d > %d", written , maxOutboundMessageSize))
+          .asRuntimeException();
+    }
     writeBufferChain(bufferChain, false);
     return written;
   }
 
-  private int writeCompressed(InputStream message, int messageLength) throws IOException {
+  private int writeCompressed(InputStream message, int unusedMessageLength) throws IOException {
     BufferChainOutputStream bufferChain = new BufferChainOutputStream();
 
     OutputStream compressingStream = compressor.compress(bufferChain);
@@ -168,6 +187,12 @@ public class MessageFramer {
       written = writeToOutputStream(message, compressingStream);
     } finally {
       compressingStream.close();
+    }
+    if (maxOutboundMessageSize >= 0 && written > maxOutboundMessageSize) {
+      throw Status.RESOURCE_EXHAUSTED
+          .withDescription(
+              String.format("message too large %d > %d", written , maxOutboundMessageSize))
+          .asRuntimeException();
     }
 
     writeBufferChain(bufferChain, true);
@@ -186,6 +211,12 @@ public class MessageFramer {
    */
   private int writeKnownLengthUncompressed(InputStream message, int messageLength)
       throws IOException {
+    if (maxOutboundMessageSize >= 0 && messageLength > maxOutboundMessageSize) {
+      throw Status.RESOURCE_EXHAUSTED
+          .withDescription(
+              String.format("message too large %d > %d", messageLength , maxOutboundMessageSize))
+          .asRuntimeException();
+    }
     ByteBuffer header = ByteBuffer.wrap(headerScratch);
     header.put(UNCOMPRESSED);
     header.putInt(messageLength);
@@ -216,16 +247,19 @@ public class MessageFramer {
     // Note that we are always delivering a small message to the transport here which
     // may incur transport framing overhead as it may be sent separately to the contents
     // of the GRPC frame.
-    sink.deliverFrame(writeableHeader, false, false);
+    // The final message may not be completely written because we do not flush the last buffer.
+    // Do not report the last message as sent.
+    sink.deliverFrame(writeableHeader, false, false, messagesBuffered - 1);
+    messagesBuffered = 1;
     // Commit all except the last buffer to the sink
     List<WritableBuffer> bufferList = bufferChain.bufferList;
     for (int i = 0; i < bufferList.size() - 1; i++) {
-      sink.deliverFrame(bufferList.get(i), false, false);
+      sink.deliverFrame(bufferList.get(i), false, false, 0);
     }
     // Assign the current buffer to the last in the chain so it can be used
     // for future writes or written with end-of-stream=true on close.
     buffer = bufferList.get(bufferList.size() - 1);
-    statsTraceCtx.wireBytesSent(messageLength);
+    currentMessageWireSize = messageLength;
   }
 
   private static int writeToOutputStream(InputStream message, OutputStream outputStream)
@@ -235,7 +269,7 @@ public class MessageFramer {
     } else {
       // This makes an unnecessary copy of the bytes when bytebuf supports array(). However, we
       // expect performance-critical code to support flushTo().
-      long written = ByteStreams.copy(message, outputStream);
+      long written = IoUtils.copy(message, outputStream);
       checkArgument(written <= Integer.MAX_VALUE, "Message size overflow: %s", written);
       return (int) written;
     }
@@ -260,6 +294,7 @@ public class MessageFramer {
   /**
    * Flushes any buffered data in the framer to the sink.
    */
+  @Override
   public void flush() {
     if (buffer != null && buffer.readableBytes() > 0) {
       commitToSink(false, true);
@@ -270,6 +305,7 @@ public class MessageFramer {
    * Indicates whether or not this framer has been closed via a call to either
    * {@link #close()} or {@link #dispose()}.
    */
+  @Override
   public boolean isClosed() {
     return closed;
   }
@@ -278,6 +314,7 @@ public class MessageFramer {
    * Flushes and closes the framer and releases any buffers. After the framer is closed or
    * disposed, additional calls to this method will have no affect.
    */
+  @Override
   public void close() {
     if (!isClosed()) {
       closed = true;
@@ -294,6 +331,7 @@ public class MessageFramer {
    * Closes the framer and releases any buffers, but does not flush. After the framer is
    * closed or disposed, additional calls to this method will have no affect.
    */
+  @Override
   public void dispose() {
     closed = true;
     releaseBuffer();
@@ -309,7 +347,8 @@ public class MessageFramer {
   private void commitToSink(boolean endOfStream, boolean flush) {
     WritableBuffer buf = buffer;
     buffer = null;
-    sink.deliverFrame(buf, endOfStream, flush);
+    sink.deliverFrame(buf, endOfStream, flush, messagesBuffered);
+    messagesBuffered = 0;
   }
 
   private void verifyNotClosed() {

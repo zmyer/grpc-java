@@ -1,26 +1,26 @@
 package io.grpc.health.v1;
 
-import static io.grpc.stub.ClientCalls.asyncUnaryCall;
-import static io.grpc.stub.ClientCalls.asyncServerStreamingCall;
-import static io.grpc.stub.ClientCalls.asyncClientStreamingCall;
-import static io.grpc.stub.ClientCalls.asyncBidiStreamingCall;
-import static io.grpc.stub.ClientCalls.blockingUnaryCall;
-import static io.grpc.stub.ClientCalls.blockingServerStreamingCall;
-import static io.grpc.stub.ClientCalls.futureUnaryCall;
 import static io.grpc.MethodDescriptor.generateFullMethodName;
-import static io.grpc.stub.ServerCalls.asyncUnaryCall;
-import static io.grpc.stub.ServerCalls.asyncServerStreamingCall;
-import static io.grpc.stub.ServerCalls.asyncClientStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncBidiStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncClientStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncServerStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncUnaryCall;
+import static io.grpc.stub.ClientCalls.blockingServerStreamingCall;
+import static io.grpc.stub.ClientCalls.blockingUnaryCall;
+import static io.grpc.stub.ClientCalls.futureUnaryCall;
 import static io.grpc.stub.ServerCalls.asyncBidiStreamingCall;
-import static io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall;
+import static io.grpc.stub.ServerCalls.asyncClientStreamingCall;
+import static io.grpc.stub.ServerCalls.asyncServerStreamingCall;
+import static io.grpc.stub.ServerCalls.asyncUnaryCall;
 import static io.grpc.stub.ServerCalls.asyncUnimplementedStreamingCall;
+import static io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall;
 
 /**
  */
 @javax.annotation.Generated(
-    value = "by gRPC proto compiler (version 1.1.0-SNAPSHOT)",
-    comments = "Source: health.proto")
-public class HealthGrpc {
+    value = "by gRPC proto compiler",
+    comments = "Source: grpc/health/v1/health.proto")
+public final class HealthGrpc {
 
   private HealthGrpc() {}
 
@@ -28,14 +28,42 @@ public class HealthGrpc {
 
   // Static method descriptors that strictly reflect the proto.
   @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  @java.lang.Deprecated // Use {@link #getCheckMethod()} instead. 
   public static final io.grpc.MethodDescriptor<io.grpc.health.v1.HealthCheckRequest,
-      io.grpc.health.v1.HealthCheckResponse> METHOD_CHECK =
-      io.grpc.MethodDescriptor.create(
-          io.grpc.MethodDescriptor.MethodType.UNARY,
-          generateFullMethodName(
-              "grpc.health.v1.Health", "Check"),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.health.v1.HealthCheckRequest.getDefaultInstance()),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.health.v1.HealthCheckResponse.getDefaultInstance()));
+      io.grpc.health.v1.HealthCheckResponse> METHOD_CHECK = getCheckMethodHelper();
+
+  private static volatile io.grpc.MethodDescriptor<io.grpc.health.v1.HealthCheckRequest,
+      io.grpc.health.v1.HealthCheckResponse> getCheckMethod;
+
+  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  public static io.grpc.MethodDescriptor<io.grpc.health.v1.HealthCheckRequest,
+      io.grpc.health.v1.HealthCheckResponse> getCheckMethod() {
+    return getCheckMethodHelper();
+  }
+
+  private static io.grpc.MethodDescriptor<io.grpc.health.v1.HealthCheckRequest,
+      io.grpc.health.v1.HealthCheckResponse> getCheckMethodHelper() {
+    io.grpc.MethodDescriptor<io.grpc.health.v1.HealthCheckRequest, io.grpc.health.v1.HealthCheckResponse> getCheckMethod;
+    if ((getCheckMethod = HealthGrpc.getCheckMethod) == null) {
+      synchronized (HealthGrpc.class) {
+        if ((getCheckMethod = HealthGrpc.getCheckMethod) == null) {
+          HealthGrpc.getCheckMethod = getCheckMethod = 
+              io.grpc.MethodDescriptor.<io.grpc.health.v1.HealthCheckRequest, io.grpc.health.v1.HealthCheckResponse>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(
+                  "grpc.health.v1.Health", "Check"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.health.v1.HealthCheckRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.health.v1.HealthCheckResponse.getDefaultInstance()))
+                  .setSchemaDescriptor(new HealthMethodDescriptorSupplier("Check"))
+                  .build();
+          }
+        }
+     }
+     return getCheckMethod;
+  }
 
   /**
    * Creates a new async stub that supports all call types for the service
@@ -53,7 +81,7 @@ public class HealthGrpc {
   }
 
   /**
-   * Creates a new ListenableFuture-style stub that supports unary and streaming output calls on the service
+   * Creates a new ListenableFuture-style stub that supports unary calls on the service
    */
   public static HealthFutureStub newFutureStub(
       io.grpc.Channel channel) {
@@ -68,13 +96,13 @@ public class HealthGrpc {
      */
     public void check(io.grpc.health.v1.HealthCheckRequest request,
         io.grpc.stub.StreamObserver<io.grpc.health.v1.HealthCheckResponse> responseObserver) {
-      asyncUnimplementedUnaryCall(METHOD_CHECK, responseObserver);
+      asyncUnimplementedUnaryCall(getCheckMethodHelper(), responseObserver);
     }
 
-    @java.lang.Override public io.grpc.ServerServiceDefinition bindService() {
+    @java.lang.Override public final io.grpc.ServerServiceDefinition bindService() {
       return io.grpc.ServerServiceDefinition.builder(getServiceDescriptor())
           .addMethod(
-            METHOD_CHECK,
+            getCheckMethodHelper(),
             asyncUnaryCall(
               new MethodHandlers<
                 io.grpc.health.v1.HealthCheckRequest,
@@ -107,7 +135,7 @@ public class HealthGrpc {
     public void check(io.grpc.health.v1.HealthCheckRequest request,
         io.grpc.stub.StreamObserver<io.grpc.health.v1.HealthCheckResponse> responseObserver) {
       asyncUnaryCall(
-          getChannel().newCall(METHOD_CHECK, getCallOptions()), request, responseObserver);
+          getChannel().newCall(getCheckMethodHelper(), getCallOptions()), request, responseObserver);
     }
   }
 
@@ -133,7 +161,7 @@ public class HealthGrpc {
      */
     public io.grpc.health.v1.HealthCheckResponse check(io.grpc.health.v1.HealthCheckRequest request) {
       return blockingUnaryCall(
-          getChannel(), METHOD_CHECK, getCallOptions(), request);
+          getChannel(), getCheckMethodHelper(), getCallOptions(), request);
     }
   }
 
@@ -160,13 +188,13 @@ public class HealthGrpc {
     public com.google.common.util.concurrent.ListenableFuture<io.grpc.health.v1.HealthCheckResponse> check(
         io.grpc.health.v1.HealthCheckRequest request) {
       return futureUnaryCall(
-          getChannel().newCall(METHOD_CHECK, getCallOptions()), request);
+          getChannel().newCall(getCheckMethodHelper(), getCallOptions()), request);
     }
   }
 
   private static final int METHODID_CHECK = 0;
 
-  private static class MethodHandlers<Req, Resp> implements
+  private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
       io.grpc.stub.ServerCalls.ServerStreamingMethod<Req, Resp>,
       io.grpc.stub.ServerCalls.ClientStreamingMethod<Req, Resp>,
@@ -174,7 +202,7 @@ public class HealthGrpc {
     private final HealthImplBase serviceImpl;
     private final int methodId;
 
-    public MethodHandlers(HealthImplBase serviceImpl, int methodId) {
+    MethodHandlers(HealthImplBase serviceImpl, int methodId) {
       this.serviceImpl = serviceImpl;
       this.methodId = methodId;
     }
@@ -203,22 +231,56 @@ public class HealthGrpc {
     }
   }
 
-  private static final class HealthDescriptorSupplier implements io.grpc.protobuf.ProtoFileDescriptorSupplier {
+  private static abstract class HealthBaseDescriptorSupplier
+      implements io.grpc.protobuf.ProtoFileDescriptorSupplier, io.grpc.protobuf.ProtoServiceDescriptorSupplier {
+    HealthBaseDescriptorSupplier() {}
+
     @java.lang.Override
     public com.google.protobuf.Descriptors.FileDescriptor getFileDescriptor() {
       return io.grpc.health.v1.HealthProto.getDescriptor();
     }
+
+    @java.lang.Override
+    public com.google.protobuf.Descriptors.ServiceDescriptor getServiceDescriptor() {
+      return getFileDescriptor().findServiceByName("Health");
+    }
   }
 
-  private static io.grpc.ServiceDescriptor serviceDescriptor;
+  private static final class HealthFileDescriptorSupplier
+      extends HealthBaseDescriptorSupplier {
+    HealthFileDescriptorSupplier() {}
+  }
 
-  public static synchronized io.grpc.ServiceDescriptor getServiceDescriptor() {
-    if (serviceDescriptor == null) {
-      serviceDescriptor = new io.grpc.ServiceDescriptor(SERVICE_NAME,
-          new HealthDescriptorSupplier(),
-          METHOD_CHECK);
+  private static final class HealthMethodDescriptorSupplier
+      extends HealthBaseDescriptorSupplier
+      implements io.grpc.protobuf.ProtoMethodDescriptorSupplier {
+    private final String methodName;
+
+    HealthMethodDescriptorSupplier(String methodName) {
+      this.methodName = methodName;
     }
 
-    return serviceDescriptor;
+    @java.lang.Override
+    public com.google.protobuf.Descriptors.MethodDescriptor getMethodDescriptor() {
+      return getServiceDescriptor().findMethodByName(methodName);
+    }
+  }
+
+  private static volatile io.grpc.ServiceDescriptor serviceDescriptor;
+
+  public static io.grpc.ServiceDescriptor getServiceDescriptor() {
+    io.grpc.ServiceDescriptor result = serviceDescriptor;
+    if (result == null) {
+      synchronized (HealthGrpc.class) {
+        result = serviceDescriptor;
+        if (result == null) {
+          serviceDescriptor = result = io.grpc.ServiceDescriptor.newBuilder(SERVICE_NAME)
+              .setSchemaDescriptor(new HealthFileDescriptorSupplier())
+              .addMethod(getCheckMethodHelper())
+              .build();
+        }
+      }
+    }
+    return result;
   }
 }

@@ -1,39 +1,25 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.okhttp;
 
+import static com.google.common.base.Charsets.UTF_8;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -41,29 +27,21 @@ import static org.mockito.Mockito.when;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
-
 import io.grpc.okhttp.OkHttpProtocolNegotiator.AndroidNegotiator;
-import io.grpc.okhttp.OkHttpProtocolNegotiator.AndroidNegotiator.TlsExtensionType;
 import io.grpc.okhttp.internal.Platform;
+import io.grpc.okhttp.internal.Platform.TlsExtensionType;
 import io.grpc.okhttp.internal.Protocol;
-
-import org.junit.After;
-import org.junit.Before;
+import java.io.IOException;
+import javax.net.ssl.HandshakeCompletedListener;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocket;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.Mockito;
-
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.security.Provider;
-import java.security.Security;
-
-import javax.net.ssl.HandshakeCompletedListener;
-import javax.net.ssl.SSLSession;
-import javax.net.ssl.SSLSocket;
 
 /**
  * Tests for {@link OkHttpProtocolNegotiator}.
@@ -72,20 +50,8 @@ import javax.net.ssl.SSLSocket;
 public class OkHttpProtocolNegotiatorTest {
   @Rule public final ExpectedException thrown = ExpectedException.none();
 
-  private final Provider fakeSecurityProvider = new Provider("GmsCore_OpenSSL", 1.0, "info") {};
   private final SSLSocket sock = mock(SSLSocket.class);
   private final Platform platform = mock(Platform.class);
-
-  @Before
-  public void setUp() {
-    // Tests that depend on android need this to know which protocol negotiation to use.
-    Security.addProvider(fakeSecurityProvider);
-  }
-
-  @After
-  public void tearDown() {
-    Security.removeProvider(fakeSecurityProvider.getName());
-  }
 
   @Test
   public void createNegotiator_isAndroid() {
@@ -146,7 +112,9 @@ public class OkHttpProtocolNegotiatorTest {
 
   @Test
   public void negotiate_handshakeFails() throws IOException {
+    SSLParameters parameters = new SSLParameters();
     OkHttpProtocolNegotiator negotiator = OkHttpProtocolNegotiator.get();
+    doReturn(parameters).when(sock).getSSLParameters();
     doThrow(new IOException()).when(sock).startHandshake();
     thrown.expect(IOException.class);
 
@@ -179,77 +147,30 @@ public class OkHttpProtocolNegotiatorTest {
   }
 
   @Test
-  public void pickTlsExtensionType_securityProvider() throws Exception {
-    assertNotNull(Security.getProvider(fakeSecurityProvider.getName()));
+  public void negotiate_preferGrpcExp() throws Exception {
+    // This test doesn't actually verify that grpc-exp is preferred, since the
+    // mocking of getSelectedProtocol() causes the protocol list to be ignored.
+    // The main usefulness of the test is for future changes to
+    // OkHttpProtocolNegotiator, where we can catch any change that would affect
+    // grpc-exp preference.
+    when(platform.getSelectedProtocol(Mockito.<SSLSocket>any())).thenReturn("grpc-exp");
+    OkHttpProtocolNegotiator negotiator = new OkHttpProtocolNegotiator(platform);
 
-    AndroidNegotiator.TlsExtensionType tlsExtensionType =
-        AndroidNegotiator.pickTlsExtensionType(getClass().getClassLoader());
+    String actual =
+        negotiator.negotiate(sock, "hostname",
+                ImmutableList.of(Protocol.GRPC_EXP, Protocol.HTTP_2));
 
-    assertEquals(TlsExtensionType.ALPN_AND_NPN, tlsExtensionType);
-  }
-
-  @Test
-  public void pickTlsExtensionType_android50() throws Exception {
-    Security.removeProvider(fakeSecurityProvider.getName());
-    ClassLoader cl = new ClassLoader(this.getClass().getClassLoader()) {
-      @Override
-      protected Class<?> findClass(String name) throws ClassNotFoundException {
-        // Just don't throw.
-        if ("android.net.Network".equals(name)) {
-          return null;
-        }
-        return super.findClass(name);
-      }
-    };
-
-    AndroidNegotiator.TlsExtensionType tlsExtensionType =
-        AndroidNegotiator.pickTlsExtensionType(cl);
-
-    assertEquals(TlsExtensionType.ALPN_AND_NPN, tlsExtensionType);
-  }
-
-  @Test
-  public void pickTlsExtensionType_android41() throws Exception {
-    Security.removeProvider(fakeSecurityProvider.getName());
-    ClassLoader cl = new ClassLoader(this.getClass().getClassLoader()) {
-      @Override
-      protected Class<?> findClass(String name) throws ClassNotFoundException {
-        // Just don't throw.
-        if ("android.app.ActivityOptions".equals(name)) {
-          return null;
-        }
-        return super.findClass(name);
-      }
-    };
-
-    AndroidNegotiator.TlsExtensionType tlsExtensionType =
-        AndroidNegotiator.pickTlsExtensionType(cl);
-
-    assertEquals(TlsExtensionType.NPN, tlsExtensionType);
-  }
-
-  @Test
-  public void pickTlsExtensionType_none() throws Exception {
-    Security.removeProvider(fakeSecurityProvider.getName());
-
-    AndroidNegotiator.TlsExtensionType tlsExtensionType =
-        AndroidNegotiator.pickTlsExtensionType(getClass().getClassLoader());
-
-    assertNull(tlsExtensionType);
-  }
-
-  @Test
-  public void androidNegotiator_failsOnNull() {
-    thrown.expect(NullPointerException.class);
-    thrown.expectMessage("Unable to pick a TLS extension");
-
-    new AndroidNegotiator(platform, null);
+    assertEquals("grpc-exp", actual);
+    verify(sock).startHandshake();
+    verify(platform).getSelectedProtocol(sock);
+    verify(platform).afterHandshake(sock);
   }
 
   // Checks that the super class is properly invoked.
   @Test
   public void negotiate_android_handshakeFails() throws Exception {
-    AndroidNegotiator negotiator = new AndroidNegotiator(platform, TlsExtensionType.ALPN_AND_NPN);
+    when(platform.getTlsExtensionType()).thenReturn(TlsExtensionType.ALPN_AND_NPN);
+    AndroidNegotiator negotiator = new AndroidNegotiator(platform);
 
     FakeAndroidSslSocket androidSock = new FakeAndroidSslSocket() {
       @Override
@@ -268,13 +189,14 @@ public class OkHttpProtocolNegotiatorTest {
   public static class FakeAndroidSslSocketAlpn extends FakeAndroidSslSocket {
     @Override
     public byte[] getAlpnSelectedProtocol() {
-      return "h2".getBytes(StandardCharsets.UTF_8);
+      return "h2".getBytes(UTF_8);
     }
   }
 
   @Test
   public void getSelectedProtocol_alpn() throws Exception {
-    AndroidNegotiator negotiator = new AndroidNegotiator(platform, TlsExtensionType.ALPN_AND_NPN);
+    when(platform.getTlsExtensionType()).thenReturn(TlsExtensionType.ALPN_AND_NPN);
+    AndroidNegotiator negotiator = new AndroidNegotiator(platform);
     FakeAndroidSslSocket androidSock = new FakeAndroidSslSocketAlpn();
 
     String actual = negotiator.getSelectedProtocol(androidSock);
@@ -286,13 +208,14 @@ public class OkHttpProtocolNegotiatorTest {
   public static class FakeAndroidSslSocketNpn extends FakeAndroidSslSocket {
     @Override
     public byte[] getNpnSelectedProtocol() {
-      return "h2".getBytes(StandardCharsets.UTF_8);
+      return "h2".getBytes(UTF_8);
     }
   }
 
   @Test
   public void getSelectedProtocol_npn() throws Exception {
-    AndroidNegotiator negotiator = new AndroidNegotiator(platform, TlsExtensionType.NPN);
+    when(platform.getTlsExtensionType()).thenReturn(TlsExtensionType.NPN);
+    AndroidNegotiator negotiator = new AndroidNegotiator(platform);
     FakeAndroidSslSocket androidSock = new FakeAndroidSslSocketNpn();
 
     String actual = negotiator.getSelectedProtocol(androidSock);

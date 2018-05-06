@@ -1,32 +1,17 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.testing.integration;
@@ -34,8 +19,8 @@ package io.grpc.testing.integration;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import com.google.protobuf.BoolValue;
 import com.google.protobuf.ByteString;
-
 import io.grpc.CallOptions;
 import io.grpc.Channel;
 import io.grpc.ClientCall;
@@ -52,27 +37,24 @@ import io.grpc.ServerCall;
 import io.grpc.ServerCall.Listener;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
+import io.grpc.internal.AbstractServerImplBuilder;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
-import io.grpc.testing.integration.Messages.CompressionType;
 import io.grpc.testing.integration.Messages.Payload;
 import io.grpc.testing.integration.Messages.PayloadType;
 import io.grpc.testing.integration.Messages.SimpleRequest;
 import io.grpc.testing.integration.Messages.SimpleResponse;
-
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
-
 import java.io.FilterInputStream;
 import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import org.junit.Before;
+import org.junit.BeforeClass;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
 
 /**
  * Tests that compression is turned on.
@@ -95,32 +77,28 @@ public class TransportCompressionTest extends AbstractInteropTest {
     FZIPPER.anyWritten = false;
   }
 
-  /** Start server. */
   @BeforeClass
-  public static void startServer() {
+  public static void registerCompressors() {
     compressors.register(FZIPPER);
     compressors.register(Codec.Identity.NONE);
-    startStaticServer(
-        NettyServerBuilder.forPort(0)
-            .maxMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
-            .compressorRegistry(compressors)
-            .decompressorRegistry(decompressors),
-        new ServerInterceptor() {
-          @Override
-          public <ReqT, RespT> Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call,
-              Metadata headers, ServerCallHandler<ReqT, RespT> next) {
-            Listener<ReqT> listener = next.startCall(call, headers);
-            // TODO(carl-mastrangelo): check that encoding was set.
-            call.setMessageCompression(true);
-            return listener;
-          }
-        });
   }
 
-  /** Stop server. */
-  @AfterClass
-  public static void stopServer() {
-    stopStaticServer();
+  @Override
+  protected AbstractServerImplBuilder<?> getServerBuilder() {
+    return NettyServerBuilder.forPort(0)
+        .maxInboundMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
+        .compressorRegistry(compressors)
+        .decompressorRegistry(decompressors)
+        .intercept(new ServerInterceptor() {
+            @Override
+            public <ReqT, RespT> Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call,
+                Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+              Listener<ReqT> listener = next.startCall(call, headers);
+              // TODO(carl-mastrangelo): check that encoding was set.
+              call.setMessageCompression(true);
+              return listener;
+            }
+          });
   }
 
   @Test
@@ -128,7 +106,7 @@ public class TransportCompressionTest extends AbstractInteropTest {
     expectFzip = true;
     final SimpleRequest request = SimpleRequest.newBuilder()
         .setResponseSize(314159)
-        .setResponseCompression(CompressionType.GZIP)
+        .setResponseCompressed(BoolValue.newBuilder().setValue(true))
         .setResponseType(PayloadType.COMPRESSABLE)
         .setPayload(Payload.newBuilder()
             .setBody(ByteString.copyFrom(new byte[271828])))
@@ -148,11 +126,10 @@ public class TransportCompressionTest extends AbstractInteropTest {
 
   @Override
   protected ManagedChannel createChannel() {
-    return NettyChannelBuilder.forAddress("localhost", getPort())
+    NettyChannelBuilder builder = NettyChannelBuilder.forAddress("localhost", getPort())
         .maxInboundMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
         .decompressorRegistry(decompressors)
         .compressorRegistry(compressors)
-        .censusContextFactory(getClientCensusFactory())
         .intercept(new ClientInterceptor() {
           @Override
           public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
@@ -190,8 +167,10 @@ public class TransportCompressionTest extends AbstractInteropTest {
             };
           }
         })
-        .usePlaintext(true)
-        .build();
+        .usePlaintext();
+    io.grpc.internal.TestingAccessor.setStatsImplementation(
+        builder, createClientCensusStatsModule());
+    return builder.build();
   }
 
   /**
@@ -245,4 +224,3 @@ public class TransportCompressionTest extends AbstractInteropTest {
     }
   }
 }
-

@@ -1,46 +1,39 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.netty;
 
 import static com.google.common.base.Charsets.UTF_8;
+import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_WINDOW_SIZE;
 import static org.junit.Assert.assertEquals;
+import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyLong;
 import static org.mockito.Mockito.atLeastOnce;
-import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import io.grpc.internal.Channelz.TransportStats;
+import io.grpc.internal.FakeClock;
 import io.grpc.internal.MessageFramer;
 import io.grpc.internal.StatsTraceContext;
+import io.grpc.internal.TransportTracer;
 import io.grpc.internal.WritableBuffer;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
@@ -49,30 +42,37 @@ import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoop;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http2.DefaultHttp2FrameReader;
 import io.netty.handler.codec.http2.DefaultHttp2FrameWriter;
+import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2Connection;
 import io.netty.handler.codec.http2.Http2ConnectionHandler;
 import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.codec.http2.Http2FrameReader;
 import io.netty.handler.codec.http2.Http2FrameWriter;
 import io.netty.handler.codec.http2.Http2Headers;
+import io.netty.handler.codec.http2.Http2HeadersDecoder;
 import io.netty.handler.codec.http2.Http2LocalFlowController;
 import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.Http2Stream;
-
+import io.netty.util.concurrent.DefaultPromise;
+import io.netty.util.concurrent.Promise;
+import io.netty.util.concurrent.ScheduledFuture;
+import java.io.ByteArrayInputStream;
+import java.util.concurrent.Delayed;
+import java.util.concurrent.TimeUnit;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
-import org.mockito.Mockito;
+import org.mockito.invocation.InvocationOnMock;
+import org.mockito.stubbing.Answer;
 import org.mockito.verification.VerificationMode;
-
-import java.io.ByteArrayInputStream;
 
 /**
  * Base class for Netty handler unit tests.
@@ -95,19 +95,112 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
   private WriteQueue writeQueue;
 
   /**
+   * Does additional setup jobs. Call it manually when necessary.
+   */
+  protected void manualSetUp() throws Exception {}
+
+  protected final TransportTracer transportTracer = new TransportTracer();
+  protected int flowControlWindow = DEFAULT_WINDOW_SIZE;
+
+  private final FakeClock fakeClock = new FakeClock();
+
+  FakeClock fakeClock() {
+    return fakeClock;
+  }
+
+  /**
    * Must be called by subclasses to initialize the handler and channel.
    */
-  protected final void initChannel(GrpcHttp2HeadersDecoder headersDecoder) throws Exception {
+  protected final void initChannel(Http2HeadersDecoder headersDecoder) throws Exception {
     content = Unpooled.copiedBuffer("hello world", UTF_8);
-    frameWriter = spy(new DefaultHttp2FrameWriter());
+    frameWriter = mock(Http2FrameWriter.class, delegatesTo(new DefaultHttp2FrameWriter()));
     frameReader = new DefaultHttp2FrameReader(headersDecoder);
 
+    channel = new FakeClockSupportedChanel();
     handler = newHandler();
-
-    channel = new EmbeddedChannel(handler);
+    channel.pipeline().addLast(handler);
     ctx = channel.pipeline().context(handler);
 
     writeQueue = initWriteQueue();
+  }
+
+  private final class FakeClockSupportedChanel extends EmbeddedChannel {
+    EventLoop eventLoop;
+
+    FakeClockSupportedChanel(ChannelHandler... handlers) {
+      super(handlers);
+    }
+
+    @Override
+    public EventLoop eventLoop() {
+      if (eventLoop == null) {
+        createEventLoop();
+      }
+      return eventLoop;
+    }
+
+    void createEventLoop() {
+      EventLoop realEventLoop = super.eventLoop();
+      if (realEventLoop == null) {
+        return;
+      }
+      eventLoop = mock(EventLoop.class, delegatesTo(realEventLoop));
+      doAnswer(
+          new Answer<ScheduledFuture<Void>>() {
+            @Override
+            public ScheduledFuture<Void> answer(InvocationOnMock invocation) throws Throwable {
+              Runnable command = (Runnable) invocation.getArguments()[0];
+              Long delay = (Long) invocation.getArguments()[1];
+              TimeUnit timeUnit = (TimeUnit) invocation.getArguments()[2];
+              return new FakeClockScheduledNettyFuture(eventLoop, command, delay, timeUnit);
+            }
+          }).when(eventLoop).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
+    }
+  }
+
+  private final class FakeClockScheduledNettyFuture extends DefaultPromise<Void>
+      implements ScheduledFuture<Void> {
+    final java.util.concurrent.ScheduledFuture<?> future;
+
+    FakeClockScheduledNettyFuture(
+        EventLoop eventLoop, final Runnable command, long delay, TimeUnit timeUnit) {
+      super(eventLoop);
+      Runnable wrap = new Runnable() {
+        @Override
+        public void run() {
+          try {
+            command.run();
+          } catch (Throwable t) {
+            setFailure(t);
+            return;
+          }
+          if (!isDone()) {
+            Promise<Void> unused = setSuccess(null);
+          }
+          // else: The command itself, such as a shutdown task, might have cancelled all the
+          // scheduled tasks already.
+        }
+      };
+      future = fakeClock.getScheduledExecutorService().schedule(wrap, delay, timeUnit);
+    }
+
+    @Override
+    public boolean cancel(boolean mayInterruptIfRunning) {
+      if (future.cancel(mayInterruptIfRunning)) {
+        return super.cancel(mayInterruptIfRunning);
+      }
+      return false;
+    }
+
+    @Override
+    public long getDelay(TimeUnit unit) {
+      return Math.max(future.getDelay(unit), 1L); // never return zero or negative delay.
+    }
+
+    @Override
+    public int compareTo(Delayed o) {
+      return future.compareTo(o);
+    }
   }
 
   protected final T handler() {
@@ -147,20 +240,25 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
   }
 
   protected final void channelRead(Object obj) throws Exception {
-    handler().channelRead(ctx, obj);
+    channel.writeInbound(obj);
   }
 
   protected ByteBuf grpcDataFrame(int streamId, boolean endStream, byte[] content) {
     final ByteBuf compressionFrame = Unpooled.buffer(content.length);
-    MessageFramer framer = new MessageFramer(new MessageFramer.Sink() {
-      @Override
-      public void deliverFrame(WritableBuffer frame, boolean endOfStream, boolean flush) {
-        if (frame != null) {
-          ByteBuf bytebuf = ((NettyWritableBuffer) frame).bytebuf();
-          compressionFrame.writeBytes(bytebuf);
-        }
-      }
-    }, new NettyWritableBufferAllocator(ByteBufAllocator.DEFAULT), StatsTraceContext.NOOP);
+    TransportTracer noTransportTracer = null;
+    MessageFramer framer = new MessageFramer(
+        new MessageFramer.Sink() {
+          @Override
+          public void deliverFrame(
+              WritableBuffer frame, boolean endOfStream, boolean flush, int numMessages) {
+            if (frame != null) {
+              ByteBuf bytebuf = ((NettyWritableBuffer) frame).bytebuf();
+              compressionFrame.writeBytes(bytebuf);
+            }
+          }
+        },
+        new NettyWritableBufferAllocator(ByteBufAllocator.DEFAULT),
+        StatsTraceContext.NOOP);
     framer.writePayload(new ByteArrayInputStream(content));
     framer.flush();
     ChannelHandlerContext ctx = newMockContext();
@@ -178,10 +276,7 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
     return captureWrite(ctx);
   }
 
-  protected final ByteBuf pingFrame(boolean ack, ByteBuf payload) {
-    // Need to retain the content since the frameWriter releases it.
-    payload.retain();
-
+  protected final ByteBuf pingFrame(boolean ack, long payload) {
     ChannelHandlerContext ctx = newMockContext();
     new DefaultHttp2FrameWriter().writePing(ctx, ack, payload, newPromise());
     return captureWrite(ctx);
@@ -215,6 +310,12 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
     return captureWrite(ctx);
   }
 
+  protected final ByteBuf windowUpdate(int streamId, int delta) {
+    ChannelHandlerContext ctx = newMockContext();
+    new DefaultHttp2FrameWriter().writeWindowUpdate(ctx, 0, delta, newPromise());
+    return captureWrite(ctx);
+  }
+
   protected final ChannelPromise newPromise() {
     return channel.newPromise();
   }
@@ -223,6 +324,7 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
     return handler().connection();
   }
 
+  @CanIgnoreReturnValue
   protected final ChannelFuture enqueue(WriteQueue.QueuedCommand command) {
     ChannelFuture future = writeQueue.enqueue(command, newPromise(), true);
     channel.runPendingTasks();
@@ -230,10 +332,11 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
   }
 
   protected final ChannelHandlerContext newMockContext() {
-    ChannelHandlerContext ctx = Mockito.mock(ChannelHandlerContext.class);
+    ChannelHandlerContext ctx = mock(ChannelHandlerContext.class);
     when(ctx.alloc()).thenReturn(UnpooledByteBufAllocator.DEFAULT);
-    EventLoop eventLoop = Mockito.mock(EventLoop.class);
+    EventLoop eventLoop = mock(EventLoop.class);
     when(ctx.executor()).thenReturn(eventLoop);
+    when(ctx.channel()).thenReturn(channel);
     return ctx;
   }
 
@@ -256,6 +359,7 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
 
   @Test
   public void dataPingSentOnHeaderRecieved() throws Exception {
+    manualSetUp();
     makeStream();
     AbstractNettyHandler handler = (AbstractNettyHandler) handler();
     handler.setAutoTuneFlowControl(true);
@@ -267,15 +371,14 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
 
   @Test
   public void dataPingAckIsRecognized() throws Exception {
+    manualSetUp();
     makeStream();
     AbstractNettyHandler handler = (AbstractNettyHandler) handler();
     handler.setAutoTuneFlowControl(true);
 
     channelRead(dataFrame(3, false, content()));
     long pingData = handler.flowControlPing().payload();
-    ByteBuf payload = handler.ctx().alloc().buffer(8);
-    payload.writeLong(pingData);
-    channelRead(pingFrame(true, payload));
+    channelRead(pingFrame(true, pingData));
 
     assertEquals(1, handler.flowControlPing().getPingCount());
     assertEquals(1, handler.flowControlPing().getPingReturn());
@@ -283,6 +386,7 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
 
   @Test
   public void dataSizeSincePingAccumulates() throws Exception {
+    manualSetUp();
     makeStream();
     AbstractNettyHandler handler = (AbstractNettyHandler) handler();
     handler.setAutoTuneFlowControl(true);
@@ -300,6 +404,7 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
 
   @Test
   public void windowUpdateMatchesTarget() throws Exception {
+    manualSetUp();
     Http2Stream connectionStream = connection().connectionStream();
     Http2LocalFlowController localFlowController = connection().local().flowController();
     makeStream();
@@ -320,9 +425,7 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
       accumulator += length;
     }
     long pingData = handler.flowControlPing().payload();
-    ByteBuf buffer = handler.ctx().alloc().buffer(8);
-    buffer.writeLong(pingData);
-    channelRead(pingFrame(true, buffer));
+    channelRead(pingFrame(true, pingData));
 
     assertEquals(accumulator, handler.flowControlPing().getDataSincePing());
     assertEquals(2 * accumulator, localFlowController.initialWindowSize(connectionStream));
@@ -330,6 +433,7 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
 
   @Test
   public void windowShouldNotExceedMaxWindowSize() throws Exception {
+    manualSetUp();
     makeStream();
     AbstractNettyHandler handler = (AbstractNettyHandler) handler();
     handler.setAutoTuneFlowControl(true);
@@ -338,12 +442,59 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
     int maxWindow = handler.flowControlPing().maxWindow();
 
     handler.flowControlPing().setDataSizeSincePing(maxWindow);
-    int payload = handler.flowControlPing().payload();
-    ByteBuf buffer = handler.ctx().alloc().buffer(8);
-    buffer.writeLong(payload);
-    channelRead(pingFrame(true, buffer));
+    long payload = handler.flowControlPing().payload();
+    channelRead(pingFrame(true, payload));
 
     assertEquals(maxWindow, localFlowController.initialWindowSize(connectionStream));
   }
 
+  @Test
+  public void transportTracer_windowSizeDefault() throws Exception {
+    manualSetUp();
+    TransportStats transportStats = transportTracer.getStats();
+    assertEquals(Http2CodecUtil.DEFAULT_WINDOW_SIZE, transportStats.remoteFlowControlWindow);
+    assertEquals(flowControlWindow, transportStats.localFlowControlWindow);
+  }
+
+  @Test
+  public void transportTracer_windowSize() throws Exception {
+    flowControlWindow = 1024 * 1024;
+    manualSetUp();
+    TransportStats transportStats = transportTracer.getStats();
+    assertEquals(Http2CodecUtil.DEFAULT_WINDOW_SIZE, transportStats.remoteFlowControlWindow);
+    assertEquals(flowControlWindow, transportStats.localFlowControlWindow);
+  }
+
+  @Test
+  public void transportTracer_windowUpdate_remote() throws Exception {
+    manualSetUp();
+    TransportStats before = transportTracer.getStats();
+    assertEquals(Http2CodecUtil.DEFAULT_WINDOW_SIZE, before.remoteFlowControlWindow);
+    assertEquals(Http2CodecUtil.DEFAULT_WINDOW_SIZE, before.localFlowControlWindow);
+
+    ByteBuf serializedSettings = windowUpdate(0, 1000);
+    channelRead(serializedSettings);
+    TransportStats after = transportTracer.getStats();
+    assertEquals(Http2CodecUtil.DEFAULT_WINDOW_SIZE + 1000,
+        after.remoteFlowControlWindow);
+    assertEquals(flowControlWindow, after.localFlowControlWindow);
+  }
+
+  @Test
+  public void transportTracer_windowUpdate_local() throws Exception {
+    manualSetUp();
+    TransportStats before = transportTracer.getStats();
+    assertEquals(Http2CodecUtil.DEFAULT_WINDOW_SIZE, before.remoteFlowControlWindow);
+    assertEquals(flowControlWindow, before.localFlowControlWindow);
+
+    // If the window size is below a certain threshold, netty will wait to apply the update.
+    // Use a large increment to be sure that it exceeds the threshold.
+    connection().local().flowController().incrementWindowSize(
+        connection().connectionStream(), 8 * Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+
+    TransportStats after = transportTracer.getStats();
+    assertEquals(Http2CodecUtil.DEFAULT_WINDOW_SIZE, after.remoteFlowControlWindow);
+    assertEquals(flowControlWindow + 8 * Http2CodecUtil.DEFAULT_WINDOW_SIZE,
+        connection().local().flowController().windowSize(connection().connectionStream()));
+  }
 }

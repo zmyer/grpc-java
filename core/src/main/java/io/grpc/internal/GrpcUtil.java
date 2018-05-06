@@ -1,32 +1,17 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
@@ -34,29 +19,46 @@ package io.grpc.internal;
 import static com.google.common.base.Preconditions.checkArgument;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.base.Stopwatch;
 import com.google.common.base.Supplier;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-
-import io.grpc.LoadBalancer2.PickResult;
-import io.grpc.LoadBalancer2.Subchannel;
+import io.grpc.CallOptions;
+import io.grpc.ClientStreamTracer;
+import io.grpc.InternalMetadata;
+import io.grpc.InternalMetadata.TrustedAsciiMarshaller;
+import io.grpc.LoadBalancer.PickResult;
+import io.grpc.LoadBalancer.Subchannel;
 import io.grpc.Metadata;
+import io.grpc.MethodDescriptor;
 import io.grpc.Status;
+import io.grpc.internal.Channelz.SocketStats;
+import io.grpc.internal.ClientStreamListener.RpcProgress;
 import io.grpc.internal.SharedResourceHolder.Resource;
-
+import io.grpc.internal.StreamListener.MessageProducer;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.Charset;
+import java.util.Collection;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import javax.annotation.Nullable;
 
 /**
@@ -64,10 +66,14 @@ import javax.annotation.Nullable;
  */
 public final class GrpcUtil {
 
-  // Certain production AppEngine runtimes have constraints on threading and socket handling
+  private static final Logger log = Logger.getLogger(GrpcUtil.class.getName());
+
+  public static final Charset US_ASCII = Charset.forName("US-ASCII");
+
+  // AppEngine runtimes have constraints on threading and socket handling
   // that need to be accommodated.
   public static final boolean IS_RESTRICTED_APPENGINE =
-      "Production".equals(System.getProperty("com.google.appengine.runtime.environment"))
+      System.getProperty("com.google.appengine.runtime.environment") != null
           && "1.7".equals(System.getProperty("java.specification.version"));
 
   /**
@@ -85,14 +91,44 @@ public final class GrpcUtil {
   /**
    * {@link io.grpc.Metadata.Key} for the accepted message encodings header.
    */
-  public static final Metadata.Key<String> MESSAGE_ACCEPT_ENCODING_KEY =
-          Metadata.Key.of(GrpcUtil.MESSAGE_ACCEPT_ENCODING, Metadata.ASCII_STRING_MARSHALLER);
+  public static final Metadata.Key<byte[]> MESSAGE_ACCEPT_ENCODING_KEY =
+      InternalMetadata.keyOf(GrpcUtil.MESSAGE_ACCEPT_ENCODING, new AcceptEncodingMarshaller());
+
+  /**
+   * {@link io.grpc.Metadata.Key} for the stream's content encoding header.
+   */
+  public static final Metadata.Key<String> CONTENT_ENCODING_KEY =
+      Metadata.Key.of(GrpcUtil.CONTENT_ENCODING, Metadata.ASCII_STRING_MARSHALLER);
+
+  /**
+   * {@link io.grpc.Metadata.Key} for the stream's accepted content encoding header.
+   */
+  public static final Metadata.Key<byte[]> CONTENT_ACCEPT_ENCODING_KEY =
+      InternalMetadata.keyOf(GrpcUtil.CONTENT_ACCEPT_ENCODING, new AcceptEncodingMarshaller());
+
+  private static final class AcceptEncodingMarshaller implements TrustedAsciiMarshaller<byte[]> {
+    @Override
+    public byte[] toAsciiString(byte[] value) {
+      return value;
+    }
+
+    @Override
+    public byte[] parseAsciiString(byte[] serialized) {
+      return serialized;
+    }
+  }
 
   /**
    * {@link io.grpc.Metadata.Key} for the Content-Type request/response header.
    */
   public static final Metadata.Key<String> CONTENT_TYPE_KEY =
           Metadata.Key.of("content-type", Metadata.ASCII_STRING_MARSHALLER);
+
+  /**
+   * {@link io.grpc.Metadata.Key} for the Transfer encoding.
+   */
+  public static final Metadata.Key<String> TE_HEADER =
+      Metadata.Key.of("te", Metadata.ASCII_STRING_MARSHALLER);
 
   /**
    * {@link io.grpc.Metadata.Key} for the Content-Type request/response header.
@@ -141,6 +177,16 @@ public final class GrpcUtil {
   public static final String MESSAGE_ACCEPT_ENCODING = "grpc-accept-encoding";
 
   /**
+   * The content-encoding used to compress the full gRPC stream.
+   */
+  public static final String CONTENT_ENCODING = "content-encoding";
+
+  /**
+   * The accepted content-encodings that can be used to compress the full gRPC stream.
+   */
+  public static final String CONTENT_ACCEPT_ENCODING = "accept-encoding";
+
+  /**
    * The default maximum uncompressed size (in bytes) for inbound messages. Defaults to 4 MiB.
    */
   public static final int DEFAULT_MAX_MESSAGE_SIZE = 4 * 1024 * 1024;
@@ -148,21 +194,69 @@ public final class GrpcUtil {
   /**
    * The default maximum size (in bytes) for inbound header/trailer.
    */
+  // Update documentation in public-facing Builders when changing this value.
   public static final int DEFAULT_MAX_HEADER_LIST_SIZE = 8192;
 
   public static final Splitter ACCEPT_ENCODING_SPLITTER = Splitter.on(',').trimResults();
 
-  private static final String IMPLEMENTATION_VERSION = getImplementationVersion();
+  private static final String IMPLEMENTATION_VERSION = "1.13.0-SNAPSHOT"; // CURRENT_GRPC_VERSION
 
   /**
    * The default delay in nanos before we send a keepalive.
    */
-  public static final long DEFAULT_KEEPALIVE_DELAY_NANOS = TimeUnit.MINUTES.toNanos(1);
+  public static final long DEFAULT_KEEPALIVE_TIME_NANOS = TimeUnit.MINUTES.toNanos(1);
 
   /**
    * The default timeout in nanos for a keepalive ping request.
    */
-  public static final long DEFAULT_KEEPALIVE_TIMEOUT_NANOS = TimeUnit.MINUTES.toNanos(2);
+  public static final long DEFAULT_KEEPALIVE_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(20L);
+
+  /**
+   * The magic keepalive time value that disables client keepalive.
+   */
+  public static final long KEEPALIVE_TIME_NANOS_DISABLED = Long.MAX_VALUE;
+
+  /**
+   * The default delay in nanos for server keepalive.
+   */
+  public static final long DEFAULT_SERVER_KEEPALIVE_TIME_NANOS = TimeUnit.HOURS.toNanos(2L);
+
+  /**
+   * The default timeout in nanos for a server keepalive ping request.
+   */
+  public static final long DEFAULT_SERVER_KEEPALIVE_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(20L);
+
+  /**
+   * The magic keepalive time value that disables keepalive.
+   */
+  public static final long SERVER_KEEPALIVE_TIME_NANOS_DISABLED = Long.MAX_VALUE;
+
+  /**
+   * The default proxy detector.
+   */
+  public static final ProxyDetector DEFAULT_PROXY_DETECTOR = new ProxyDetectorImpl();
+
+  /**
+   * A proxy detector that always claims no proxy is needed.
+   */
+  public static final ProxyDetector NOOP_PROXY_DETECTOR = new ProxyDetector() {
+    @Nullable
+    @Override
+    public ProxyParameters proxyFor(SocketAddress targetServerAddress) {
+      return null;
+    }
+  };
+
+  /**
+   * Returns a proxy detector appropriate for the current environment.
+   */
+  public static ProxyDetector getDefaultProxyDetector() {
+    if (IS_RESTRICTED_APPENGINE) {
+      return NOOP_PROXY_DETECTOR;
+    } else {
+      return DEFAULT_PROXY_DETECTOR;
+    }
+  }
 
   /**
    * Maps HTTP error response status codes to transport codes, as defined in <a
@@ -182,6 +276,8 @@ public final class GrpcUtil {
     }
     switch (httpStatusCode) {
       case HttpURLConnection.HTTP_BAD_REQUEST:  // 400
+      case 431: // Request Header Fields Too Large
+        // TODO(carl-mastrangelo): this should be added to the http-grpc-status-mapping.md doc.
         return Status.Code.INTERNAL;
       case HttpURLConnection.HTTP_UNAUTHORIZED:  // 401
         return Status.Code.UNAUTHENTICATED;
@@ -239,6 +335,9 @@ public final class GrpcUtil {
     }
 
     private final int code;
+    // Status is not guaranteed to be deeply immutable. Don't care though, since that's only true
+    // when there are exceptions in the Status, which is not true here.
+    @SuppressWarnings("ImmutableEnumChecker")
     private final Status status;
 
     Http2Error(int code, Status status) {
@@ -338,6 +437,7 @@ public final class GrpcUtil {
     }
     builder.append("grpc-java-");
     builder.append(transportName);
+    builder.append('/');
     builder.append(IMPLEMENTATION_VERSION);
     return builder.toString();
   }
@@ -450,12 +550,12 @@ public final class GrpcUtil {
    * @return a {@link ThreadFactory}.
    */
   public static ThreadFactory getThreadFactory(String nameFormat, boolean daemon) {
-    ThreadFactory threadFactory = MoreExecutors.platformThreadFactory();
     if (IS_RESTRICTED_APPENGINE) {
-      return threadFactory;
+      @SuppressWarnings("BetaApi")
+      ThreadFactory factory = MoreExecutors.platformThreadFactory();
+      return factory;
     } else {
       return new ThreadFactoryBuilder()
-          .setThreadFactory(threadFactory)
           .setDaemon(daemon)
           .setNameFormat(nameFormat)
           .build();
@@ -471,6 +571,25 @@ public final class GrpcUtil {
         return Stopwatch.createUnstarted();
       }
     };
+
+  /**
+   * Returns the host via {@link InetSocketAddress#getHostString} if it is possible,
+   * i.e. in jdk >= 7.
+   * Otherwise, return it via {@link InetSocketAddress#getHostName} which may incur a DNS lookup.
+   */
+  public static String getHost(InetSocketAddress addr) {
+    try {
+      Method getHostStringMethod = InetSocketAddress.class.getMethod("getHostString");
+      return (String) getHostStringMethod.invoke(addr);
+    } catch (NoSuchMethodException e) {
+      // noop
+    } catch (IllegalAccessException e) {
+      // noop
+    } catch (InvocationTargetException e) {
+      // noop
+    }
+    return addr.getHostName();
+  }
 
   /**
    * Marshals a nanoseconds representation of the timeout to and from a string representation,
@@ -495,20 +614,21 @@ public final class GrpcUtil {
     @Override
     public String toAsciiString(Long timeoutNanos) {
       long cutoff = 100000000;
+      TimeUnit unit = TimeUnit.NANOSECONDS;
       if (timeoutNanos < 0) {
         throw new IllegalArgumentException("Timeout too small");
       } else if (timeoutNanos < cutoff) {
-        return TimeUnit.NANOSECONDS.toNanos(timeoutNanos) + "n";
+        return timeoutNanos + "n";
       } else if (timeoutNanos < cutoff * 1000L) {
-        return TimeUnit.NANOSECONDS.toMicros(timeoutNanos) + "u";
+        return unit.toMicros(timeoutNanos) + "u";
       } else if (timeoutNanos < cutoff * 1000L * 1000L) {
-        return TimeUnit.NANOSECONDS.toMillis(timeoutNanos) + "m";
+        return unit.toMillis(timeoutNanos) + "m";
       } else if (timeoutNanos < cutoff * 1000L * 1000L * 1000L) {
-        return TimeUnit.NANOSECONDS.toSeconds(timeoutNanos) + "S";
+        return unit.toSeconds(timeoutNanos) + "S";
       } else if (timeoutNanos < cutoff * 1000L * 1000L * 1000L * 60L) {
-        return TimeUnit.NANOSECONDS.toMinutes(timeoutNanos) + "M";
+        return unit.toMinutes(timeoutNanos) + "M";
       } else {
-        return TimeUnit.NANOSECONDS.toHours(timeoutNanos) + "H";
+        return unit.toHours(timeoutNanos) + "H";
       }
     }
 
@@ -520,7 +640,7 @@ public final class GrpcUtil {
       char unit = serialized.charAt(serialized.length() - 1);
       switch (unit) {
         case 'n':
-          return TimeUnit.NANOSECONDS.toNanos(value);
+          return value;
         case 'u':
           return TimeUnit.MICROSECONDS.toNanos(value);
         case 'm':
@@ -542,29 +662,100 @@ public final class GrpcUtil {
    */
   @Nullable
   static ClientTransport getTransportFromPickResult(PickResult result, boolean isWaitForReady) {
-    ClientTransport transport;
+    final ClientTransport transport;
     Subchannel subchannel = result.getSubchannel();
     if (subchannel != null) {
-      transport = ((SubchannelImpl) subchannel).obtainActiveTransport();
+      transport = ((AbstractSubchannel) subchannel).obtainActiveTransport();
     } else {
       transport = null;
     }
     if (transport != null) {
-      return transport;
+      final ClientStreamTracer.Factory streamTracerFactory = result.getStreamTracerFactory();
+      if (streamTracerFactory == null) {
+        return transport;
+      }
+      return new ClientTransport() {
+        @Override
+        public ClientStream newStream(
+            MethodDescriptor<?, ?> method, Metadata headers, CallOptions callOptions) {
+          return transport.newStream(
+              method, headers, callOptions.withStreamTracerFactory(streamTracerFactory));
+        }
+
+        @Override
+        public void ping(PingCallback callback, Executor executor) {
+          transport.ping(callback, executor);
+        }
+
+        @Override
+        public LogId getLogId() {
+          return transport.getLogId();
+        }
+
+        @Override
+        public ListenableFuture<SocketStats> getStats() {
+          return transport.getStats();
+        }
+      };
     }
-    if (!result.getStatus().isOk() && !isWaitForReady) {
-      return new FailingClientTransport(result.getStatus());
+    if (!result.getStatus().isOk()) {
+      if (result.isDrop()) {
+        return new FailingClientTransport(result.getStatus(), RpcProgress.DROPPED);
+      }
+      if (!isWaitForReady) {
+        return new FailingClientTransport(result.getStatus(), RpcProgress.PROCESSED);
+      }
     }
     return null;
   }
 
-  private GrpcUtil() {}
-
-  private static String getImplementationVersion() {
-    String version = GrpcUtil.class.getPackage().getImplementationVersion();
-    if (version != null) {
-      return "/" + version;
+  /** Quietly closes all messages in MessageProducer. */
+  static void closeQuietly(MessageProducer producer) {
+    InputStream message;
+    while ((message = producer.next()) != null) {
+      closeQuietly(message);
     }
-    return "";
   }
+
+  /**
+   * Closes an InputStream, ignoring IOExceptions.
+   * This method exists because Guava's {@code Closeables.closeQuietly()} is beta.
+   */
+  public static void closeQuietly(@Nullable InputStream message) {
+    if (message == null) {
+      return;
+    }
+    try {
+      message.close();
+    } catch (IOException ioException) {
+      // do nothing except log
+      log.log(Level.WARNING, "exception caught in closeQuietly", ioException);
+    }
+  }
+
+  /**
+   * Checks whether the given item exists in the iterable.  This is copied from Guava Collect's
+   * {@code Iterables.contains()} because Guava Collect is not Android-friendly thus core can't
+   * depend on it.
+   */
+  static <T> boolean iterableContains(Iterable<T> iterable, T item) {
+    if (iterable instanceof Collection) {
+      Collection<?> collection = (Collection<?>) iterable;
+      try {
+        return collection.contains(item);
+      } catch (NullPointerException e) {
+        return false;
+      } catch (ClassCastException e) {
+        return false;
+      }
+    }
+    for (T i : iterable) {
+      if (Objects.equal(i, item)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private GrpcUtil() {}
 }

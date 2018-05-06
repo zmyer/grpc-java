@@ -1,32 +1,17 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
@@ -35,27 +20,31 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.grpc.Contexts.statusFromCancelled;
 import static io.grpc.Status.DEADLINE_EXCEEDED;
+import static io.grpc.internal.GrpcUtil.MESSAGE_ENCODING_KEY;
 import static io.grpc.internal.GrpcUtil.TIMEOUT_KEY;
-import static io.grpc.internal.GrpcUtil.TIMER_SERVICE;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
-import com.google.census.CensusContextFactory;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Stopwatch;
-import com.google.common.base.Supplier;
-
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.SettableFuture;
 import io.grpc.Attributes;
 import io.grpc.CompressorRegistry;
 import io.grpc.Context;
+import io.grpc.Decompressor;
 import io.grpc.DecompressorRegistry;
 import io.grpc.HandlerRegistry;
+import io.grpc.InternalServerInterceptors;
 import io.grpc.Metadata;
 import io.grpc.ServerCall;
+import io.grpc.ServerCallHandler;
+import io.grpc.ServerInterceptor;
 import io.grpc.ServerMethodDefinition;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.ServerTransportFilter;
 import io.grpc.Status;
-
+import io.grpc.internal.Channelz.ServerStats;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
@@ -64,10 +53,11 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
-
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import javax.annotation.concurrent.GuardedBy;
 
 /**
@@ -84,18 +74,21 @@ import javax.annotation.concurrent.GuardedBy;
  * <p>Starting the server starts the underlying transport for servicing requests. Stopping the
  * server stops servicing new requests and waits for all connections to terminate.
  */
-public final class ServerImpl extends io.grpc.Server implements WithLogId {
+public final class ServerImpl extends io.grpc.Server implements Instrumented<ServerStats> {
+  private static final Logger log = Logger.getLogger(ServerImpl.class.getName());
   private static final ServerStreamListener NOOP_LISTENER = new NoopListener();
 
   private final LogId logId = LogId.allocate(getClass().getName());
+  private final ObjectPool<? extends Executor> executorPool;
   /** Executor for application processing. Safe to read after {@link #start()}. */
   private Executor executor;
-  /** Safe to read after {@link #start()}. */
-  private boolean usingSharedExecutor;
   private final InternalHandlerRegistry registry;
   private final HandlerRegistry fallbackRegistry;
   private final List<ServerTransportFilter> transportFilters;
-  private final CensusContextFactory censusFactory;
+  // This is iterated on a per-call basis.  Use an array instead of a Collection to avoid iterator
+  // creations.
+  private final ServerInterceptor[] interceptors;
+  private final long handshakeTimeoutMillis;
   @GuardedBy("lock") private boolean started;
   @GuardedBy("lock") private boolean shutdown;
   /** non-{@code null} if immediate shutdown has been requested. */
@@ -111,39 +104,46 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
   @GuardedBy("lock") private final Collection<ServerTransport> transports =
       new HashSet<ServerTransport>();
 
-  private final ScheduledExecutorService timeoutService = SharedResourceHolder.get(TIMER_SERVICE);
   private final Context rootContext;
 
   private final DecompressorRegistry decompressorRegistry;
   private final CompressorRegistry compressorRegistry;
-  private final Supplier<Stopwatch> stopwatchSupplier;
+  private final BinaryLogProvider binlogProvider;
+
+  private final Channelz channelz;
+  private final CallTracer serverCallTracer;
 
   /**
    * Construct a server.
    *
-   * @param registry the primary method registry
-   * @param fallbackRegistry the secondary method registry, used only if the primary registry
-   *        doesn't have the method
-   * @param executor to call methods on behalf of remote clients
+   * @param builder builder with configuration for server
+   * @param transportServer transport server that will create new incoming transports
+   * @param rootContext context that callbacks for new RPCs should be derived from
    */
-  ServerImpl(Executor executor, InternalHandlerRegistry registry, HandlerRegistry fallbackRegistry,
-      InternalServer transportServer, Context rootContext,
-      DecompressorRegistry decompressorRegistry, CompressorRegistry compressorRegistry,
-      List<ServerTransportFilter> transportFilters, CensusContextFactory censusFactory,
-      Supplier<Stopwatch> stopwatchSupplier) {
-    this.executor = executor;
-    this.registry = Preconditions.checkNotNull(registry, "registry");
-    this.fallbackRegistry = Preconditions.checkNotNull(fallbackRegistry, "fallbackRegistry");
+  ServerImpl(
+      AbstractServerImplBuilder<?> builder,
+      InternalServer transportServer,
+      Context rootContext) {
+    this.executorPool = Preconditions.checkNotNull(builder.executorPool, "executorPool");
+    this.registry = Preconditions.checkNotNull(builder.registryBuilder.build(), "registryBuilder");
+    this.fallbackRegistry =
+        Preconditions.checkNotNull(builder.fallbackRegistry, "fallbackRegistry");
     this.transportServer = Preconditions.checkNotNull(transportServer, "transportServer");
     // Fork from the passed in context so that it does not propagate cancellation, it only
     // inherits values.
     this.rootContext = Preconditions.checkNotNull(rootContext, "rootContext").fork();
-    this.decompressorRegistry = decompressorRegistry;
-    this.compressorRegistry = compressorRegistry;
+    this.decompressorRegistry = builder.decompressorRegistry;
+    this.compressorRegistry = builder.compressorRegistry;
     this.transportFilters = Collections.unmodifiableList(
-        new ArrayList<ServerTransportFilter>(transportFilters));
-    this.censusFactory = Preconditions.checkNotNull(censusFactory, "censusFactory");
-    this.stopwatchSupplier = Preconditions.checkNotNull(stopwatchSupplier, "stopwatchSupplier");
+        new ArrayList<ServerTransportFilter>(builder.transportFilters));
+    this.interceptors =
+        builder.interceptors.toArray(new ServerInterceptor[builder.interceptors.size()]);
+    this.handshakeTimeoutMillis = builder.handshakeTimeoutMillis;
+    this.binlogProvider = builder.binlogProvider;
+    this.channelz = builder.channelz;
+    this.serverCallTracer = builder.callTracerFactory.create();
+
+    channelz.addServer(this);
   }
 
   /**
@@ -158,12 +158,9 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
     synchronized (lock) {
       checkState(!started, "Already started");
       checkState(!shutdown, "Shutting down");
-      usingSharedExecutor = executor == null;
-      if (usingSharedExecutor) {
-        executor = SharedResourceHolder.get(GrpcUtil.SHARED_CHANNEL_EXECUTOR);
-      }
       // Start and wait for any port to actually be bound.
       transportServer.start(new ServerListenerImpl());
+      executor = Preconditions.checkNotNull(executorPool.getObject(), "executor");
       started = true;
       return this;
     }
@@ -194,6 +191,16 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
     }
   }
 
+  @Override
+  public List<ServerServiceDefinition> getImmutableServices() {
+    return registry.getServices();
+  }
+
+  @Override
+  public List<ServerServiceDefinition> getMutableServices() {
+    return Collections.unmodifiableList(fallbackRegistry.getServices());
+  }
+
   /**
    * Initiates an orderly shutdown in which preexisting calls continue but new calls are rejected.
    */
@@ -213,10 +220,6 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
     }
     if (shutdownTransportServer) {
       transportServer.shutdown();
-    }
-    SharedResourceHolder.release(TIMER_SERVICE, timeoutService);
-    if (usingSharedExecutor) {
-      SharedResourceHolder.release(GrpcUtil.SHARED_CHANNEL_EXECUTOR, (ExecutorService) executor);
     }
     return this;
   }
@@ -295,6 +298,7 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
       if (!transports.remove(transport)) {
         throw new AssertionError("Transport already removed");
       }
+      channelz.removeServerSocket(ServerImpl.this, transport);
       checkForTermination();
     }
   }
@@ -307,19 +311,25 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
           throw new AssertionError("Server already terminated");
         }
         terminated = true;
+        channelz.removeServer(this);
+        if (executor != null) {
+          executor = executorPool.returnObject(executor);
+        }
         // TODO(carl-mastrangelo): move this outside the synchronized block.
         lock.notifyAll();
       }
     }
   }
 
-  private class ServerListenerImpl implements ServerListener {
+  private final class ServerListenerImpl implements ServerListener {
     @Override
     public ServerTransportListener transportCreated(ServerTransport transport) {
       synchronized (lock) {
         transports.add(transport);
       }
-      return new ServerTransportListenerImpl(transport);
+      ServerTransportListenerImpl stli = new ServerTransportListenerImpl(transport);
+      stli.init();
+      return stli;
     }
 
     @Override
@@ -347,16 +357,39 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
     }
   }
 
-  private class ServerTransportListenerImpl implements ServerTransportListener {
+  private final class ServerTransportListenerImpl implements ServerTransportListener {
     private final ServerTransport transport;
+    private Future<?> handshakeTimeoutFuture;
     private Attributes attributes;
 
-    public ServerTransportListenerImpl(ServerTransport transport) {
+    ServerTransportListenerImpl(ServerTransport transport) {
       this.transport = transport;
+    }
+
+    public void init() {
+      class TransportShutdownNow implements Runnable {
+        @Override public void run() {
+          transport.shutdownNow(Status.CANCELLED.withDescription("Handshake timeout exceeded"));
+        }
+      }
+
+      if (handshakeTimeoutMillis != Long.MAX_VALUE) {
+        handshakeTimeoutFuture = transport.getScheduledExecutorService()
+            .schedule(new TransportShutdownNow(), handshakeTimeoutMillis, TimeUnit.MILLISECONDS);
+      } else {
+        // Noop, to avoid triggering Thread creation in InProcessServer
+        handshakeTimeoutFuture = new FutureTask<Void>(new Runnable() {
+          @Override public void run() {}
+        }, null);
+      }
+      channelz.addServerSocket(ServerImpl.this, transport);
     }
 
     @Override
     public Attributes transportReady(Attributes attributes) {
+      handshakeTimeoutFuture.cancel(false);
+      handshakeTimeoutFuture = null;
+
       for (ServerTransportFilter filter : transportFilters) {
         attributes = Preconditions.checkNotNull(filter.transportReady(attributes),
             "Filter %s returned null", filter);
@@ -367,6 +400,10 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
 
     @Override
     public void transportTerminated() {
+      if (handshakeTimeoutFuture != null) {
+        handshakeTimeoutFuture.cancel(false);
+        handshakeTimeoutFuture = null;
+      }
       for (ServerTransportFilter filter : transportFilters) {
         filter.transportTerminated(attributes);
       }
@@ -374,19 +411,25 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
     }
 
     @Override
-    public StatsTraceContext methodDetermined(String methodName, Metadata headers) {
-      return StatsTraceContext.newServerContext(
-          methodName, censusFactory, headers, stopwatchSupplier);
-    }
-
-    @Override
     public void streamCreated(
         final ServerStream stream, final String methodName, final Metadata headers) {
+      if (headers.containsKey(MESSAGE_ENCODING_KEY)) {
+        String encoding = headers.get(MESSAGE_ENCODING_KEY);
+        Decompressor decompressor = decompressorRegistry.lookupDecompressor(encoding);
+        if (decompressor == null) {
+          stream.close(
+              Status.UNIMPLEMENTED.withDescription(
+                  String.format("Can't find decompressor for %s", encoding)),
+              new Metadata());
+          return;
+        }
+        stream.setDecompressor(decompressor);
+      }
 
       final StatsTraceContext statsTraceCtx = Preconditions.checkNotNull(
           stream.statsTraceContext(), "statsTraceCtx not present from stream");
 
-      final Context.CancellableContext context = createContext(stream, headers);
+      final Context.CancellableContext context = createContext(stream, headers, statsTraceCtx);
       final Executor wrappedExecutor;
       // This is a performance optimization that avoids the synchronization and queuing overhead
       // that comes with SerializingExecutor.
@@ -397,61 +440,70 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
       }
 
       final JumpToApplicationThreadServerStreamListener jumpListener
-          = new JumpToApplicationThreadServerStreamListener(wrappedExecutor, stream, context);
+          = new JumpToApplicationThreadServerStreamListener(
+              wrappedExecutor, executor, stream, context);
       stream.setListener(jumpListener);
       // Run in wrappedExecutor so jumpListener.setListener() is called before any callbacks
       // are delivered, including any errors. Callbacks can still be triggered, but they will be
       // queued.
-      wrappedExecutor.execute(new ContextRunnable(context) {
-          @Override
-          public void runInContext() {
-            ServerStreamListener listener = NOOP_LISTENER;
-            try {
-              ServerMethodDefinition<?, ?> method = registry.lookupMethod(methodName);
-              if (method == null) {
-                method = fallbackRegistry.lookupMethod(methodName);
-              }
-              if (method == null) {
-                Status status = Status.UNIMPLEMENTED.withDescription(
-                    "Method not found: " + methodName);
-                stream.close(status, new Metadata());
-                // TODO(zhangkun83): this would allow a misbehaving client to blow up the server
-                // in-memory stats storage by sending large number of distinct unimplemented method
-                // names. (https://github.com/grpc/grpc-java/issues/2285)
-                statsTraceCtx.callEnded(status);
-                context.cancel(null);
-                return;
-              }
-              listener = startCall(stream, methodName, method, headers, context);
-            } catch (RuntimeException e) {
-              stream.close(Status.fromThrowable(e), new Metadata());
-              context.cancel(null);
-              throw e;
-            } catch (Error e) {
-              stream.close(Status.fromThrowable(e), new Metadata());
-              context.cancel(null);
-              throw e;
-            } finally {
-              jumpListener.setListener(listener);
+
+      final class StreamCreated extends ContextRunnable {
+
+        StreamCreated() {
+          super(context);
+        }
+
+        @Override
+        public void runInContext() {
+          ServerStreamListener listener = NOOP_LISTENER;
+          try {
+            ServerMethodDefinition<?, ?> method = registry.lookupMethod(methodName);
+            if (method == null) {
+              method = fallbackRegistry.lookupMethod(methodName, stream.getAuthority());
             }
+            if (method == null) {
+              Status status = Status.UNIMPLEMENTED.withDescription(
+                  "Method not found: " + methodName);
+              // TODO(zhangkun83): this error may be recorded by the tracer, and if it's kept in
+              // memory as a map whose key is the method name, this would allow a misbehaving
+              // client to blow up the server in-memory stats storage by sending large number of
+              // distinct unimplemented method
+              // names. (https://github.com/grpc/grpc-java/issues/2285)
+              stream.close(status, new Metadata());
+              context.cancel(null);
+              return;
+            }
+            listener = startCall(stream, methodName, method, headers, context, statsTraceCtx);
+          } catch (RuntimeException e) {
+            stream.close(Status.fromThrowable(e), new Metadata());
+            context.cancel(null);
+            throw e;
+          } catch (Error e) {
+            stream.close(Status.fromThrowable(e), new Metadata());
+            context.cancel(null);
+            throw e;
+          } finally {
+            jumpListener.setListener(listener);
           }
-        });
+        }
+      }
+
+      wrappedExecutor.execute(new StreamCreated());
     }
 
     private Context.CancellableContext createContext(
-        final ServerStream stream, Metadata headers) {
+        final ServerStream stream, Metadata headers, StatsTraceContext statsTraceCtx) {
       Long timeoutNanos = headers.get(TIMEOUT_KEY);
 
-      // TODO(zhangkun83): attach the CensusContext from StatsTraceContext to baseContext
-      Context baseContext = rootContext;
+      Context baseContext = statsTraceCtx.serverFilterContext(rootContext);
 
       if (timeoutNanos == null) {
         return baseContext.withCancellation();
       }
 
-      Context.CancellableContext context =
-          baseContext.withDeadlineAfter(timeoutNanos, NANOSECONDS, timeoutService);
-      context.addListener(new Context.CancellationListener() {
+      Context.CancellableContext context = baseContext.withDeadlineAfter(
+          timeoutNanos, NANOSECONDS, transport.getScheduledExecutorService());
+      final class ServerStreamCancellationListener implements Context.CancellationListener {
         @Override
         public void cancelled(Context context) {
           Status status = statusFromCancelled(context);
@@ -461,7 +513,9 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
             stream.cancel(status);
           }
         }
-      }, directExecutor());
+      }
+
+      context.addListener(new ServerStreamCancellationListener(), directExecutor());
 
       return context;
     }
@@ -469,12 +523,39 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
     /** Never returns {@code null}. */
     private <ReqT, RespT> ServerStreamListener startCall(ServerStream stream, String fullMethodName,
         ServerMethodDefinition<ReqT, RespT> methodDef, Metadata headers,
-        Context.CancellableContext context) {
+        Context.CancellableContext context, StatsTraceContext statsTraceCtx) {
       // TODO(ejona86): should we update fullMethodName to have the canonical path of the method?
-      ServerCallImpl<ReqT, RespT> call = new ServerCallImpl<ReqT, RespT>(
-          stream, methodDef.getMethodDescriptor(), headers, context, stream.statsTraceContext(),
-          decompressorRegistry, compressorRegistry);
-      ServerCall.Listener<ReqT> listener =
+      statsTraceCtx.serverCallStarted(
+          new ServerCallInfoImpl<ReqT, RespT>(
+              methodDef.getMethodDescriptor(), // notify with original method descriptor
+              stream.getAttributes(),
+              stream.getAuthority()));
+      ServerCallHandler<ReqT, RespT> handler = methodDef.getServerCallHandler();
+      for (ServerInterceptor interceptor : interceptors) {
+        handler = InternalServerInterceptors.interceptCallHandler(interceptor, handler);
+      }
+      ServerMethodDefinition<ReqT, RespT> interceptedDef = methodDef.withServerCallHandler(handler);
+      ServerMethodDefinition<?, ?> wMethodDef = binlogProvider == null
+          ? interceptedDef : binlogProvider.wrapMethodDefinition(interceptedDef);
+      return startWrappedCall(fullMethodName, wMethodDef, stream, headers, context);
+    }
+
+    private <WReqT, WRespT> ServerStreamListener startWrappedCall(
+        String fullMethodName,
+        ServerMethodDefinition<WReqT, WRespT> methodDef,
+        ServerStream stream,
+        Metadata headers,
+        Context.CancellableContext context) {
+      ServerCallImpl<WReqT, WRespT> call = new ServerCallImpl<WReqT, WRespT>(
+          stream,
+          methodDef.getMethodDescriptor(),
+          headers,
+          context,
+          decompressorRegistry,
+          compressorRegistry,
+          serverCallTracer);
+
+      ServerCall.Listener<WReqT> listener =
           methodDef.getServerCallHandler().startCall(call, headers);
       if (listener == null) {
         throw new NullPointerException(
@@ -489,13 +570,44 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
     return logId;
   }
 
-  private static class NoopListener implements ServerStreamListener {
+  @Override
+  public ListenableFuture<ServerStats> getStats() {
+    ServerStats.Builder builder
+        = new ServerStats.Builder()
+        .setListenSockets(transportServer.getListenSockets());
+    serverCallTracer.updateBuilder(builder);
+    SettableFuture<ServerStats> ret = SettableFuture.create();
+    ret.set(builder.build());
+    return ret;
+  }
+
+  @Override
+  public String toString() {
+    return MoreObjects.toStringHelper(this)
+        .add("logId", logId)
+        .add("transportServer", transportServer)
+        .toString();
+  }
+
+  private static final class NoopListener implements ServerStreamListener {
     @Override
-    public void messageRead(InputStream value) {
-      try {
-        value.close();
-      } catch (IOException e) {
-        throw new RuntimeException(e);
+    public void messagesAvailable(MessageProducer producer) {
+      InputStream message;
+      while ((message = producer.next()) != null) {
+        try {
+          message.close();
+        } catch (IOException e) {
+          // Close any remaining messages
+          while ((message = producer.next()) != null) {
+            try {
+              message.close();
+            } catch (IOException ioException) {
+              // just log additional exceptions as we are already going to throw
+              log.log(Level.WARNING, "Exception closing stream", ioException);
+            }
+          }
+          throw new RuntimeException(e);
+        }
       }
     }
 
@@ -513,20 +625,26 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
    * Dispatches callbacks onto an application-provided executor and correctly propagates
    * exceptions.
    */
-  private static class JumpToApplicationThreadServerStreamListener implements ServerStreamListener {
+  @VisibleForTesting
+  static final class JumpToApplicationThreadServerStreamListener implements ServerStreamListener {
     private final Executor callExecutor;
+    private final Executor cancelExecutor;
     private final Context.CancellableContext context;
     private final ServerStream stream;
     // Only accessed from callExecutor.
     private ServerStreamListener listener;
 
     public JumpToApplicationThreadServerStreamListener(Executor executor,
-        ServerStream stream, Context.CancellableContext context) {
+        Executor cancelExecutor, ServerStream stream, Context.CancellableContext context) {
       this.callExecutor = executor;
+      this.cancelExecutor = cancelExecutor;
       this.stream = stream;
       this.context = context;
     }
 
+    /**
+     * This call MUST be serialized on callExecutor to avoid races.
+     */
     private ServerStreamListener getListener() {
       if (listener == null) {
         throw new IllegalStateException("listener unset");
@@ -534,7 +652,8 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
       return listener;
     }
 
-    private void setListener(ServerStreamListener listener) {
+    @VisibleForTesting
+    void setListener(ServerStreamListener listener) {
       Preconditions.checkNotNull(listener, "listener must not be null");
       Preconditions.checkState(this.listener == null, "Listener already set");
       this.listener = listener;
@@ -543,71 +662,123 @@ public final class ServerImpl extends io.grpc.Server implements WithLogId {
     /**
      * Like {@link ServerCall#close(Status, Metadata)}, but thread-safe for internal use.
      */
-    private void internalClose(Status status, Metadata trailers) {
+    private void internalClose() {
       // TODO(ejona86): this is not thread-safe :)
-      stream.close(status, trailers);
+      stream.close(Status.UNKNOWN, new Metadata());
     }
 
     @Override
-    public void messageRead(final InputStream message) {
-      callExecutor.execute(new ContextRunnable(context) {
+    public void messagesAvailable(final MessageProducer producer) {
+
+      final class MessagesAvailable extends ContextRunnable {
+
+        MessagesAvailable() {
+          super(context);
+        }
+
         @Override
         public void runInContext() {
           try {
-            getListener().messageRead(message);
+            getListener().messagesAvailable(producer);
           } catch (RuntimeException e) {
-            internalClose(Status.fromThrowable(e), new Metadata());
+            internalClose();
             throw e;
           } catch (Error e) {
-            internalClose(Status.fromThrowable(e), new Metadata());
+            internalClose();
             throw e;
           }
         }
-      });
+      }
+
+      callExecutor.execute(new MessagesAvailable());
     }
 
     @Override
     public void halfClosed() {
-      callExecutor.execute(new ContextRunnable(context) {
+      final class HalfClosed extends ContextRunnable {
+        HalfClosed() {
+          super(context);
+        }
+
         @Override
         public void runInContext() {
           try {
             getListener().halfClosed();
           } catch (RuntimeException e) {
-            internalClose(Status.fromThrowable(e), new Metadata());
+            internalClose();
             throw e;
           } catch (Error e) {
-            internalClose(Status.fromThrowable(e), new Metadata());
+            internalClose();
             throw e;
           }
         }
-      });
+      }
+
+      callExecutor.execute(new HalfClosed());
     }
 
     @Override
     public void closed(final Status status) {
-      callExecutor.execute(new ContextRunnable(context) {
+      // For cancellations, promptly inform any users of the context that their work should be
+      // aborted. Otherwise, we can wait until pending work is done.
+      if (!status.isOk()) {
+        // The callExecutor might be busy doing user work. To avoid waiting, use an executor that
+        // is not serializing.
+        cancelExecutor.execute(new ContextCloser(context, status.getCause()));
+      }
+
+      final class Closed extends ContextRunnable {
+        Closed() {
+          super(context);
+        }
+
         @Override
         public void runInContext() {
-          try {
-            getListener().closed(status);
-          } finally {
-            // Regardless of the status code we cancel the context so that listeners
-            // are aware that the call is done.
-            context.cancel(status.getCause());
-          }
+          getListener().closed(status);
         }
-      });
+      }
+
+      callExecutor.execute(new Closed());
     }
 
     @Override
     public void onReady() {
-      callExecutor.execute(new ContextRunnable(context) {
+      final class OnReady extends ContextRunnable {
+        OnReady() {
+          super(context);
+        }
+
         @Override
         public void runInContext() {
-          getListener().onReady();
+          try {
+            getListener().onReady();
+          } catch (RuntimeException e) {
+            internalClose();
+            throw e;
+          } catch (Error e) {
+            internalClose();
+            throw e;
+          }
         }
-      });
+      }
+
+      callExecutor.execute(new OnReady());
+    }
+  }
+
+  @VisibleForTesting
+  static final class ContextCloser implements Runnable {
+    private final Context.CancellableContext context;
+    private final Throwable cause;
+
+    ContextCloser(Context.CancellableContext context, Throwable cause) {
+      this.context = context;
+      this.cause = cause;
+    }
+
+    @Override
+    public void run() {
+      context.cancel(cause);
     }
   }
 }

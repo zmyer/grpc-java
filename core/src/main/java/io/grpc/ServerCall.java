@@ -1,41 +1,23 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
 
 import com.google.errorprone.annotations.DoNotMock;
-
-import java.net.SocketAddress;
-
-import javax.net.ssl.SSLSession;
+import javax.annotation.Nullable;
 
 /**
  * Encapsulates a single call received from a remote client. Calls may not simply be unary
@@ -56,27 +38,6 @@ import javax.net.ssl.SSLSession;
  */
 @DoNotMock("Use InProcessTransport and make a fake server instead")
 public abstract class ServerCall<ReqT, RespT> {
-  /**
-   * {@link Attributes.Key} for the remote address of server call attributes
-   * {@link ServerCall#attributes()}
-   *
-   * @deprecated use the equivalent {@link io.grpc.Grpc#TRANSPORT_ATTR_REMOTE_ADDR} instead
-   */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1710")
-  @Deprecated
-  public static final Attributes.Key<SocketAddress> REMOTE_ADDR_KEY =
-      Grpc.TRANSPORT_ATTR_REMOTE_ADDR;
-
-  /**
-   * {@link Attributes.Key} for the SSL session of server call attributes
-   * {@link ServerCall#attributes()}
-   *
-   * @deprecated use the equivalent {@link io.grpc.Grpc#TRANSPORT_ATTR_SSL_SESSION} instead
-   */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1710")
-  @Deprecated
-  public static final Attributes.Key<SSLSession> SSL_SESSION_KEY =
-      Grpc.TRANSPORT_ATTR_SSL_SESSION;
 
   /**
    * Callbacks for consuming incoming RPC messages.
@@ -148,8 +109,8 @@ public abstract class ServerCall<ReqT, RespT> {
    * Send response header metadata prior to sending a response message. This method may
    * only be called once and cannot be called after calls to {@link #sendMessage} or {@link #close}.
    *
-   * <p>Since {@link Metadata} is not thread-safe, the caller must not access {@code headers} after
-   * this point.
+   * <p>Since {@link Metadata} is not thread-safe, the caller must not access (read or write) {@code
+   * headers} after this point.
    *
    * @param headers metadata to send prior to any response body.
    * @throws IllegalStateException if {@code close} has been called, a message has been sent, or
@@ -186,8 +147,8 @@ public abstract class ServerCall<ReqT, RespT> {
    * notification should be expected, independent of {@code status}. Otherwise {@link
    * Listener#onCancel} has been or will be called.
    *
-   * <p>Since {@link Metadata} is not thread-safe, the caller must not access {@code trailers} after
-   * this point.
+   * <p>Since {@link Metadata} is not thread-safe, the caller must not access (read or write) {@code
+   * trailers} after this point.
    *
    * @throws IllegalStateException if call is already {@code close}d
    */
@@ -231,16 +192,25 @@ public abstract class ServerCall<ReqT, RespT> {
    * Returns properties of a single call.
    *
    * <p>Attributes originate from the transport and can be altered by {@link ServerTransportFilter}.
-   * {@link Grpc} defines commonly used attributes, while the availability of them in a particular
-   * {@code ServerCall} is not guaranteed.
+   * {@link Grpc} defines commonly used attributes, but they are not guaranteed to be present.
    *
-   * @return Attributes container
+   * @return non-{@code null} Attributes container
    */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1779")
-  public Attributes attributes() {
+  public Attributes getAttributes() {
     return Attributes.EMPTY;
   }
 
+  /**
+   * Gets the authority this call is addressed to.
+   *
+   * @return the authority string. {@code null} if not available.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2924")
+  @Nullable
+  public String getAuthority() {
+    return null;
+  }
 
   /**
    * The {@link MethodDescriptor} for the call.

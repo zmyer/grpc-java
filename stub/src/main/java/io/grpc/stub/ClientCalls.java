@@ -1,42 +1,27 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.stub;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.AbstractFuture;
 import com.google.common.util.concurrent.ListenableFuture;
-
 import io.grpc.CallOptions;
 import io.grpc.Channel;
 import io.grpc.ClientCall;
@@ -45,7 +30,6 @@ import io.grpc.MethodDescriptor;
 import io.grpc.Status;
 import io.grpc.StatusException;
 import io.grpc.StatusRuntimeException;
-
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -56,7 +40,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-
 import javax.annotation.Nullable;
 
 /**
@@ -65,7 +48,8 @@ import javax.annotation.Nullable;
  * that the runtime can vary behavior without requiring regeneration of the stub.
  */
 public final class ClientCalls {
-  private static final Logger log = Logger.getLogger(ClientCalls.class.getName());
+
+  private static final Logger logger = Logger.getLogger(ClientCalls.class.getName());
 
   // Prevent instantiation
   private ClientCalls() {}
@@ -116,9 +100,10 @@ public final class ClientCalls {
   public static <ReqT, RespT> RespT blockingUnaryCall(ClientCall<ReqT, RespT> call, ReqT param) {
     try {
       return getUnchecked(futureUnaryCall(call, param));
-    } catch (Throwable t) {
-      call.cancel(null, t);
-      throw t instanceof RuntimeException ? (RuntimeException) t : new RuntimeException(t);
+    } catch (RuntimeException e) {
+      throw cancelThrow(call, e);
+    } catch (Error e) {
+      throw cancelThrow(call, e);
     }
   }
 
@@ -138,13 +123,17 @@ public final class ClientCalls {
           executor.waitAndDrain();
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
-          throw Status.CANCELLED.withCause(e).asRuntimeException();
+          throw Status.CANCELLED
+              .withDescription("Call was interrupted")
+              .withCause(e)
+              .asRuntimeException();
         }
       }
       return getUnchecked(responseFuture);
-    } catch (Throwable t) {
-      call.cancel(null, t);
-      throw t instanceof RuntimeException ? (RuntimeException) t : new RuntimeException(t);
+    } catch (RuntimeException e) {
+      throw cancelThrow(call, e);
+    } catch (Error e) {
+      throw cancelThrow(call, e);
     }
   }
 
@@ -191,7 +180,7 @@ public final class ClientCalls {
   }
 
   /**
-   * Returns the result of calling {@link Future#get()} interruptably on a task known not to throw a
+   * Returns the result of calling {@link Future#get()} interruptibly on a task known not to throw a
    * checked exception.
    *
    * <p>If interrupted, the interrupt is restored before throwing an exception..
@@ -206,9 +195,12 @@ public final class ClientCalls {
       return future.get();
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw Status.CANCELLED.withCause(e).asRuntimeException();
+      throw Status.CANCELLED
+          .withDescription("Call was interrupted")
+          .withCause(e)
+          .asRuntimeException();
     } catch (ExecutionException e) {
-      throw toStatusRuntimeException(e);
+      throw toStatusRuntimeException(e.getCause());
     }
   }
 
@@ -231,14 +223,39 @@ public final class ClientCalls {
       }
       cause = cause.getCause();
     }
-    return Status.UNKNOWN.withCause(t).asRuntimeException();
+    return Status.UNKNOWN.withDescription("unexpected exception").withCause(t)
+        .asRuntimeException();
+  }
+
+  /**
+   * Cancels a call, and throws the exception.
+   *
+   * @param t must be a RuntimeException or Error
+   */
+  private static RuntimeException cancelThrow(ClientCall<?, ?> call, Throwable t) {
+    try {
+      call.cancel(null, t);
+    } catch (Throwable e) {
+      assert e instanceof RuntimeException || e instanceof Error;
+      logger.log(Level.SEVERE, "RuntimeException encountered while closing call", e);
+    }
+    if (t instanceof RuntimeException) {
+      throw (RuntimeException) t;
+    } else if (t instanceof Error) {
+      throw (Error) t;
+    }
+    // should be impossible
+    throw new AssertionError(t);
   }
 
   private static <ReqT, RespT> void asyncUnaryRequestCall(
       ClientCall<ReqT, RespT> call, ReqT param, StreamObserver<RespT> responseObserver,
       boolean streamingResponse) {
-    asyncUnaryRequestCall(call, param,
-        new StreamObserverToCallListenerAdapter<ReqT, RespT>(call, responseObserver,
+    asyncUnaryRequestCall(
+        call,
+        param,
+        new StreamObserverToCallListenerAdapter<ReqT, RespT>(
+            responseObserver,
             new CallToStreamObserverAdapter<ReqT>(call),
             streamingResponse),
         streamingResponse);
@@ -253,9 +270,10 @@ public final class ClientCalls {
     try {
       call.sendMessage(param);
       call.halfClose();
-    } catch (Throwable t) {
-      call.cancel(null, t);
-      throw t instanceof RuntimeException ? (RuntimeException) t : new RuntimeException(t);
+    } catch (RuntimeException e) {
+      throw cancelThrow(call, e);
+    } catch (Error e) {
+      throw cancelThrow(call, e);
     }
   }
 
@@ -263,8 +281,11 @@ public final class ClientCalls {
       ClientCall<ReqT, RespT> call, StreamObserver<RespT> responseObserver,
       boolean streamingResponse) {
     CallToStreamObserverAdapter<ReqT> adapter = new CallToStreamObserverAdapter<ReqT>(call);
-    startCall(call, new StreamObserverToCallListenerAdapter<ReqT, RespT>(
-        call, responseObserver, adapter, streamingResponse), streamingResponse);
+    startCall(
+        call,
+        new StreamObserverToCallListenerAdapter<ReqT, RespT>(
+            responseObserver, adapter, streamingResponse),
+        streamingResponse);
     return adapter;
   }
 
@@ -280,13 +301,14 @@ public final class ClientCalls {
     }
   }
 
-  private static class CallToStreamObserverAdapter<T> extends ClientCallStreamObserver<T> {
+  private static final class CallToStreamObserverAdapter<T> extends ClientCallStreamObserver<T> {
     private boolean frozen;
     private final ClientCall<T, ?> call;
     private Runnable onReadyHandler;
     private boolean autoFlowControlEnabled = true;
 
-    public CallToStreamObserverAdapter(ClientCall<T, ?> call) {
+    // Non private to avoid synthetic class
+    CallToStreamObserverAdapter(ClientCall<T, ?> call) {
       this.call = call;
     }
 
@@ -339,22 +361,25 @@ public final class ClientCalls {
     public void setMessageCompression(boolean enable) {
       call.setMessageCompression(enable);
     }
+
+    @Override
+    public void cancel(@Nullable String message, @Nullable Throwable cause) {
+      call.cancel(message, cause);
+    }
   }
 
-  private static class StreamObserverToCallListenerAdapter<ReqT, RespT>
+  private static final class StreamObserverToCallListenerAdapter<ReqT, RespT>
       extends ClientCall.Listener<RespT> {
-    private final ClientCall<ReqT, RespT> call;
     private final StreamObserver<RespT> observer;
     private final CallToStreamObserverAdapter<ReqT> adapter;
     private final boolean streamingResponse;
     private boolean firstResponseReceived;
 
+    // Non private to avoid synthetic class
     StreamObserverToCallListenerAdapter(
-        ClientCall<ReqT, RespT> call,
         StreamObserver<RespT> observer,
         CallToStreamObserverAdapter<ReqT> adapter,
         boolean streamingResponse) {
-      this.call = call;
       this.observer = observer;
       this.streamingResponse = streamingResponse;
       this.adapter = adapter;
@@ -383,7 +408,7 @@ public final class ClientCalls {
 
       if (streamingResponse && adapter.autoFlowControlEnabled) {
         // Request delivery of the next inbound message.
-        call.request(1);
+        adapter.request(1);
       }
     }
 
@@ -407,11 +432,12 @@ public final class ClientCalls {
   /**
    * Complete a GrpcFuture using {@link StreamObserver} events.
    */
-  private static class UnaryStreamToFuture<RespT> extends ClientCall.Listener<RespT> {
+  private static final class UnaryStreamToFuture<RespT> extends ClientCall.Listener<RespT> {
     private final GrpcFuture<RespT> responseFuture;
     private RespT value;
 
-    public UnaryStreamToFuture(GrpcFuture<RespT> responseFuture) {
+    // Non private to avoid synthetic class
+    UnaryStreamToFuture(GrpcFuture<RespT> responseFuture) {
       this.responseFuture = responseFuture;
     }
 
@@ -444,9 +470,10 @@ public final class ClientCalls {
     }
   }
 
-  private static class GrpcFuture<RespT> extends AbstractFuture<RespT> {
+  private static final class GrpcFuture<RespT> extends AbstractFuture<RespT> {
     private final ClientCall<?, RespT> call;
 
+    // Non private to avoid synthetic class
     GrpcFuture(ClientCall<?, RespT> call) {
       this.call = call;
     }
@@ -465,6 +492,11 @@ public final class ClientCalls {
     protected boolean setException(Throwable throwable) {
       return super.setException(throwable);
     }
+
+    @SuppressWarnings("MissingOverride") // Add @Override once Java 6 support is dropped
+    protected String pendingToString() {
+      return MoreObjects.toStringHelper(this).add("clientCall", call).toString();
+    }
   }
 
   /**
@@ -475,7 +507,7 @@ public final class ClientCalls {
    * separate thread from {@code Iterator} calls.
    */
   // TODO(ejona86): determine how to allow ClientCall.cancel() in case of application error.
-  private static class BlockingResponseStream<T> implements Iterator<T> {
+  private static final class BlockingResponseStream<T> implements Iterator<T> {
     // Due to flow control, only needs to hold up to 2 items: 1 for value, 1 for close.
     private final BlockingQueue<Object> buffer = new ArrayBlockingQueue<Object>(2);
     private final ClientCall.Listener<T> listener = new QueuingListener();
@@ -485,11 +517,13 @@ public final class ClientCalls {
     // Only accessed when iterating.
     private Object last;
 
-    private BlockingResponseStream(ClientCall<?, T> call) {
+    // Non private to avoid synthetic class
+    BlockingResponseStream(ClientCall<?, T> call) {
       this(call, null);
     }
 
-    private BlockingResponseStream(ClientCall<?, T> call, ThreadlessExecutor threadless) {
+    // Non private to avoid synthetic class
+    BlockingResponseStream(ClientCall<?, T> call, ThreadlessExecutor threadless) {
       this.call = call;
       this.threadless = threadless;
     }
@@ -520,7 +554,7 @@ public final class ClientCalls {
           last = waitForNext();
         } catch (InterruptedException ie) {
           Thread.currentThread().interrupt();
-          throw Status.CANCELLED.withCause(ie).asRuntimeException();
+          throw Status.CANCELLED.withDescription("interrupted").withCause(ie).asRuntimeException();
         }
       }
       if (last instanceof StatusRuntimeException) {
@@ -551,7 +585,10 @@ public final class ClientCalls {
       throw new UnsupportedOperationException();
     }
 
-    private class QueuingListener extends ClientCall.Listener<T> {
+    private final class QueuingListener extends ClientCall.Listener<T> {
+      // Non private to avoid synthetic class
+      QueuingListener() {}
+
       private boolean done = false;
 
       @Override
@@ -577,8 +614,13 @@ public final class ClientCalls {
     }
   }
 
-  private static class ThreadlessExecutor implements Executor {
+  private static final class ThreadlessExecutor implements Executor {
+    private static final Logger log = Logger.getLogger(ThreadlessExecutor.class.getName());
+
     private final BlockingQueue<Runnable> queue = new LinkedBlockingQueue<Runnable>();
+
+    // Non private to avoid synthetic class
+    ThreadlessExecutor() {}
 
     /**
      * Waits until there is a Runnable, then executes it and all queued Runnables after it.

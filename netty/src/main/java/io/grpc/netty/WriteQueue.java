@@ -1,43 +1,27 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.netty;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelPromise;
-
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -89,6 +73,7 @@ class WriteQueue {
    * @param flush true if a flush of the write should be schedule, false if a later call to
    *              enqueue will schedule the flush.
    */
+  @CanIgnoreReturnValue
   ChannelFuture enqueue(QueuedCommand command, boolean flush) {
     return enqueue(command, channel.newPromise(), flush);
   }
@@ -101,6 +86,7 @@ class WriteQueue {
    * @param flush true if a flush of the write should be schedule, false if a later call to
    *              enqueue will schedule the flush.
    */
+  @CanIgnoreReturnValue
   ChannelFuture enqueue(QueuedCommand command, ChannelPromise promise, boolean flush) {
     // Detect erroneous code that tries to reuse command objects.
     Preconditions.checkArgument(command.promise() == null, "promise must not be set on command");
@@ -114,6 +100,18 @@ class WriteQueue {
   }
 
   /**
+   * Enqueue the runnable. It is not safe for another thread to queue an Runnable directly to the
+   * event loop, because it will be out-of-order with writes. This method allows the Runnable to be
+   * processed in-order with writes.
+   */
+  void enqueue(Runnable runnable, boolean flush) {
+    queue.add(new RunnableCommand(runnable));
+    if (flush) {
+      scheduleFlush();
+    }
+  }
+
+  /**
    * Process the queue of commands and dispatch them to the stream. This method is only
    * called in the event loop
    */
@@ -123,7 +121,7 @@ class WriteQueue {
       int i = 0;
       boolean flushedOnce = false;
       while ((cmd = queue.poll()) != null) {
-        channel.write(cmd, cmd.promise());
+        cmd.run(channel);
         if (++i == DEQUE_CHUNK_SIZE) {
           i = 0;
           // Flush each chunk so we are releasing buffers periodically. In theory this loop
@@ -146,6 +144,29 @@ class WriteQueue {
     }
   }
 
+  private static class RunnableCommand implements QueuedCommand {
+    private final Runnable runnable;
+
+    public RunnableCommand(Runnable runnable) {
+      this.runnable = runnable;
+    }
+
+    @Override
+    public final void promise(ChannelPromise promise) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final ChannelPromise promise() {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final void run(Channel channel) {
+      runnable.run();
+    }
+  }
+
   abstract static class AbstractQueuedCommand implements QueuedCommand {
 
     private ChannelPromise promise;
@@ -158,6 +179,11 @@ class WriteQueue {
     @Override
     public final ChannelPromise promise() {
       return promise;
+    }
+
+    @Override
+    public final void run(Channel channel) {
+      channel.write(this, promise);
     }
   }
 
@@ -174,5 +200,7 @@ class WriteQueue {
      * Sets the promise.
      */
     void promise(ChannelPromise promise);
+
+    void run(Channel channel);
   }
 }

@@ -1,32 +1,17 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.netty;
@@ -34,6 +19,7 @@ package io.grpc.netty;
 import static com.google.common.truth.Truth.assertThat;
 import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
 import static io.grpc.netty.NettyTestUtil.messageFrame;
+import static org.junit.Assert.assertNull;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyBoolean;
 import static org.mockito.Matchers.eq;
@@ -50,29 +36,32 @@ import static org.mockito.Mockito.when;
 
 import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.ListMultimap;
-
 import io.grpc.Attributes;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.internal.ServerStreamListener;
 import io.grpc.internal.StatsTraceContext;
+import io.grpc.internal.StreamListener;
+import io.grpc.internal.TransportTracer;
 import io.grpc.netty.WriteQueue.QueuedCommand;
 import io.netty.buffer.EmptyByteBuf;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.util.AsciiString;
-
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.util.LinkedList;
+import java.util.Queue;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Matchers;
 import org.mockito.Mock;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
-
-import java.io.ByteArrayInputStream;
 
 /** Unit tests for {@link NettyServerStream}. */
 @RunWith(JUnit4.class)
@@ -84,6 +73,7 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
   private NettyServerHandler handler;
 
   private Metadata trailers = new Metadata();
+  private final Queue<InputStream> listenerMessageQueue = new LinkedList<InputStream>();
 
   @Before
   @Override
@@ -93,6 +83,22 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
     // Verify onReady notification and then reset it.
     verify(listener()).onReady();
     reset(listener());
+
+    doAnswer(
+          new Answer<Void>() {
+            @Override
+            public Void answer(InvocationOnMock invocation) throws Throwable {
+              StreamListener.MessageProducer producer =
+                  (StreamListener.MessageProducer) invocation.getArguments()[0];
+              InputStream message;
+              while ((message = producer.next()) != null) {
+                listenerMessageQueue.add(message);
+              }
+              return null;
+            }
+          })
+      .when(serverListener)
+      .messagesAvailable(Matchers.<StreamListener.MessageProducer>any());
   }
 
   @Test
@@ -165,7 +171,7 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
     stream().transportState().complete();
 
     verify(serverListener).closed(Status.OK);
-    verifyZeroInteractions(serverListener);
+    assertNull("no message expected", listenerMessageQueue.poll());
   }
 
   @Test
@@ -192,7 +198,7 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
     // Sending complete. Listener gets closed()
     stream().transportState().complete();
     verify(serverListener).closed(Status.OK);
-    verifyZeroInteractions(serverListener);
+    assertNull("no message expected", listenerMessageQueue.poll());
   }
 
   @Test
@@ -211,7 +217,7 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
 
     // Server closes. Status sent
     stream().close(Status.OK, trailers);
-    verifyNoMoreInteractions(serverListener);
+    assertNull("no message expected", listenerMessageQueue.poll());
 
     ArgumentCaptor<SendResponseHeadersCommand> cmdCap =
         ArgumentCaptor.forClass(SendResponseHeadersCommand.class);
@@ -225,7 +231,7 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
     // Sending and receiving complete. Listener gets closed()
     stream().transportState().complete();
     verify(serverListener).closed(Status.OK);
-    verifyNoMoreInteractions(serverListener);
+    assertNull("no message expected", listenerMessageQueue.poll());
   }
 
   @Test
@@ -235,7 +241,7 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
     verify(serverListener).closed(same(status));
     verify(channel, never()).writeAndFlush(any(SendResponseHeadersCommand.class));
     verify(channel, never()).writeAndFlush(any(SendGrpcFrameCommand.class));
-    verifyNoMoreInteractions(serverListener);
+    assertNull("no message expected", listenerMessageQueue.poll());
   }
 
   @Test
@@ -248,7 +254,7 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
     // Abort from the transport layer
     stream().transportState().transportReportStatus(status);
     verify(serverListener).closed(same(status));
-    verifyNoMoreInteractions(serverListener);
+    assertNull("no message expected", listenerMessageQueue.poll());
   }
 
   @Test
@@ -293,10 +299,12 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
     }).when(writeQueue).enqueue(any(QueuedCommand.class), any(ChannelPromise.class), anyBoolean());
     when(writeQueue.enqueue(any(QueuedCommand.class), anyBoolean())).thenReturn(future);
     StatsTraceContext statsTraceCtx = StatsTraceContext.NOOP;
+    TransportTracer transportTracer = new TransportTracer();
     NettyServerStream.TransportState state = new NettyServerStream.TransportState(
-        handler, http2Stream, DEFAULT_MAX_MESSAGE_SIZE, statsTraceCtx);
+        handler, channel.eventLoop(), http2Stream, DEFAULT_MAX_MESSAGE_SIZE, statsTraceCtx,
+        transportTracer);
     NettyServerStream stream = new NettyServerStream(channel, state, Attributes.EMPTY,
-        statsTraceCtx);
+        "test-authority", statsTraceCtx, transportTracer);
     stream.transportState().setListener(serverListener);
     state.onStreamAllocated();
     verify(serverListener, atLeastOnce()).onReady();
@@ -317,6 +325,11 @@ public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream
   @Override
   protected ServerStreamListener listener() {
     return serverListener;
+  }
+
+  @Override
+  protected Queue<InputStream> listenerMessageQueue() {
+    return listenerMessageQueue;
   }
 
   private NettyServerStream stream() {

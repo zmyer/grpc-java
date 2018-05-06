@@ -1,240 +1,239 @@
 /*
- * Copyright 2016, Google Inc. All rights reserved.
+ * Copyright 2016 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
-import com.google.census.CensusContext;
-import com.google.census.CensusContextFactory;
-import com.google.census.MetricMap;
-import com.google.census.MetricName;
-import com.google.census.RpcConstants;
-import com.google.census.TagKey;
-import com.google.census.TagValue;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Stopwatch;
-import com.google.common.base.Supplier;
-
+import io.grpc.CallOptions;
+import io.grpc.ClientStreamTracer;
+import io.grpc.Context;
 import io.grpc.Metadata;
+import io.grpc.ServerStreamTracer;
+import io.grpc.ServerStreamTracer.ServerCallInfo;
 import io.grpc.Status;
-
-import java.nio.ByteBuffer;
-import java.util.concurrent.TimeUnit;
+import io.grpc.StreamTracer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import javax.annotation.concurrent.ThreadSafe;
 
 /**
- * The stats and tracing information for a call.
- *
- * <p>This class is not thread-safe, in the sense that the updates to each individual metric must be
- * serialized, while multiple threads can update different metrics without any sort of
- * synchronization.  For example, calls to {@link #wireBytesSent} must be synchronized, while {@link
- * #wireBytesReceived} and {@link #wireBytesSent} can be called concurrently.  {@link #callEnded}
- * can be called concurrently with itself and the other methods.
+ * The stats and tracing information for a stream.
  */
-@SuppressWarnings("NonAtomicVolatileUpdate")
+@ThreadSafe
 public final class StatsTraceContext {
-  public static final StatsTraceContext NOOP = StatsTraceContext.newClientContext(
-      "noopservice/noopmethod", NoopCensusContextFactory.INSTANCE,
-      GrpcUtil.STOPWATCH_SUPPLIER);
+  public static final StatsTraceContext NOOP = new StatsTraceContext(new StreamTracer[0]);
 
-  private enum Side {
-    CLIENT, SERVER
-  }
+  private final StreamTracer[] tracers;
+  private final AtomicBoolean closed = new AtomicBoolean(false);
 
-  private final CensusContext censusCtx;
-  private final Stopwatch stopwatch;
-  private final Side side;
-  private final Metadata.Key<CensusContext> censusHeader;
-  private volatile long wireBytesSent;
-  private volatile long wireBytesReceived;
-  private volatile long uncompressedBytesSent;
-  private volatile long uncompressedBytesReceived;
-  private final AtomicBoolean callEnded = new AtomicBoolean(false);
-
-  private StatsTraceContext(Side side, String fullMethodName, CensusContext parentCtx,
-      Supplier<Stopwatch> stopwatchSupplier, Metadata.Key<CensusContext> censusHeader) {
-    this.side = side;
-    TagKey methodTagKey =
-        side == Side.CLIENT ? RpcConstants.RPC_CLIENT_METHOD : RpcConstants.RPC_SERVER_METHOD;
-    // TODO(carl-mastrangelo): maybe cache TagValue in MethodDescriptor
-    this.censusCtx = parentCtx.with(methodTagKey, new TagValue(fullMethodName));
-    this.stopwatch = stopwatchSupplier.get().start();
-    this.censusHeader = censusHeader;
+  /**
+   * Factory method for the client-side.
+   */
+  public static StatsTraceContext newClientContext(CallOptions callOptions, Metadata headers) {
+    List<ClientStreamTracer.Factory> factories = callOptions.getStreamTracerFactories();
+    if (factories.isEmpty()) {
+      return NOOP;
+    }
+    // This array will be iterated multiple times per RPC. Use primitive array instead of Collection
+    // so that for-each doesn't create an Iterator every time.
+    StreamTracer[] tracers = new StreamTracer[factories.size()];
+    for (int i = 0; i < tracers.length; i++) {
+      tracers[i] = factories.get(i).newClientStreamTracer(callOptions, headers);
+    }
+    return new StatsTraceContext(tracers);
   }
 
   /**
-   * Creates a {@code StatsTraceContext} for an outgoing RPC, using the current CensusContext.
-   *
-   * <p>The current time is used as the start time of the RPC.
+   * Factory method for the server-side.
    */
-  public static StatsTraceContext newClientContext(String methodName,
-      CensusContextFactory censusFactory, Supplier<Stopwatch> stopwatchSupplier) {
-    return new StatsTraceContext(Side.CLIENT, methodName,
-        // TODO(zhangkun83): use the CensusContext out of the current Context
-        censusFactory.getDefault(),
-        stopwatchSupplier, createCensusHeader(censusFactory));
+  public static StatsTraceContext newServerContext(
+      List<ServerStreamTracer.Factory> factories, String fullMethodName, Metadata headers) {
+    if (factories.isEmpty()) {
+      return NOOP;
+    }
+    StreamTracer[] tracers = new StreamTracer[factories.size()];
+    for (int i = 0; i < tracers.length; i++) {
+      tracers[i] = factories.get(i).newServerStreamTracer(fullMethodName, headers);
+    }
+    return new StatsTraceContext(tracers);
   }
 
   @VisibleForTesting
-  static StatsTraceContext newClientContextForTesting(String methodName,
-      CensusContextFactory censusFactory, CensusContext parent,
-      Supplier<Stopwatch> stopwatchSupplier) {
-    return new StatsTraceContext(Side.CLIENT, methodName, parent, stopwatchSupplier,
-        createCensusHeader(censusFactory));
+  StatsTraceContext(StreamTracer[] tracers) {
+    this.tracers = tracers;
   }
 
   /**
-   * Creates a {@code StatsTraceContext} for an incoming RPC, using the CensusContext deserialized
-   * from the headers.
-   *
-   * <p>The current time is used as the start time of the RPC.
+   * Returns a copy of the tracer list.
    */
-  public static StatsTraceContext newServerContext(String methodName,
-      CensusContextFactory censusFactory, Metadata headers,
-      Supplier<Stopwatch> stopwatchSupplier) {
-    Metadata.Key<CensusContext> censusHeader = createCensusHeader(censusFactory);
-    CensusContext parentCtx = headers.get(censusHeader);
-    if (parentCtx == null) {
-      parentCtx = censusFactory.getDefault();
-    }
-    return new StatsTraceContext(Side.SERVER, methodName, parentCtx, stopwatchSupplier,
-        censusHeader);
-  }
-
-  /**
-   * Propagate the context to the outgoing headers.
-   */
-  void propagateToHeaders(Metadata headers) {
-    headers.discardAll(censusHeader);
-    headers.put(censusHeader, censusCtx);
-  }
-
-  Metadata.Key<CensusContext> getCensusHeader() {
-    return censusHeader;
-  }
-
   @VisibleForTesting
-  CensusContext getCensusContext() {
-    return censusCtx;
-  }
-
-  @VisibleForTesting
-  static Metadata.Key<CensusContext> createCensusHeader(
-      final CensusContextFactory censusCtxFactory) {
-    return Metadata.Key.of("grpc-census-bin", new Metadata.BinaryMarshaller<CensusContext>() {
-        @Override
-        public byte[] toBytes(CensusContext context) {
-          ByteBuffer buffer = context.serialize();
-          // TODO(carl-mastrangelo): currently we only make sure the correctness. We may need to
-          // optimize out the allocation and copy in the future.
-          byte[] bytes = new byte[buffer.remaining()];
-          buffer.get(bytes);
-          return bytes;
-        }
-
-        @Override
-        public CensusContext parseBytes(byte[] serialized) {
-          return censusCtxFactory.deserialize(ByteBuffer.wrap(serialized));
-        }
-      });
+  public List<StreamTracer> getTracersForTest() {
+    return new ArrayList<StreamTracer>(Arrays.asList(tracers));
   }
 
   /**
-   * Record the outgoing number of payload bytes as on the wire.
-   */
-  void wireBytesSent(long bytes) {
-    wireBytesSent += bytes;
-  }
-
-  /**
-   * Record the incoming number of payload bytes as on the wire.
-   */
-  void wireBytesReceived(long bytes) {
-    wireBytesReceived += bytes;
-  }
-
-  /**
-   * Record the outgoing number of payload bytes in uncompressed form.
+   * See {@link ClientStreamTracer#outboundHeaders}.  For client-side only.
    *
-   * <p>The time this method is called is unrelated to the actual time when those byte are sent.
+   * <p>Transport-specific, thus should be called by transport implementations.
    */
-  void uncompressedBytesSent(long bytes) {
-    uncompressedBytesSent += bytes;
-  }
-
-  /**
-   * Record the incoming number of payload bytes in uncompressed form.
-   *
-   * <p>The time this method is called is unrelated to the actual time when those byte are received.
-   */
-  void uncompressedBytesReceived(long bytes) {
-    uncompressedBytesReceived += bytes;
-  }
-
-  /**
-   * Record a finished all and mark the current time as the end time.
-   *
-   * <p>Can be called from any thread without synchronization.  Calling it the second time or more
-   * is a no-op.
-   */
-  void callEnded(Status status) {
-    if (!callEnded.compareAndSet(false, true)) {
-      return;
+  public void clientOutboundHeaders() {
+    for (StreamTracer tracer : tracers) {
+      ((ClientStreamTracer) tracer).outboundHeaders();
     }
-    stopwatch.stop();
-    MetricName latencyMetric;
-    MetricName wireBytesSentMetric;
-    MetricName wireBytesReceivedMetric;
-    MetricName uncompressedBytesSentMetric;
-    MetricName uncompressedBytesReceivedMetric;
-    if (side == Side.CLIENT) {
-      latencyMetric = RpcConstants.RPC_CLIENT_ROUNDTRIP_LATENCY;
-      wireBytesSentMetric = RpcConstants.RPC_CLIENT_REQUEST_BYTES;
-      wireBytesReceivedMetric = RpcConstants.RPC_CLIENT_RESPONSE_BYTES;
-      uncompressedBytesSentMetric = RpcConstants.RPC_CLIENT_UNCOMPRESSED_REQUEST_BYTES;
-      uncompressedBytesReceivedMetric = RpcConstants.RPC_CLIENT_UNCOMPRESSED_RESPONSE_BYTES;
-    } else {
-      latencyMetric = RpcConstants.RPC_SERVER_SERVER_LATENCY;
-      wireBytesSentMetric = RpcConstants.RPC_SERVER_RESPONSE_BYTES;
-      wireBytesReceivedMetric = RpcConstants.RPC_SERVER_REQUEST_BYTES;
-      uncompressedBytesSentMetric = RpcConstants.RPC_SERVER_UNCOMPRESSED_RESPONSE_BYTES;
-      uncompressedBytesReceivedMetric = RpcConstants.RPC_SERVER_UNCOMPRESSED_REQUEST_BYTES;
+  }
+
+  /**
+   * See {@link ClientStreamTracer#inboundHeaders}.  For client-side only.
+   *
+   * <p>Called from abstract stream implementations.
+   */
+  public void clientInboundHeaders() {
+    for (StreamTracer tracer : tracers) {
+      ((ClientStreamTracer) tracer).inboundHeaders();
     }
-    censusCtx
-        .with(RpcConstants.RPC_STATUS, new TagValue(status.getCode().toString()))
-        .record(MetricMap.builder()
-            .put(latencyMetric, stopwatch.elapsed(TimeUnit.MILLISECONDS))
-            .put(wireBytesSentMetric, wireBytesSent)
-            .put(wireBytesReceivedMetric, wireBytesReceived)
-            .put(uncompressedBytesSentMetric, uncompressedBytesSent)
-            .put(uncompressedBytesReceivedMetric, uncompressedBytesReceived)
-            .build());
+  }
+
+  /**
+   * See {@link ServerStreamTracer#filterContext}.  For server-side only.
+   *
+   * <p>Called from {@link io.grpc.internal.ServerImpl}.
+   */
+  public <ReqT, RespT> Context serverFilterContext(Context context) {
+    Context ctx = checkNotNull(context, "context");
+    for (StreamTracer tracer : tracers) {
+      ctx = ((ServerStreamTracer) tracer).filterContext(ctx);
+      checkNotNull(ctx, "%s returns null context", tracer);
+    }
+    return ctx;
+  }
+
+  /**
+   * See {@link ServerStreamTracer#serverCallStarted}.  For server-side only.
+   *
+   * <p>Called from {@link io.grpc.internal.ServerImpl}.
+   */
+  public void serverCallStarted(ServerCallInfo<?, ?> callInfo) {
+    for (StreamTracer tracer : tracers) {
+      ((ServerStreamTracer) tracer).serverCallStarted(callInfo);
+    }
+  }
+
+  /**
+   * See {@link StreamTracer#streamClosed}. This may be called multiple times, and only the first
+   * value will be taken.
+   *
+   * <p>Called from abstract stream implementations.
+   */
+  public void streamClosed(Status status) {
+    if (closed.compareAndSet(false, true)) {
+      for (StreamTracer tracer : tracers) {
+        tracer.streamClosed(status);
+      }
+    }
+  }
+
+  /**
+   * See {@link StreamTracer#outboundMessage(int)}.
+   *
+   * <p>Called from {@link io.grpc.internal.Framer}.
+   */
+  public void outboundMessage(int seqNo) {
+    for (StreamTracer tracer : tracers) {
+      tracer.outboundMessage(seqNo);
+    }
+  }
+
+  /**
+   * See {@link StreamTracer#inboundMessage(int)}.
+   *
+   * <p>Called from {@link io.grpc.internal.MessageDeframer}.
+   */
+  public void inboundMessage(int seqNo) {
+    for (StreamTracer tracer : tracers) {
+      tracer.inboundMessage(seqNo);
+    }
+  }
+
+  /**
+   * See {@link StreamTracer#outboundMessageSent}.
+   *
+   * <p>Called from {@link io.grpc.internal.Framer}.
+   */
+  public void outboundMessageSent(int seqNo, long optionalWireSize, long optionalUncompressedSize) {
+    for (StreamTracer tracer : tracers) {
+      tracer.outboundMessageSent(seqNo, optionalWireSize, optionalUncompressedSize);
+    }
+  }
+
+  /**
+   * See {@link StreamTracer#inboundMessageRead}.
+   *
+   * <p>Called from {@link io.grpc.internal.MessageDeframer}.
+   */
+  public void inboundMessageRead(int seqNo, long optionalWireSize, long optionalUncompressedSize) {
+    for (StreamTracer tracer : tracers) {
+      tracer.inboundMessageRead(seqNo, optionalWireSize, optionalUncompressedSize);
+    }
+  }
+
+  /**
+   * See {@link StreamTracer#outboundUncompressedSize}.
+   *
+   * <p>Called from {@link io.grpc.internal.Framer}.
+   */
+  public void outboundUncompressedSize(long bytes) {
+    for (StreamTracer tracer : tracers) {
+      tracer.outboundUncompressedSize(bytes);
+    }
+  }
+
+  /**
+   * See {@link StreamTracer#outboundWireSize}.
+   *
+   * <p>Called from {@link io.grpc.internal.Framer}.
+   */
+  public void outboundWireSize(long bytes) {
+    for (StreamTracer tracer : tracers) {
+      tracer.outboundWireSize(bytes);
+    }
+  }
+
+  /**
+   * See {@link StreamTracer#inboundUncompressedSize}.
+   *
+   * <p>Called from {@link io.grpc.internal.MessageDeframer}.
+   */
+  public void inboundUncompressedSize(long bytes) {
+    for (StreamTracer tracer : tracers) {
+      tracer.inboundUncompressedSize(bytes);
+    }
+  }
+
+  /**
+   * See {@link StreamTracer#inboundWireSize}.
+   *
+   * <p>Called from {@link io.grpc.internal.MessageDeframer}.
+   */
+  public void inboundWireSize(long bytes) {
+    for (StreamTracer tracer : tracers) {
+      tracer.inboundWireSize(bytes);
+    }
   }
 }

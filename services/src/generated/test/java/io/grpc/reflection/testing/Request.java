@@ -10,6 +10,7 @@ public  final class Request extends
     com.google.protobuf.GeneratedMessageV3 implements
     // @@protoc_insertion_point(message_implements:grpc.reflection.testing.Request)
     RequestOrBuilder {
+private static final long serialVersionUID = 0L;
   // Use Request.newBuilder() to construct.
   private Request(com.google.protobuf.GeneratedMessageV3.Builder<?> builder) {
     super(builder);
@@ -28,6 +29,9 @@ public  final class Request extends
       com.google.protobuf.ExtensionRegistryLite extensionRegistry)
       throws com.google.protobuf.InvalidProtocolBufferException {
     this();
+    if (extensionRegistry == null) {
+      throw new java.lang.NullPointerException();
+    }
     int mutable_bitField0_ = 0;
     com.google.protobuf.UnknownFieldSet.Builder unknownFields =
         com.google.protobuf.UnknownFieldSet.newBuilder();
@@ -40,8 +44,8 @@ public  final class Request extends
             done = true;
             break;
           default: {
-            if (!parseUnknownField(input, unknownFields,
-                                   extensionRegistry, tag)) {
+            if (!parseUnknownField(
+                input, unknownFields, extensionRegistry, tag)) {
               done = true;
             }
             break;
@@ -80,13 +84,13 @@ public  final class Request extends
   public static final int MESSAGE_FIELD_NUMBER = 1;
   private volatile java.lang.Object message_;
   /**
-   * <code>required string message = 1;</code>
+   * <code>optional string message = 1;</code>
    */
   public boolean hasMessage() {
     return ((bitField0_ & 0x00000001) == 0x00000001);
   }
   /**
-   * <code>required string message = 1;</code>
+   * <code>optional string message = 1;</code>
    */
   public java.lang.String getMessage() {
     java.lang.Object ref = message_;
@@ -103,7 +107,7 @@ public  final class Request extends
     }
   }
   /**
-   * <code>required string message = 1;</code>
+   * <code>optional string message = 1;</code>
    */
   public com.google.protobuf.ByteString
       getMessageBytes() {
@@ -125,10 +129,6 @@ public  final class Request extends
     if (isInitialized == 1) return true;
     if (isInitialized == 0) return false;
 
-    if (!hasMessage()) {
-      memoizedIsInitialized = 0;
-      return false;
-    }
     memoizedIsInitialized = 1;
     return true;
   }
@@ -154,7 +154,6 @@ public  final class Request extends
     return size;
   }
 
-  private static final long serialVersionUID = 0L;
   @java.lang.Override
   public boolean equals(final java.lang.Object obj) {
     if (obj == this) {
@@ -181,7 +180,7 @@ public  final class Request extends
       return memoizedHashCode;
     }
     int hash = 41;
-    hash = (19 * hash) + getDescriptorForType().hashCode();
+    hash = (19 * hash) + getDescriptor().hashCode();
     if (hasMessage()) {
       hash = (37 * hash) + MESSAGE_FIELD_NUMBER;
       hash = (53 * hash) + getMessage().hashCode();
@@ -191,6 +190,17 @@ public  final class Request extends
     return hash;
   }
 
+  public static io.grpc.reflection.testing.Request parseFrom(
+      java.nio.ByteBuffer data)
+      throws com.google.protobuf.InvalidProtocolBufferException {
+    return PARSER.parseFrom(data);
+  }
+  public static io.grpc.reflection.testing.Request parseFrom(
+      java.nio.ByteBuffer data,
+      com.google.protobuf.ExtensionRegistryLite extensionRegistry)
+      throws com.google.protobuf.InvalidProtocolBufferException {
+    return PARSER.parseFrom(data, extensionRegistry);
+  }
   public static io.grpc.reflection.testing.Request parseFrom(
       com.google.protobuf.ByteString data)
       throws com.google.protobuf.InvalidProtocolBufferException {
@@ -344,7 +354,7 @@ public  final class Request extends
     }
     public Builder setField(
         com.google.protobuf.Descriptors.FieldDescriptor field,
-        Object value) {
+        java.lang.Object value) {
       return (Builder) super.setField(field, value);
     }
     public Builder clearField(
@@ -357,12 +367,12 @@ public  final class Request extends
     }
     public Builder setRepeatedField(
         com.google.protobuf.Descriptors.FieldDescriptor field,
-        int index, Object value) {
+        int index, java.lang.Object value) {
       return (Builder) super.setRepeatedField(field, index, value);
     }
     public Builder addRepeatedField(
         com.google.protobuf.Descriptors.FieldDescriptor field,
-        Object value) {
+        java.lang.Object value) {
       return (Builder) super.addRepeatedField(field, value);
     }
     public Builder mergeFrom(com.google.protobuf.Message other) {
@@ -387,9 +397,6 @@ public  final class Request extends
     }
 
     public final boolean isInitialized() {
-      if (!hasMessage()) {
-        return false;
-      }
       return true;
     }
 
@@ -414,13 +421,13 @@ public  final class Request extends
 
     private java.lang.Object message_ = "";
     /**
-     * <code>required string message = 1;</code>
+     * <code>optional string message = 1;</code>
      */
     public boolean hasMessage() {
       return ((bitField0_ & 0x00000001) == 0x00000001);
     }
     /**
-     * <code>required string message = 1;</code>
+     * <code>optional string message = 1;</code>
      */
     public java.lang.String getMessage() {
       java.lang.Object ref = message_;
@@ -437,7 +444,7 @@ public  final class Request extends
       }
     }
     /**
-     * <code>required string message = 1;</code>
+     * <code>optional string message = 1;</code>
      */
     public com.google.protobuf.ByteString
         getMessageBytes() {
@@ -453,7 +460,7 @@ public  final class Request extends
       }
     }
     /**
-     * <code>required string message = 1;</code>
+     * <code>optional string message = 1;</code>
      */
     public Builder setMessage(
         java.lang.String value) {
@@ -466,7 +473,7 @@ public  final class Request extends
       return this;
     }
     /**
-     * <code>required string message = 1;</code>
+     * <code>optional string message = 1;</code>
      */
     public Builder clearMessage() {
       bitField0_ = (bitField0_ & ~0x00000001);
@@ -475,7 +482,7 @@ public  final class Request extends
       return this;
     }
     /**
-     * <code>required string message = 1;</code>
+     * <code>optional string message = 1;</code>
      */
     public Builder setMessageBytes(
         com.google.protobuf.ByteString value) {
@@ -517,7 +524,7 @@ public  final class Request extends
         com.google.protobuf.CodedInputStream input,
         com.google.protobuf.ExtensionRegistryLite extensionRegistry)
         throws com.google.protobuf.InvalidProtocolBufferException {
-        return new Request(input, extensionRegistry);
+      return new Request(input, extensionRegistry);
     }
   };
 

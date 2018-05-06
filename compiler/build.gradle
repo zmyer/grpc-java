@@ -5,7 +5,10 @@ description = 'The protoc plugin for gRPC Java'
 
 buildscript {
     repositories {
-        mavenCentral()
+        maven {
+          // The google mirror is less flaky than mavenCentral()
+          url "https://maven-central.storage-download.googleapis.com/repos/central/data/"
+        }
         mavenLocal()
     }
     dependencies {
@@ -37,6 +40,7 @@ def addLibraryIfNotLinked = { libName, argList ->
 
 def String arch = rootProject.hasProperty('targetArch') ? rootProject.targetArch : osdetector.arch
 def boolean vcDisable = rootProject.hasProperty('vcDisable') ? rootProject.vcDisable : false
+def boolean usingVisualCpp // Whether VisualCpp is actually available and selected
 
 model {
   toolChains {
@@ -48,6 +52,7 @@ model {
     }
     gcc(Gcc) {
       target("ppcle_64")
+      target("aarch_64")
     }
     clang(Clang) {
     }
@@ -63,11 +68,14 @@ model {
     ppcle_64 {
       architecture "ppcle_64"
     }
+    aarch_64 {
+      architecture "aarch_64"
+    }
   }
 
   components {
     java_plugin(NativeExecutableSpec) {
-      if (arch in ['x86_32', 'x86_64', 'ppcle_64']) {
+      if (arch in ['x86_32', 'x86_64', 'ppcle_64', 'aarch_64']) {
         // If arch is not within the defined platforms, we do not specify the
         // targetPlatform so that Gradle will choose what is appropriate.
         targetPlatform arch
@@ -100,6 +108,7 @@ model {
         }
         addEnvArgs("LDFLAGS", linker.args)
       } else if (toolChain in VisualCpp) {
+        usingVisualCpp = true
         cppCompiler.define("GRPC_VERSION", version)
         cppCompiler.args "/EHsc", "/MT"
         if (rootProject.hasProperty('vcProtobufInclude')) {
@@ -142,12 +151,16 @@ sourceSets {
 }
 
 compileTestJava {
-  options.compilerArgs += ["-Xlint:-cast"]
+  options.compilerArgs += [
+      "-Xlint:-cast",
+      "-XepExcludedPaths:.*/build/generated/source/proto/.*",
+  ]
 }
 
 compileTestLiteJava {
+  options.compilerArgs = compileTestJava.options.compilerArgs
   // Protobuf-generated Lite produces quite a few warnings.
-  options.compilerArgs += ["-Xlint:-rawtypes", "-Xlint:-unchecked"]
+  options.compilerArgs += ["-Xlint:-rawtypes", "-Xlint:-unchecked", "-Xlint:-fallthrough"]
 }
 
 compileTestNanoJava {
@@ -159,7 +172,7 @@ protobuf {
     if (project.hasProperty('protoc')) {
       path = project.protoc
     } else {
-      artifact = "com.google.protobuf:protoc:${protobufVersion}"
+      artifact = "com.google.protobuf:protoc:${protocVersion}"
     }
   }
   plugins {
@@ -213,7 +226,7 @@ checkstyleTestNano {
   source = fileTree(dir: "src/testNano", include: "**/*.java")
 }
 
-println "*** Building codegen requires Protobuf version ${protobufVersion}"
+println "*** Building codegen requires Protobuf version ${protocVersion}"
 println "*** Please refer to https://github.com/grpc/grpc-java/blob/master/COMPILING.md#how-to-build-code-generation-plugin"
 
 task buildArtifacts(type: Copy) {
@@ -248,13 +261,44 @@ artifacts {
 
 [
   uploadArchives.repositories.mavenDeployer,
-]*.beforeDeployment {
-  def ret = exec {
-    executable 'bash'
-    args 'check-artifact.sh', osdetector.os, arch
-  }
-  if (ret.exitValue != 0) {
-    throw new GradleException("check-artifact.sh exited with " + ret.exitValue)
+]*.beforeDeployment { it ->
+  if (!usingVisualCpp) {
+    def ret = exec {
+      executable 'bash'
+      args 'check-artifact.sh', osdetector.os, arch
+    }
+    if (ret.exitValue != 0) {
+      throw new GradleException("check-artifact.sh exited with " + ret.exitValue)
+    }
+  } else {
+    def exeName = "$artifactStagingPath/java_plugin/${protocPluginBaseName}.exe"
+    def os = new ByteArrayOutputStream()
+    def ret = exec {
+      executable 'dumpbin'
+      args '/nologo', '/dependents', exeName
+      standardOutput = os
+    }
+    if (ret.exitValue != 0) {
+      throw new GradleException("dumpbin exited with " + ret.exitValue)
+    }
+    def dlls = os.toString() =~ /Image has the following dependencies:\s+(.*)\s+Summary/
+    if (dlls[0][1] != "KERNEL32.dll") {
+      throw new Exception("unexpected dll deps: " + dlls[0][1]);
+    }
+    os.reset()
+    ret = exec {
+      executable 'dumpbin'
+      args '/nologo', '/headers', exeName
+      standardOutput = os
+    }
+    if (ret.exitValue != 0) {
+      throw new GradleException("dumpbin exited with " + ret.exitValue)
+    }
+    def machine = os.toString() =~ / machine \(([^)]+)\)/
+    def expectedArch = [x86_32: "x86", x86_64: "x64"][arch]
+    if (machine[0][1] != expectedArch) {
+      throw new Exception("unexpected architecture: " + machine[0][1]);
+    }
   }
 }
 
@@ -276,12 +320,13 @@ def configureTestTask(Task task, String dep, String extraPackage) {
   task.dependsOn "generateTest${dep}Proto"
   if (osdetector.os != 'windows') {
     task.executable "diff"
+    task.args "-u"
   } else {
     task.executable "fc"
   }
   // File isn't found on Windows if last slash is forward-slash
   def slash = System.getProperty("file.separator")
-  task.args "$buildDir/generated/source/proto/test${dep}/grpc/io/grpc/testing/integration${extraPackage}${slash}TestServiceGrpc.java",
+  task.args "$buildDir/generated/source/proto/test${dep}/grpc/io/grpc/testing/compiler${extraPackage}${slash}TestServiceGrpc.java",
        "$projectDir/src/test${dep}/golden/TestService.java.txt"
 }
 

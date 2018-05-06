@@ -1,32 +1,17 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
@@ -39,19 +24,16 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 
 import com.google.common.base.Objects;
-
-import io.grpc.Attributes.Key;
 import io.grpc.internal.SerializingExecutor;
-
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-
-import java.util.concurrent.Executor;
-import java.util.concurrent.TimeUnit;
 
 /** Unit tests for {@link CallOptions}. */
 @RunWith(JUnit4.class)
@@ -60,31 +42,32 @@ public class CallOptionsTest {
   private String sampleCompressor = "compressor";
   private Deadline.Ticker ticker = new FakeTicker();
   private Deadline sampleDeadline = Deadline.after(1, NANOSECONDS, ticker);
-  private Key<String> sampleKey = Attributes.Key.of("sample");
-  private Attributes sampleAffinity = Attributes.newBuilder().set(sampleKey, "blah").build();
   private CallCredentials sampleCreds = mock(CallCredentials.class);
   private CallOptions.Key<String> option1 = CallOptions.Key.of("option1", "default");
   private CallOptions.Key<String> option2 = CallOptions.Key.of("option2", "default");
+  private ClientStreamTracer.Factory tracerFactory1 = new FakeTracerFactory("tracerFactory1");
+  private ClientStreamTracer.Factory tracerFactory2 = new FakeTracerFactory("tracerFactory2");
   private CallOptions allSet = CallOptions.DEFAULT
       .withAuthority(sampleAuthority)
       .withDeadline(sampleDeadline)
-      .withAffinity(sampleAffinity)
       .withCallCredentials(sampleCreds)
       .withCompression(sampleCompressor)
       .withWaitForReady()
       .withExecutor(directExecutor())
       .withOption(option1, "value1")
-      .withOption(option2, "value2");
+      .withStreamTracerFactory(tracerFactory1)
+      .withOption(option2, "value2")
+      .withStreamTracerFactory(tracerFactory2);
 
   @Test
   public void defaultsAreAllNull() {
     assertThat(CallOptions.DEFAULT.getDeadline()).isNull();
     assertThat(CallOptions.DEFAULT.getAuthority()).isNull();
-    assertThat(CallOptions.DEFAULT.getAffinity()).isEqualTo(Attributes.EMPTY);
     assertThat(CallOptions.DEFAULT.getExecutor()).isNull();
     assertThat(CallOptions.DEFAULT.getCredentials()).isNull();
     assertThat(CallOptions.DEFAULT.getCompressor()).isNull();
     assertThat(CallOptions.DEFAULT.isWaitForReady()).isFalse();
+    assertThat(CallOptions.DEFAULT.getStreamTracerFactories()).isEmpty();
   }
 
   @Test
@@ -98,7 +81,6 @@ public class CallOptionsTest {
   public void allWiths() {
     assertThat(allSet.getAuthority()).isSameAs(sampleAuthority);
     assertThat(allSet.getDeadline()).isSameAs(sampleDeadline);
-    assertThat(allSet.getAffinity()).isSameAs(sampleAffinity);
     assertThat(allSet.getCredentials()).isSameAs(sampleCreds);
     assertThat(allSet.getCompressor()).isSameAs(sampleCompressor);
     assertThat(allSet.getExecutor()).isSameAs(directExecutor());
@@ -114,10 +96,6 @@ public class CallOptionsTest {
     assertThat(
         equal(allSet,
             allSet.withDeadline(Deadline.after(314, NANOSECONDS)).withDeadline(sampleDeadline)))
-        .isTrue();
-    assertThat(
-        equal(allSet,
-            allSet.withAffinity(Attributes.EMPTY).withAffinity(sampleAffinity)))
         .isTrue();
     assertThat(
         equal(allSet,
@@ -160,25 +138,30 @@ public class CallOptionsTest {
 
   @Test
   public void toStringMatches_noDeadline_default() {
-    String expected = "CallOptions{deadline=null, authority=authority, callCredentials=null, "
-        + "affinity={sample=blah}, "
-        + "executor=class io.grpc.internal.SerializingExecutor, compressorName=compressor, "
-        + "customOptions=[[option1, value1], [option2, value2]], waitForReady=true}";
     String actual = allSet
         .withDeadline(null)
         .withExecutor(new SerializingExecutor(directExecutor()))
         .withCallCredentials(null)
+        .withMaxInboundMessageSize(44)
+        .withMaxOutboundMessageSize(55)
         .toString();
 
-    assertThat(actual).isEqualTo(expected);
+    assertThat(actual).contains("deadline=null");
+    assertThat(actual).contains("authority=authority");
+    assertThat(actual).contains("callCredentials=null");
+    assertThat(actual).contains("executor=class io.grpc.internal.SerializingExecutor");
+    assertThat(actual).contains("compressorName=compressor");
+    assertThat(actual).contains("customOptions=[[option1, value1], [option2, value2]]");
+    assertThat(actual).contains("waitForReady=true");
+    assertThat(actual).contains("maxInboundMessageSize=44");
+    assertThat(actual).contains("maxOutboundMessageSize=55");
+    assertThat(actual).contains("streamTracerFactories=[tracerFactory1, tracerFactory2]");
   }
 
   @Test
   public void toStringMatches_noDeadline() {
-    assertThat("CallOptions{deadline=null, authority=null, callCredentials=null, "
-        + "affinity={}, executor=null, compressorName=null, customOptions=[], "
-        + "waitForReady=false}")
-        .isEqualTo(CallOptions.DEFAULT.toString());
+    String actual = CallOptions.DEFAULT.toString();
+    assertThat(actual).contains("deadline=null");
   }
 
   @Test
@@ -187,39 +170,23 @@ public class CallOptionsTest {
   }
 
   @Test
-  @SuppressWarnings("deprecation")
-  public void withDeadlineNanoTime() {
-    // Create Deadline near calling System.nanoTime to reduce clock differences
-    Deadline reference = Deadline.after(-1, NANOSECONDS);
-    long rawDeadline = System.nanoTime() - 1;
-    CallOptions opts = CallOptions.DEFAULT.withDeadlineNanoTime(rawDeadline);
-    assertThat(opts.getDeadlineNanoTime()).isNotNull();
-    // This is not technically correct, since nanoTime is permitted to overflow, but the chances of
-    // that impacting this test are very remote.
-    assertThat(opts.getDeadlineNanoTime()).isAtMost(System.nanoTime());
-    assertThat(opts.getDeadline().isExpired()).isTrue();
-
-    assertAbout(deadline()).that(opts.getDeadline()).isWithin(50, MILLISECONDS).of(reference);
-  }
-
-  @Test
   public void withCustomOptionDefault() {
     CallOptions opts = CallOptions.DEFAULT;
     assertThat(opts.getOption(option1)).isEqualTo("default");
   }
-  
+
   @Test
   public void withCustomOption() {
     CallOptions opts = CallOptions.DEFAULT.withOption(option1, "v1");
     assertThat(opts.getOption(option1)).isEqualTo("v1");
   }
-  
+
   @Test
   public void withCustomOptionLastOneWins() {
     CallOptions opts = CallOptions.DEFAULT.withOption(option1, "v1").withOption(option1, "v2");
     assertThat(opts.getOption(option1)).isEqualTo("v2");
   }
-  
+
   @Test
   public void withMultipleCustomOption() {
     CallOptions opts = CallOptions.DEFAULT.withOption(option1, "v1").withOption(option2, "v2");
@@ -227,11 +194,38 @@ public class CallOptionsTest {
     assertThat(opts.getOption(option2)).isEqualTo("v2");
   }
 
+  @Test
+  public void withStreamTracerFactory() {
+    CallOptions opts1 = CallOptions.DEFAULT.withStreamTracerFactory(tracerFactory1);
+    CallOptions opts2 = opts1.withStreamTracerFactory(tracerFactory2);
+    CallOptions opts3 = opts2.withStreamTracerFactory(tracerFactory2);
+
+    assertThat(opts1.getStreamTracerFactories()).containsExactly(tracerFactory1);
+    assertThat(opts2.getStreamTracerFactories()).containsExactly(tracerFactory1, tracerFactory2)
+        .inOrder();
+    assertThat(opts3.getStreamTracerFactories())
+        .containsExactly(tracerFactory1, tracerFactory2, tracerFactory2).inOrder();
+
+    try {
+      CallOptions.DEFAULT.getStreamTracerFactories().add(tracerFactory1);
+      fail("Should have thrown. The list should be unmodifiable.");
+    } catch (UnsupportedOperationException e) {
+      // Expected
+    }
+
+    try {
+      opts2.getStreamTracerFactories().clear();
+      fail("Should have thrown. The list should be unmodifiable.");
+    } catch (UnsupportedOperationException e) {
+      // Expected
+    }
+  }
+
+  // Only used in noStrayModifications()
   // TODO(carl-mastrangelo): consider making a CallOptionsSubject for Truth.
   private static boolean equal(CallOptions o1, CallOptions o2) {
     return Objects.equal(o1.getDeadline(), o2.getDeadline())
         && Objects.equal(o1.getAuthority(), o2.getAuthority())
-        && Objects.equal(o1.getAffinity(), o2.getAffinity())
         && Objects.equal(o1.getCredentials(), o2.getCredentials());
   }
 
@@ -252,6 +246,24 @@ public class CallOptionsTest {
         throw new IllegalArgumentException();
       }
       this.time += unit.toNanos(period);
+    }
+  }
+
+  private static class FakeTracerFactory extends ClientStreamTracer.Factory {
+    final String name;
+
+    FakeTracerFactory(String name) {
+      this.name = name;
+    }
+
+    @Override
+    public ClientStreamTracer newClientStreamTracer(CallOptions callOptions, Metadata headers) {
+      return new ClientStreamTracer() {};
+    }
+
+    @Override
+    public String toString() {
+      return name;
     }
   }
 }

@@ -1,48 +1,42 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
 
+import com.google.common.base.Preconditions;
 import java.io.File;
+import java.io.InputStream;
 import java.util.concurrent.Executor;
-
+import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 
 /**
  * A builder for {@link Server} instances.
  *
  * @param <T> The concrete type of this builder.
+ * @since 1.0.0
  */
 public abstract class ServerBuilder<T extends ServerBuilder<T>> {
 
+  /**
+   * Static factory for creating a new ServerBuilder.
+   *
+   * @param port the port to listen on
+   * @since 1.0.0
+   */
   public static ServerBuilder<?> forPort(int port) {
     return ServerProvider.provider().builderForPort(port);
   }
@@ -57,6 +51,9 @@ public abstract class ServerBuilder<T extends ServerBuilder<T>> {
    * <p>Calling this method is semantically equivalent to calling {@link #executor(Executor)} and
    * passing in a direct executor. However, this is the preferred way as it may allow the transport
    * to perform special optimizations.
+   *
+   * @return this
+   * @since 1.0.0
    */
   public abstract T directExecutor();
 
@@ -68,6 +65,9 @@ public abstract class ServerBuilder<T extends ServerBuilder<T>> {
    *
    * <p>The server won't take ownership of the given executor. It's caller's responsibility to
    * shut down the executor when it's desired.
+   *
+   * @return this
+   * @since 1.0.0
    */
   public abstract T executor(@Nullable Executor executor);
 
@@ -75,6 +75,8 @@ public abstract class ServerBuilder<T extends ServerBuilder<T>> {
    * Adds a service implementation to the handler registry.
    *
    * @param service ServerServiceDefinition object
+   * @return this
+   * @since 1.0.0
    */
   public abstract T addService(ServerServiceDefinition service);
 
@@ -84,22 +86,58 @@ public abstract class ServerBuilder<T extends ServerBuilder<T>> {
    * server instance upon build().
    *
    * @param bindableService BindableService object
+   * @return this
+   * @since 1.0.0
    */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2222")
   public abstract T addService(BindableService bindableService);
+
+  /**
+   * Adds a {@link ServerInterceptor} that is run for all services on the server.  Interceptors
+   * added through this method always run before per-service interceptors added through {@link
+   * ServerInterceptors}.  Interceptors run in the reverse order in which they are added.
+   *
+   * @param interceptor the all-service interceptor
+   * @return this
+   * @since 1.5.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/3117")
+  public T intercept(ServerInterceptor interceptor) {
+    throw new UnsupportedOperationException();
+  }
 
   /**
    * Adds a {@link ServerTransportFilter}. The order of filters being added is the order they will
    * be executed.
+   *
+   * @return this
+   * @since 1.2.0
    */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2132")
-  public abstract T addTransportFilter(ServerTransportFilter filter);
+  public T addTransportFilter(ServerTransportFilter filter) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Adds a {@link ServerStreamTracer.Factory} to measure server-side traffic.  The order of
+   * factories being added is the order they will be executed.
+   *
+   * @return this
+   * @since 1.3.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2861")
+  public T addStreamTracerFactory(ServerStreamTracer.Factory factory) {
+    throw new UnsupportedOperationException();
+  }
 
   /**
    * Sets a fallback handler registry that will be looked up in if a method is not found in the
-   * primary registry.
+   * primary registry. The primary registry (configured via {@code addService()}) is faster but
+   * immutable. The fallback registry is more flexible and allows implementations to mutate over
+   * time and load services on-demand.
+   *
+   * @return this
+   * @since 1.0.0
    */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/933")
   public abstract T fallbackHandlerRegistry(@Nullable HandlerRegistry fallbackRegistry);
 
   /**
@@ -107,13 +145,36 @@ public abstract class ServerBuilder<T extends ServerBuilder<T>> {
    *
    * @param certChain file containing the full certificate chain
    * @param privateKey file containing the private key
+   *
+   * @return this
+   * @throws UnsupportedOperationException if the server does not support TLS.
+   * @since 1.0.0
    */
   public abstract T useTransportSecurity(File certChain, File privateKey);
+
+  /**
+   * Makes the server use TLS.
+   *
+   * @param certChain InputStream containing the full certificate chain
+   * @param privateKey InputStream containing the private key
+   *
+   * @return this
+   * @throws UnsupportedOperationException if the server does not support TLS, or does not support
+   *         reading these files from an InputStream.
+   * @since 1.12.0
+   */
+  public T useTransportSecurity(InputStream certChain, InputStream privateKey) {
+    throw new UnsupportedOperationException();
+  }
+
 
   /**
    * Set the decompression registry for use in the channel.  This is an advanced API call and
    * shouldn't be used unless you are using custom message encoding.   The default supported
    * decompressors are in {@code DecompressorRegistry.getDefaultInstance}.
+   *
+   * @return this
+   * @since 1.0.0
    */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   public abstract T decompressorRegistry(@Nullable DecompressorRegistry registry);
@@ -122,15 +183,65 @@ public abstract class ServerBuilder<T extends ServerBuilder<T>> {
    * Set the compression registry for use in the channel.  This is an advanced API call and
    * shouldn't be used unless you are using custom message encoding.   The default supported
    * compressors are in {@code CompressorRegistry.getDefaultInstance}.
+   *
+   * @return this
+   * @since 1.0.0
    */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
   public abstract T compressorRegistry(@Nullable CompressorRegistry registry);
+
+  /**
+   * Sets the permitted time for new connections to complete negotiation handshakes before being
+   * killed.
+   *
+   * @return this
+   * @throws IllegalArgumentException if timeout is negative
+   * @throws UnsupportedOperationException if unsupported
+   * @since 1.8.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/3706")
+  public T handshakeTimeout(long timeout, TimeUnit unit) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Sets the maximum message size allowed to be received on the server. If not called,
+   * defaults to 4 MiB. The default provides protection to servers who haven't considered the
+   * possibility of receiving large messages while trying to be large enough to not be hit in normal
+   * usage.
+   *
+   * <p>This method is advisory, and implementations may decide to not enforce this.  Currently,
+   * the only known transport to not enforce this is {@code InProcessServer}.
+   *
+   * @param bytes the maximum number of bytes a single message can be.
+   * @return this
+   * @throws IllegalArgumentException if bytes is negative.
+   * @throws UnsupportedOperationException if unsupported.
+   * @since 1.13.0
+   */
+  public T maxInboundMessageSize(int bytes) {
+    // intentional noop rather than throw, this method is only advisory.
+    Preconditions.checkArgument(bytes >= 0, "bytes must be >= 0");
+    return thisT();
+  }
 
   /**
    * Builds a server using the given parameters.
    *
    * <p>The returned service will not been started or be bound a port. You will need to start it
    * with {@link Server#start()}.
+   *
+   * @return a new Server
+   * @since 1.0.0
    */
   public abstract Server build();
+
+  /**
+   * Returns the correctly typed version of the builder.
+   */
+  private T thisT() {
+    @SuppressWarnings("unchecked")
+    T thisT = (T) this;
+    return thisT;
+  }
 }

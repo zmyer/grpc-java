@@ -1,43 +1,32 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
-
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
-
+import javax.annotation.CheckReturnValue;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.Immutable;
 
@@ -47,6 +36,7 @@ import javax.annotation.concurrent.Immutable;
  * <p>A field that is not set is {@code null}.
  */
 @Immutable
+@CheckReturnValue
 public final class CallOptions {
   /**
    * A blank {@code CallOptions} that all fields are not set.
@@ -65,17 +55,24 @@ public final class CallOptions {
   @Nullable
   private CallCredentials credentials;
 
-  private Attributes affinity = Attributes.EMPTY;
-
   @Nullable
   private String compressorName;
 
   private Object[][] customOptions = new Object[0][2];
 
+  // Unmodifiable list
+  private List<ClientStreamTracer.Factory> streamTracerFactories = Collections.emptyList();
+
   /**
    * Opposite to fail fast.
    */
   private boolean waitForReady;
+
+  @Nullable
+  private Integer maxInboundMessageSize;
+  @Nullable
+  private Integer maxOutboundMessageSize;
+
 
   /**
    * Override the HTTP/2 authority the channel claims to be connecting to. <em>This is not
@@ -96,7 +93,6 @@ public final class CallOptions {
   /**
    * Returns a new {@code CallOptions} with the given call credentials.
    */
-  @ExperimentalApi("https//github.com/grpc/grpc-java/issues/1914")
   public CallOptions withCallCredentials(@Nullable CallCredentials credentials) {
     CallOptions newOptions = new CallOptions(this);
     newOptions.credentials = credentials;
@@ -129,44 +125,11 @@ public final class CallOptions {
   }
 
   /**
-   * Returns a new {@code CallOptions} with the given absolute deadline in nanoseconds in the clock
-   * as per {@link System#nanoTime()}.
-   *
-   * <p>This is mostly used for propagating an existing deadline. {@link #withDeadlineAfter} is the
-   * recommended way of setting a new deadline,
-   *
-   * @param deadlineNanoTime the deadline in the clock as per {@link System#nanoTime()}.
-   *                         {@code null} for unsetting the deadline.
-   * @deprecated  Use {@link #withDeadline(Deadline)} instead.
-   */
-  @Deprecated
-  public CallOptions withDeadlineNanoTime(@Nullable Long deadlineNanoTime) {
-    Deadline deadline = deadlineNanoTime != null
-        ? Deadline.after(deadlineNanoTime - System.nanoTime(), TimeUnit.NANOSECONDS)
-        : null;
-    return withDeadline(deadline);
-  }
-
-  /**
    * Returns a new {@code CallOptions} with a deadline that is after the given {@code duration} from
    * now.
    */
   public CallOptions withDeadlineAfter(long duration, TimeUnit unit) {
     return withDeadline(Deadline.after(duration, unit));
-  }
-
-  /**
-   * Returns the deadline in nanoseconds in the clock as per {@link System#nanoTime()}. {@code null}
-   * if the deadline is not set.
-   *
-   * @deprecated  Use {@link #getDeadline()} instead.
-   */
-  @Deprecated
-  public Long getDeadlineNanoTime() {
-    if (getDeadline() == null) {
-      return null;
-    }
-    return System.nanoTime() + getDeadline().timeRemaining(TimeUnit.NANOSECONDS);
   }
 
   /**
@@ -178,21 +141,10 @@ public final class CallOptions {
   }
 
   /**
-   * Returns a new {@code CallOptions} with attributes for affinity-based routing.
+   * Enables <a href="https://github.com/grpc/grpc/blob/master/doc/wait-for-ready.md">
+   * 'wait for ready'</a> feature for the call. 'Fail fast' is the default option for gRPC calls
+   * and 'wait for ready' is the opposite to it.
    */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1766")
-  public CallOptions withAffinity(Attributes affinity) {
-    CallOptions newOptions = new CallOptions(this);
-    newOptions.affinity = Preconditions.checkNotNull(affinity, "affinity");
-    return newOptions;
-  }
-
-  /**
-   * Enables 'wait for ready' feature for the call.
-   * <a href="https://github.com/grpc/grpc/blob/master/doc/fail_fast.md">'Fail fast'</a>
-   * is the default option for gRPC calls and 'wait for ready' is the opposite to it.
-   */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1915")
   public CallOptions withWaitForReady() {
     CallOptions newOptions = new CallOptions(this);
     newOptions.waitForReady = true;
@@ -203,19 +155,10 @@ public final class CallOptions {
    * Disables 'wait for ready' feature for the call.
    * This method should be rarely used because the default is without 'wait for ready'.
    */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1915")
   public CallOptions withoutWaitForReady() {
     CallOptions newOptions = new CallOptions(this);
     newOptions.waitForReady = false;
     return newOptions;
-  }
-
-  /**
-   * Returns the attributes for affinity-based routing.
-   */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1766")
-  public Attributes getAffinity() {
-    return affinity;
   }
 
   /**
@@ -245,7 +188,6 @@ public final class CallOptions {
   /**
    * Returns the call credentials.
    */
-  @ExperimentalApi("https//github.com/grpc/grpc-java/issues/1914")
   @Nullable
   public CallCredentials getCredentials() {
     return credentials;
@@ -261,6 +203,34 @@ public final class CallOptions {
     return newOptions;
   }
 
+  /**
+   * Returns a new {@code CallOptions} with a {@code ClientStreamTracerFactory} in addition to
+   * the existing factories.
+   *
+   * <p>This method doesn't replace existing factories, or try to de-duplicate factories.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2861")
+  public CallOptions withStreamTracerFactory(ClientStreamTracer.Factory factory) {
+    CallOptions newOptions = new CallOptions(this);
+    ArrayList<ClientStreamTracer.Factory> newList =
+        new ArrayList<ClientStreamTracer.Factory>(streamTracerFactories.size() + 1);
+    newList.addAll(streamTracerFactories);
+    newList.add(factory);
+    newOptions.streamTracerFactories = Collections.unmodifiableList(newList);
+    return newOptions;
+  }
+
+  /**
+   * Returns an immutable list of {@code ClientStreamTracerFactory}s.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2861")
+  public List<ClientStreamTracer.Factory> getStreamTracerFactories() {
+    return streamTracerFactories;
+  }
+
+  /**
+   * Key for a key-value pair. Uses reference equality.
+   */
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1869")
   public static final class Key<T> {
     private final String name;
@@ -271,6 +241,9 @@ public final class CallOptions {
       this.defaultValue = defaultValue;
     }
 
+    /**
+     * Returns the user supplied default value for this key.
+     */
     public T getDefault() {
       return defaultValue;
     }
@@ -353,13 +326,53 @@ public final class CallOptions {
   }
 
   /**
-   * Returns whether 'wait for ready' option is enabled for the call.
-   * <a href="https://github.com/grpc/grpc/blob/master/doc/fail_fast.md">'Fail fast'</a>
-   * is the default option for gRPC calls and 'wait for ready' is the opposite to it.
+   * Returns whether <a href="https://github.com/grpc/grpc/blob/master/doc/wait-for-ready.md">
+   * 'wait for ready'</a> option is enabled for the call. 'Fail fast' is the default option for gRPC
+   * calls and 'wait for ready' is the opposite to it.
    */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1915")
   public boolean isWaitForReady() {
     return waitForReady;
+  }
+
+  /**
+   * Sets the maximum allowed message size acceptable from the remote peer.  If unset, this will
+   * default to the value set on the {@link ManagedChannelBuilder#maxInboundMessageSize(int)}.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2563")
+  public CallOptions withMaxInboundMessageSize(int maxSize) {
+    checkArgument(maxSize >= 0, "invalid maxsize %s", maxSize);
+    CallOptions newOptions = new CallOptions(this);
+    newOptions.maxInboundMessageSize = maxSize;
+    return newOptions;
+  }
+
+  /**
+   * Sets the maximum allowed message size acceptable sent to the remote peer.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2563")
+  public CallOptions withMaxOutboundMessageSize(int maxSize) {
+    checkArgument(maxSize >= 0, "invalid maxsize %s", maxSize);
+    CallOptions newOptions = new CallOptions(this);
+    newOptions.maxOutboundMessageSize = maxSize;
+    return newOptions;
+  }
+
+  /**
+   * Gets the maximum allowed message size acceptable from the remote peer.
+   */
+  @Nullable
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2563")
+  public Integer getMaxInboundMessageSize() {
+    return maxInboundMessageSize;
+  }
+
+  /**
+   * Gets the maximum allowed message size acceptable to send the remote peer.
+   */
+  @Nullable
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2563")
+  public Integer getMaxOutboundMessageSize() {
+    return maxOutboundMessageSize;
   }
 
   /**
@@ -369,25 +382,28 @@ public final class CallOptions {
     deadline = other.deadline;
     authority = other.authority;
     credentials = other.credentials;
-    affinity = other.affinity;
     executor = other.executor;
     compressorName = other.compressorName;
     customOptions = other.customOptions;
     waitForReady = other.waitForReady;
+    maxInboundMessageSize = other.maxInboundMessageSize;
+    maxOutboundMessageSize = other.maxOutboundMessageSize;
+    streamTracerFactories = other.streamTracerFactories;
   }
 
   @Override
   public String toString() {
-    MoreObjects.ToStringHelper toStringHelper = MoreObjects.toStringHelper(this);
-    toStringHelper.add("deadline", deadline);
-    toStringHelper.add("authority", authority);
-    toStringHelper.add("callCredentials", credentials);
-    toStringHelper.add("affinity", affinity);
-    toStringHelper.add("executor", executor != null ? executor.getClass() : null);
-    toStringHelper.add("compressorName", compressorName);
-    toStringHelper.add("customOptions", Arrays.deepToString(customOptions));
-    toStringHelper.add("waitForReady", isWaitForReady());
-
-    return toStringHelper.toString();
+    return MoreObjects.toStringHelper(this)
+        .add("deadline", deadline)
+        .add("authority", authority)
+        .add("callCredentials", credentials)
+        .add("executor", executor != null ? executor.getClass() : null)
+        .add("compressorName", compressorName)
+        .add("customOptions", Arrays.deepToString(customOptions))
+        .add("waitForReady", isWaitForReady())
+        .add("maxInboundMessageSize", maxInboundMessageSize)
+        .add("maxOutboundMessageSize", maxOutboundMessageSize)
+        .add("streamTracerFactories", streamTracerFactories)
+        .toString();
   }
 }

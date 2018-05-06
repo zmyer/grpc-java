@@ -1,36 +1,22 @@
 /*
- * Copyright 2016, Google Inc. All rights reserved.
+ * Copyright 2016 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.stub;
 
+import com.google.errorprone.annotations.DoNotMock;
 import io.grpc.ExperimentalApi;
 
 /**
@@ -49,13 +35,18 @@ import io.grpc.ExperimentalApi;
  *
  * <p>Implementations of this class represent the 'outbound' message stream.
  *
+ * <p>Like {@code StreamObserver}, implementations are not required to be thread-safe; if multiple
+ * threads will be writing to an instance concurrently, the application must synchronize its calls.
  */
 @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1788")
+@DoNotMock
 public abstract class CallStreamObserver<V> implements StreamObserver<V> {
 
   /**
-   * If {@code true} indicates that a call to {@link #onNext(Object)} will not require the entire
-   * message to be buffered before it is sent to the peer.
+   * If {@code true}, indicates that the observer is capable of sending additional messages
+   * without requiring excessive buffering internally. This value is just a suggestion and the
+   * application is free to ignore it, however doing so may result in excessive buffering within the
+   * observer.
    */
   public abstract boolean isReady();
 
@@ -64,6 +55,10 @@ public abstract class CallStreamObserver<V> implements StreamObserver<V> {
    * changes from {@code false} to {@code true}.  While it is not guaranteed that the same
    * thread will always be used to execute the {@link Runnable}, it is guaranteed that executions
    * are serialized with calls to the 'inbound' {@link StreamObserver}.
+   *
+   * <p>On client-side this method may only be called during {@link
+   * ClientResponseObserver#beforeStart}. On server-side it may only be called during the initial
+   * call to the application, before the service returns its {@code StreamObserver}.
    *
    * <p>Note that the handler may be called some time after {@link #isReady} has transitioned to
    * true as other callbacks may still be executing in the 'inbound' observer.
@@ -76,6 +71,10 @@ public abstract class CallStreamObserver<V> implements StreamObserver<V> {
    * Disables automatic flow control where a token is returned to the peer after a call
    * to the 'inbound' {@link io.grpc.stub.StreamObserver#onNext(Object)} has completed. If disabled
    * an application must make explicit calls to {@link #request} to receive messages.
+   *
+   * <p>On client-side this method may only be called during {@link
+   * ClientResponseObserver#beforeStart}. On server-side it may only be called during the initial
+   * call to the application, before the service returns its {@code StreamObserver}.
    *
    * <p>Note that for cases where the runtime knows that only one inbound message is allowed
    * calling this method will have no effect and the runtime will always permit one and only
@@ -96,6 +95,9 @@ public abstract class CallStreamObserver<V> implements StreamObserver<V> {
   /**
    * Requests the peer to produce {@code count} more messages to be delivered to the 'inbound'
    * {@link StreamObserver}.
+   *
+   * <p>This method is safe to call from multiple threads without external synchronization.
+   *
    * @param count more messages
    */
   public abstract void request(int count);

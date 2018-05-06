@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <iostream>
+#include <iterator>
 #include <map>
+#include <set>
 #include <vector>
 #include <google/protobuf/compiler/java/java_names.h>
-#include <google/protobuf/descriptor.pb.h>
+#include <google/protobuf/descriptor.h>
 #include <google/protobuf/io/printer.h>
 #include <google/protobuf/io/zero_copy_stream.h>
 
@@ -32,9 +34,67 @@ using google::protobuf::io::Printer;
 using google::protobuf::SourceLocation;
 using std::to_string;
 
+// java keywords from: https://docs.oracle.com/javase/specs/jls/se8/html/jls-3.html#jls-3.9
+static std::set<string> java_keywords = {
+  "abstract",
+  "assert",
+  "boolean",
+  "break",
+  "byte",
+  "case",
+  "catch",
+  "char",
+  "class",
+  "const",
+  "continue",
+  "default",
+  "do",
+  "double",
+  "else",
+  "enum",
+  "extends",
+  "final",
+  "finally",
+  "float",
+  "for",
+  "goto",
+  "if",
+  "implements",
+  "import",
+  "instanceof",
+  "int",
+  "interface",
+  "long",
+  "native",
+  "new",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "return",
+  "short",
+  "static",
+  "strictfp",
+  "super",
+  "switch",
+  "synchronized",
+  "this",
+  "throw",
+  "throws",
+  "transient",
+  "try",
+  "void",
+  "volatile",
+  "while",
+  // additional ones added by us
+  "true",
+  "false",
+};
+
 // Adjust a method name prefix identifier to follow the JavaBean spec:
 //   - decapitalize the first letter
 //   - remove embedded underscores & capitalize the following letter
+//  Finally, if the result is a reserved java keyword, append an underscore.
 static string MixedLower(const string& word) {
   string w;
   w += tolower(word[0]);
@@ -46,6 +106,9 @@ static string MixedLower(const string& word) {
       w += after_underscore ? toupper(word[i]) : word[i];
       after_underscore = false;
     }
+  }
+  if (java_keywords.find(w) != java_keywords.end()) {
+    return w + "_";
   }
   return w;
 }
@@ -73,6 +136,14 @@ static inline string MethodPropertiesFieldName(const MethodDescriptor* method) {
   return "METHOD_" + ToAllUpperCase(method->name());
 }
 
+static inline string MethodPropertiesGetterName(const MethodDescriptor* method) {
+  return MixedLower("get_" + method->name() + "_method");
+}
+
+static inline string MethodPropertiesGetterHelperName(const MethodDescriptor* method) {
+  return MixedLower("get_" + method->name() + "_method_helper");
+}
+
 static inline string MethodIdFieldName(const MethodDescriptor* method) {
   return "METHODID_" + ToAllUpperCase(method->name());
 }
@@ -86,7 +157,7 @@ static inline string MessageFullJavaName(bool nano, const Descriptor* desc) {
       // No java package specified.
       return "nano." + name;
     }
-    for (int i = 0; i < name.size(); ++i) {
+    for (size_t i = 0; i < name.size(); ++i) {
       if ((name[i] == '.') && (i < (name.size() - 1)) && isupper(name[i + 1])) {
         return name.substr(0, i + 1) + "nano." + name.substr(i + 1);
       }
@@ -133,14 +204,14 @@ static void GrpcSplitStringToIteratorUsing(const string& full,
 // TODO(nmittler): Remove once protobuf includes javadoc methods in distribution.
 static void GrpcSplitStringUsing(const string& full,
                              const char* delim,
-                             vector<string>* result) {
-  std::back_insert_iterator< vector<string> > it(*result);
+                             std::vector<string>* result) {
+  std::back_insert_iterator< std::vector<string> > it(*result);
   GrpcSplitStringToIteratorUsing(full, delim, it);
 }
 
 // TODO(nmittler): Remove once protobuf includes javadoc methods in distribution.
-static vector<string> GrpcSplit(const string& full, const char* delim) {
-  vector<string> result;
+static std::vector<string> GrpcSplit(const string& full, const char* delim) {
+  std::vector<string> result;
   GrpcSplitStringUsing(full, delim, &result);
   return result;
 }
@@ -216,7 +287,7 @@ static string GrpcGetCommentsForDescriptor(const DescriptorType* descriptor) {
 }
 
 // TODO(nmittler): Remove once protobuf includes javadoc methods in distribution.
-static vector<string> GrpcGetDocLines(const string& comments) {
+static std::vector<string> GrpcGetDocLines(const string& comments) {
   if (!comments.empty()) {
     // TODO(kenton):  Ideally we should parse the comment text as Markdown and
     //   write it back as HTML, but this requires a Markdown parser.  For now
@@ -226,31 +297,31 @@ static vector<string> GrpcGetDocLines(const string& comments) {
     // HTML-escape them so that they don't accidentally close the doc comment.
     string escapedComments = GrpcEscapeJavadoc(comments);
 
-    vector<string> lines = GrpcSplit(escapedComments, "\n");
+    std::vector<string> lines = GrpcSplit(escapedComments, "\n");
     while (!lines.empty() && lines.back().empty()) {
       lines.pop_back();
     }
     return lines;
   }
-  return vector<string>();
+  return std::vector<string>();
 }
 
 // TODO(nmittler): Remove once protobuf includes javadoc methods in distribution.
 template <typename DescriptorType>
-static vector<string> GrpcGetDocLinesForDescriptor(const DescriptorType* descriptor) {
+static std::vector<string> GrpcGetDocLinesForDescriptor(const DescriptorType* descriptor) {
   return GrpcGetDocLines(GrpcGetCommentsForDescriptor(descriptor));
 }
 
 // TODO(nmittler): Remove once protobuf includes javadoc methods in distribution.
 static void GrpcWriteDocCommentBody(Printer* printer,
-                                    const vector<string>& lines,
+                                    const std::vector<string>& lines,
                                     bool surroundWithPreTag) {
   if (!lines.empty()) {
     if (surroundWithPreTag) {
       printer->Print(" * <pre>\n");
     }
 
-    for (int i = 0; i < lines.size(); i++) {
+    for (size_t i = 0; i < lines.size(); i++) {
       // Most lines should start with a space.  Watch out for lines that start
       // with a /, since putting that right after the leading asterisk will
       // close the comment.
@@ -270,7 +341,7 @@ static void GrpcWriteDocCommentBody(Printer* printer,
 // TODO(nmittler): Remove once protobuf includes javadoc methods in distribution.
 static void GrpcWriteDocComment(Printer* printer, const string& comments) {
   printer->Print("/**\n");
-  vector<string> lines = GrpcGetDocLines(comments);
+  std::vector<string> lines = GrpcGetDocLines(comments);
   GrpcWriteDocCommentBody(printer, lines, false);
   printer->Print(" */\n");
 }
@@ -281,7 +352,7 @@ static void GrpcWriteServiceDocComment(Printer* printer,
   // Deviating from protobuf to avoid extraneous docs
   // (see https://github.com/google/protobuf/issues/1406);
   printer->Print("/**\n");
-  vector<string> lines = GrpcGetDocLinesForDescriptor(service);
+  std::vector<string> lines = GrpcGetDocLinesForDescriptor(service);
   GrpcWriteDocCommentBody(printer, lines, true);
   printer->Print(" */\n");
 }
@@ -292,14 +363,14 @@ void GrpcWriteMethodDocComment(Printer* printer,
   // Deviating from protobuf to avoid extraneous docs
   // (see https://github.com/google/protobuf/issues/1406);
   printer->Print("/**\n");
-  vector<string> lines = GrpcGetDocLinesForDescriptor(method);
+  std::vector<string> lines = GrpcGetDocLinesForDescriptor(method);
   GrpcWriteDocCommentBody(printer, lines, true);
   printer->Print(" */\n");
 }
 
 static void PrintMethodFields(
-    const ServiceDescriptor* service, map<string, string>* vars, Printer* p,
-    ProtoFlavor flavor) {
+    const ServiceDescriptor* service, std::map<string, string>* vars,
+    Printer* p, ProtoFlavor flavor) {
   p->Print("// Static method descriptors that strictly reflect the proto.\n");
   (*vars)["service_name"] = service->name();
   for (int i = 0; i < service->method_count(); ++i) {
@@ -312,6 +383,9 @@ static void PrintMethodFields(
     (*vars)["output_type"] = MessageFullJavaName(flavor == ProtoFlavor::NANO,
                                                  method->output_type());
     (*vars)["method_field_name"] = MethodPropertiesFieldName(method);
+    (*vars)["method_new_field_name"] = MethodPropertiesGetterName(method);
+    (*vars)["method_method_name"] = MethodPropertiesGetterName(method);
+    (*vars)["method_method_name_helper"] = MethodPropertiesGetterHelperName(method);
     bool client_streaming = method->client_streaming();
     bool server_streaming = method->server_streaming();
     if (client_streaming) {
@@ -337,17 +411,41 @@ static void PrintMethodFields(
           "private static final int ARG_IN_$method_field_name$ = $arg_in_id$;\n"
           "private static final int ARG_OUT_$method_field_name$ = $arg_out_id$;\n"
           "@$ExperimentalApi$(\"https://github.com/grpc/grpc-java/issues/1901\")\n"
+          "@$Deprecated$ // Use {@link #$method_method_name$()} instead. \n"
           "public static final $MethodDescriptor$<$input_type$,\n"
-          "    $output_type$> $method_field_name$ =\n"
-          "    $MethodDescriptor$.create(\n"
-          "        $MethodType$.$method_type$,\n"
-          "        generateFullMethodName(\n"
-          "            \"$Package$$service_name$\", \"$method_name$\"),\n"
-          "        $NanoUtils$.<$input_type$>marshaller(\n"
-          "            new NanoFactory<$input_type$>(ARG_IN_$method_field_name$)),\n"
-          "        $NanoUtils$.<$output_type$>marshaller(\n"
-          "            new NanoFactory<$output_type$>(ARG_OUT_$method_field_name$))\n"
-          "        );\n");
+          "    $output_type$> $method_field_name$ = $method_method_name_helper$();\n"
+          "\n"
+          "private static volatile $MethodDescriptor$<$input_type$,\n"
+          "    $output_type$> $method_new_field_name$;\n"
+          "\n"
+          "@$ExperimentalApi$(\"https://github.com/grpc/grpc-java/issues/1901\")\n"
+          "public static $MethodDescriptor$<$input_type$,\n"
+          "    $output_type$> $method_method_name$() {\n"
+          "  return $method_method_name_helper$();\n"
+          "}\n"
+          "\n"
+          "private static $MethodDescriptor$<$input_type$,\n"
+          "    $output_type$> $method_method_name_helper$() {\n"
+          "  $MethodDescriptor$<$input_type$, $output_type$> $method_new_field_name$;\n"
+          "  if (($method_new_field_name$ = $service_class_name$.$method_new_field_name$) == null) {\n"
+          "    synchronized ($service_class_name$.class) {\n"
+          "      if (($method_new_field_name$ = $service_class_name$.$method_new_field_name$) == null) {\n"
+          "        $service_class_name$.$method_new_field_name$ = $method_new_field_name$ = \n"
+          "            $MethodDescriptor$.<$input_type$, $output_type$>newBuilder()\n"
+          "            .setType($MethodType$.$method_type$)\n"
+          "            .setFullMethodName(generateFullMethodName(\n"
+          "                \"$Package$$service_name$\", \"$method_name$\"))\n"
+          "            .setSampledToLocalTracing(true)\n"
+          "            .setRequestMarshaller($NanoUtils$.<$input_type$>marshaller(\n"
+          "                new NanoFactory<$input_type$>(ARG_IN_$method_field_name$)))\n"
+          "            .setResponseMarshaller($NanoUtils$.<$output_type$>marshaller(\n"
+          "                new NanoFactory<$output_type$>(ARG_OUT_$method_field_name$)))\n"
+          "            .build();\n"
+          "      }\n"
+          "    }\n"
+          "  }\n"
+          "  return $method_new_field_name$;\n"
+          "}\n");
     } else {
       if (flavor == ProtoFlavor::LITE) {
         (*vars)["ProtoUtils"] = "io.grpc.protobuf.lite.ProtoLiteUtils";
@@ -357,14 +455,53 @@ static void PrintMethodFields(
       p->Print(
           *vars,
           "@$ExperimentalApi$(\"https://github.com/grpc/grpc-java/issues/1901\")\n"
+          "@$Deprecated$ // Use {@link #$method_method_name$()} instead. \n"
           "public static final $MethodDescriptor$<$input_type$,\n"
-          "    $output_type$> $method_field_name$ =\n"
-          "    $MethodDescriptor$.create(\n"
-          "        $MethodType$.$method_type$,\n"
-          "        generateFullMethodName(\n"
-          "            \"$Package$$service_name$\", \"$method_name$\"),\n"
-          "        $ProtoUtils$.marshaller($input_type$.getDefaultInstance()),\n"
-          "        $ProtoUtils$.marshaller($output_type$.getDefaultInstance()));\n");
+          "    $output_type$> $method_field_name$ = $method_method_name_helper$();\n"
+          "\n"
+          "private static volatile $MethodDescriptor$<$input_type$,\n"
+          "    $output_type$> $method_new_field_name$;\n"
+          "\n"
+          "@$ExperimentalApi$(\"https://github.com/grpc/grpc-java/issues/1901\")\n"
+          "public static $MethodDescriptor$<$input_type$,\n"
+          "    $output_type$> $method_method_name$() {\n"
+          "  return $method_method_name_helper$();\n"
+          "}\n"
+          "\n"
+          "private static $MethodDescriptor$<$input_type$,\n"
+          "    $output_type$> $method_method_name_helper$() {\n"
+          "  $MethodDescriptor$<$input_type$, $output_type$> $method_new_field_name$;\n"
+          "  if (($method_new_field_name$ = $service_class_name$.$method_new_field_name$) == null) {\n"
+          "    synchronized ($service_class_name$.class) {\n"
+          "      if (($method_new_field_name$ = $service_class_name$.$method_new_field_name$) == null) {\n"
+          "        $service_class_name$.$method_new_field_name$ = $method_new_field_name$ = \n"
+          "            $MethodDescriptor$.<$input_type$, $output_type$>newBuilder()\n"
+          "            .setType($MethodType$.$method_type$)\n"
+          "            .setFullMethodName(generateFullMethodName(\n"
+          "                \"$Package$$service_name$\", \"$method_name$\"))\n"
+          "            .setSampledToLocalTracing(true)\n"
+          "            .setRequestMarshaller($ProtoUtils$.marshaller(\n"
+          "                $input_type$.getDefaultInstance()))\n"
+          "            .setResponseMarshaller($ProtoUtils$.marshaller(\n"
+          "                $output_type$.getDefaultInstance()))\n");
+
+      (*vars)["proto_method_descriptor_supplier"] = service->name() + "MethodDescriptorSupplier";
+      if (flavor == ProtoFlavor::NORMAL) {
+        p->Print(
+            *vars,
+          "                .setSchemaDescriptor(new $proto_method_descriptor_supplier$(\"$method_name$\"))\n");
+      }
+
+      p->Print(
+          *vars,
+          "                .build();\n");
+      p->Print(*vars,
+          "        }\n"
+          "      }\n"
+          "   }\n"
+          "   return $method_new_field_name$;\n"
+          "}\n");
+     
     }
   }
   p->Print("\n");
@@ -432,47 +569,15 @@ enum CallType {
 };
 
 static void PrintBindServiceMethodBody(const ServiceDescriptor* service,
-                                   map<string, string>* vars,
+                                   std::map<string, string>* vars,
                                    Printer* p,
                                    bool generate_nano);
-
-static void PrintDeprecatedDocComment(const ServiceDescriptor* service,
-                                      map<string, string>* vars,
-                                      Printer* p) {
-  p->Print(
-      *vars,
-      "/**\n"
-      " * This will be removed in the next release.\n"
-      " * If your code has been using gRPC-java v0.15.0 or higher already,\n"
-      " * the following changes to your code are suggested:\n"
-      " * <ul>\n"
-      " *   <li> replace {@code extends/implements $service_name$}"
-      " with {@code extends $service_name$ImplBase} for server side;</li>\n"
-      " *   <li> replace {@code $service_name$} with {@code $service_name$Stub} for client side;"
-      "</li>\n"
-      " *   <li> replace usage of {@code $service_name$} with {@code $service_name$ImplBase};"
-      "</li>\n"
-      " *   <li> replace usage of {@code Abstract$service_name$}"
-      " with {@link $service_name$ImplBase};</li>\n"
-      " *   <li> replace"
-      " {@code serverBuilder.addService($service_class_name$.bindService(serviceImpl))}\n"
-      " *        with {@code serverBuilder.addService(serviceImpl)};</li>\n"
-      " *   <li> if you are mocking stubs using mockito, please do not mock them.\n"
-      " *        See the documentation on testing with gRPC-java;</li>\n"
-      " *   <li> replace {@code $service_name$BlockingClient}"
-      " with {@link $service_name$BlockingStub};</li>\n"
-      " *   <li> replace {@code $service_name$FutureClient}"
-      " with {@link $service_name$FutureStub}.</li>\n"
-      " * </ul>\n"
-      " */\n");
-}
 
 // Prints a client interface or implementation class, or a server interface.
 static void PrintStub(
     const ServiceDescriptor* service,
-    map<string, string>* vars,
-    Printer* p, StubType type, bool generate_nano,
-    bool enable_deprecated) {
+    std::map<string, string>* vars,
+    Printer* p, StubType type, bool generate_nano) {
   const string service_name = service->name();
   (*vars)["service_name"] = service_name;
   (*vars)["abstract_name"] = service_name + "ImplBase";
@@ -521,34 +626,13 @@ static void PrintStub(
     GrpcWriteServiceDocComment(p, service);
   }
   if (impl_base) {
-    if (enable_deprecated) {
-      p->Print(
-          *vars,
-          "public static abstract class $abstract_name$ implements $BindableService$, "
-          "$service_name$ {\n");
-    }
-    else {
-      p->Print(
-          *vars,
-          "public static abstract class $abstract_name$ implements $BindableService$ {\n");
-    }
+    p->Print(
+        *vars,
+        "public static abstract class $abstract_name$ implements $BindableService$ {\n");
   } else {
-    if (enable_deprecated) {
-      if (interface) {
-        p->Print(
-            *vars,
-            "@$Deprecated$ public static interface $client_name$ {\n");
-      } else {
-        p->Print(
-            *vars,
-            "public static class $stub_name$ extends $AbstractStub$<$stub_name$>\n"
-            "    implements $client_name$ {\n");
-      }
-    } else {
-      p->Print(
-          *vars,
-          "public static final class $stub_name$ extends $AbstractStub$<$stub_name$> {\n");
-    }
+    p->Print(
+        *vars,
+        "public static final class $stub_name$ extends $AbstractStub$<$stub_name$> {\n");
   }
   p->Indent();
 
@@ -590,7 +674,7 @@ static void PrintStub(
     (*vars)["output_type"] = MessageFullJavaName(generate_nano,
                                                  method->output_type());
     (*vars)["lower_method_name"] = LowerMethodName(method);
-    (*vars)["method_field_name"] = MethodPropertiesFieldName(method);
+    (*vars)["method_method_name_helper"] = MethodPropertiesGetterHelperName(method);
     bool client_streaming = method->client_streaming();
     bool server_streaming = method->server_streaming();
 
@@ -609,11 +693,6 @@ static void PrintStub(
     // TODO(nmittler): Replace with WriteMethodDocComment once included by the protobuf distro.
     if (!interface) {
       GrpcWriteMethodDocComment(p, method);
-      if (enable_deprecated) {
-        p->Print(
-            *vars,
-            "@$Override$\n");
-      }
     }
     p->Print("public ");
     switch (call_type) {
@@ -675,11 +754,11 @@ static void PrintStub(
           if (client_streaming) {
             p->Print(
                 *vars,
-                "return asyncUnimplementedStreamingCall($method_field_name$, responseObserver);\n");
+                "return asyncUnimplementedStreamingCall($method_method_name_helper$(), responseObserver);\n");
           } else {
             p->Print(
                 *vars,
-                "asyncUnimplementedUnaryCall($method_field_name$, responseObserver);\n");
+                "asyncUnimplementedUnaryCall($method_method_name_helper$(), responseObserver);\n");
           }
           break;
         default:
@@ -700,7 +779,7 @@ static void PrintStub(
           p->Print(
               *vars,
               "return $calls_method$(\n"
-              "    getChannel(), $method_field_name$, getCallOptions(), $params$);\n");
+              "    getChannel(), $method_method_name_helper$(), getCallOptions(), $params$);\n");
           break;
         case ASYNC_CALL:
           if (server_streaming) {
@@ -724,7 +803,7 @@ static void PrintStub(
           p->Print(
               *vars,
               "$last_line_prefix$$calls_method$(\n"
-              "    getChannel().newCall($method_field_name$, getCallOptions()), $params$);\n");
+              "    getChannel().newCall($method_method_name_helper$(), getCallOptions()), $params$);\n");
           break;
         case FUTURE_CALL:
           GRPC_CODEGEN_CHECK(!client_streaming && !server_streaming)
@@ -735,7 +814,7 @@ static void PrintStub(
           p->Print(
               *vars,
               "return $calls_method$(\n"
-              "    getChannel().newCall($method_field_name$, getCallOptions()), request);\n");
+              "    getChannel().newCall($method_method_name_helper$(), getCallOptions()), request);\n");
           break;
       }
     }
@@ -747,7 +826,7 @@ static void PrintStub(
     p->Print("\n");
     p->Print(
         *vars,
-        "@$Override$ public $ServerServiceDefinition$ bindService() {\n");
+        "@$Override$ public final $ServerServiceDefinition$ bindService() {\n");
     (*vars)["instance"] = "this";
     PrintBindServiceMethodBody(service, vars, p, generate_nano);
     p->Print("}\n");
@@ -766,18 +845,17 @@ static bool CompareMethodClientStreaming(const MethodDescriptor* method1,
 // Place all method invocations into a single class to reduce memory footprint
 // on Android.
 static void PrintMethodHandlerClass(const ServiceDescriptor* service,
-                                   map<string, string>* vars,
+                                   std::map<string, string>* vars,
                                    Printer* p,
-                                   bool generate_nano,
-                                   bool enable_deprecated) {
+                                   bool generate_nano) {
   // Sort method ids based on client_streaming() so switch tables are compact.
-  vector<const MethodDescriptor*> sorted_methods(service->method_count());
+  std::vector<const MethodDescriptor*> sorted_methods(service->method_count());
   for (int i = 0; i < service->method_count(); ++i) {
     sorted_methods[i] = service->method(i);
   }
   stable_sort(sorted_methods.begin(), sorted_methods.end(),
               CompareMethodClientStreaming);
-  for (int i = 0; i < sorted_methods.size(); i++) {
+  for (size_t i = 0; i < sorted_methods.size(); i++) {
     const MethodDescriptor* method = sorted_methods[i];
     (*vars)["method_id"] = to_string(i);
     (*vars)["method_id_name"] = MethodIdFieldName(method);
@@ -786,14 +864,10 @@ static void PrintMethodHandlerClass(const ServiceDescriptor* service,
         "private static final int $method_id_name$ = $method_id$;\n");
   }
   p->Print("\n");
-  if (enable_deprecated) {
-    (*vars)["service_name"] = service->name();
-  } else {
-    (*vars)["service_name"] = service->name() + "ImplBase";
-  }
+  (*vars)["service_name"] = service->name() + "ImplBase";
   p->Print(
       *vars,
-      "private static class MethodHandlers<Req, Resp> implements\n"
+      "private static final class MethodHandlers<Req, Resp> implements\n"
       "    io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,\n"
       "    io.grpc.stub.ServerCalls.ServerStreamingMethod<Req, Resp>,\n"
       "    io.grpc.stub.ServerCalls.ClientStreamingMethod<Req, Resp>,\n"
@@ -801,7 +875,7 @@ static void PrintMethodHandlerClass(const ServiceDescriptor* service,
       "  private final $service_name$ serviceImpl;\n"
       "  private final int methodId;\n"
       "\n"
-      "  public MethodHandlers($service_name$ serviceImpl, int methodId) {\n"
+      "  MethodHandlers($service_name$ serviceImpl, int methodId) {\n"
       "    this.serviceImpl = serviceImpl;\n"
       "    this.methodId = methodId;\n"
       "  }\n\n");
@@ -882,83 +956,108 @@ static void PrintMethodHandlerClass(const ServiceDescriptor* service,
 }
 
 static void PrintGetServiceDescriptorMethod(const ServiceDescriptor* service,
-                                   map<string, string>* vars,
+                                   std::map<string, string>* vars,
                                    Printer* p,
                                    ProtoFlavor flavor) {
   (*vars)["service_name"] = service->name();
 
 
   if (flavor == ProtoFlavor::NORMAL) {
-    (*vars)["proto_descriptor_supplier"] = service->name() + "DescriptorSupplier";
+    (*vars)["proto_base_descriptor_supplier"] = service->name() + "BaseDescriptorSupplier";
+    (*vars)["proto_file_descriptor_supplier"] = service->name() + "FileDescriptorSupplier";
+    (*vars)["proto_method_descriptor_supplier"] = service->name() + "MethodDescriptorSupplier";
     (*vars)["proto_class_name"] = google::protobuf::compiler::java::ClassName(service->file());
     p->Print(
         *vars,
-        "private static final class $proto_descriptor_supplier$ implements $ProtoFileDescriptorSupplier$ {\n");
-    p->Indent();
-    p->Print(*vars, "@$Override$\n");
-    p->Print(
-        *vars,
-        "public com.google.protobuf.Descriptors.FileDescriptor getFileDescriptor() {\n");
-    p->Indent();
-    p->Print(*vars, "return $proto_class_name$.getDescriptor();\n");
-    p->Outdent();
-    p->Print(*vars, "}\n");
-    p->Outdent();
-    p->Print(*vars, "}\n\n");
-
-    p->Print(
-            *vars,
-            "private static $ServiceDescriptor$ serviceDescriptor;\n\n");
-
-    p->Print(
-        *vars,
-        "public static synchronized $ServiceDescriptor$ getServiceDescriptor() {\n");
-    p->Indent();
-    p->Print("if (serviceDescriptor == null) {\n");
-    p->Indent();
-    p->Print(
-        *vars,
-        "serviceDescriptor = new $ServiceDescriptor$(SERVICE_NAME,\n");
-    p->Indent();
-    p->Indent();
-    p->Print(
-        *vars,
-        "new $proto_descriptor_supplier$()");
-    p->Outdent();
-    p->Outdent();
-  } else {
-    p->Print(
-      *vars,
-      "private static $ServiceDescriptor$ serviceDescriptor;\n\n");
-    p->Print(
-        *vars,
-        "public static synchronized $ServiceDescriptor$ getServiceDescriptor() {\n");
-    p->Indent();
-    p->Print("if (serviceDescriptor == null) {\n");
-    p->Indent();
-    p->Print(
-        *vars,
-        "serviceDescriptor = new $ServiceDescriptor$(SERVICE_NAME");
+        "private static abstract class $proto_base_descriptor_supplier$\n"
+        "    implements $ProtoFileDescriptorSupplier$, $ProtoServiceDescriptorSupplier$ {\n"
+        "  $proto_base_descriptor_supplier$() {}\n"
+        "\n"
+        "  @$Override$\n"
+        "  public com.google.protobuf.Descriptors.FileDescriptor getFileDescriptor() {\n"
+        "    return $proto_class_name$.getDescriptor();\n"
+        "  }\n"
+        "\n"
+        "  @$Override$\n"
+        "  public com.google.protobuf.Descriptors.ServiceDescriptor getServiceDescriptor() {\n"
+        "    return getFileDescriptor().findServiceByName(\"$service_name$\");\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "private static final class $proto_file_descriptor_supplier$\n"
+        "    extends $proto_base_descriptor_supplier$ {\n"
+        "  $proto_file_descriptor_supplier$() {}\n"
+        "}\n"
+        "\n"
+        "private static final class $proto_method_descriptor_supplier$\n"
+        "    extends $proto_base_descriptor_supplier$\n"
+        "    implements $ProtoMethodDescriptorSupplier$ {\n"
+        "  private final String methodName;\n"
+        "\n"
+        "  $proto_method_descriptor_supplier$(String methodName) {\n"
+        "    this.methodName = methodName;\n"
+        "  }\n"
+        "\n"
+        "  @$Override$\n"
+        "  public com.google.protobuf.Descriptors.MethodDescriptor getMethodDescriptor() {\n"
+        "    return getServiceDescriptor().findMethodByName(methodName);\n"
+        "  }\n"
+        "}\n\n");
   }
 
+  p->Print(
+      *vars,
+      "private static volatile $ServiceDescriptor$ serviceDescriptor;\n\n");
+
+  p->Print(
+      *vars,
+      "public static $ServiceDescriptor$ getServiceDescriptor() {\n");
+  p->Indent();
+  p->Print(
+      *vars,
+      "$ServiceDescriptor$ result = serviceDescriptor;\n");
+  p->Print("if (result == null) {\n");
+  p->Indent();
+  p->Print(
+      *vars,
+      "synchronized ($service_class_name$.class) {\n");
+  p->Indent();
+  p->Print("result = serviceDescriptor;\n");
+  p->Print("if (result == null) {\n");
+  p->Indent();
+
+  p->Print(
+      *vars,
+      "serviceDescriptor = result = $ServiceDescriptor$.newBuilder(SERVICE_NAME)");
   p->Indent();
   p->Indent();
+  if (flavor == ProtoFlavor::NORMAL) {
+    p->Print(
+        *vars,
+        "\n.setSchemaDescriptor(new $proto_file_descriptor_supplier$())");
+  }
   for (int i = 0; i < service->method_count(); ++i) {
     const MethodDescriptor* method = service->method(i);
-    (*vars)["method_field_name"] = MethodPropertiesFieldName(method);
-    p->Print(*vars, ",\n$method_field_name$");
+    (*vars)["method_method_name_helper"] = MethodPropertiesGetterHelperName(method);
+    p->Print(*vars, "\n.addMethod($method_method_name_helper$())");
   }
-  p->Print(");\n");
+  p->Print("\n.build();\n");
   p->Outdent();
   p->Outdent();
+
   p->Outdent();
-  p->Print("}\n\nreturn serviceDescriptor;\n");
+  p->Print("}\n");
+  p->Outdent();
+  p->Print("}\n");
+  p->Outdent();
+  p->Print("}\n");
+  p->Print("return result;\n");
   p->Outdent();
   p->Print("}\n");
 }
 
 static void PrintBindServiceMethodBody(const ServiceDescriptor* service,
-                                   map<string, string>* vars,
+                                   std::map<string, string>* vars,
                                    Printer* p,
                                    bool generate_nano) {
   (*vars)["service_name"] = service->name();
@@ -971,7 +1070,7 @@ static void PrintBindServiceMethodBody(const ServiceDescriptor* service,
   for (int i = 0; i < service->method_count(); ++i) {
     const MethodDescriptor* method = service->method(i);
     (*vars)["lower_method_name"] = LowerMethodName(method);
-    (*vars)["method_field_name"] = MethodPropertiesFieldName(method);
+    (*vars)["method_method_name_helper"] = MethodPropertiesGetterHelperName(method);
     (*vars)["input_type"] = MessageFullJavaName(generate_nano,
                                                 method->input_type());
     (*vars)["output_type"] = MessageFullJavaName(generate_nano,
@@ -996,7 +1095,7 @@ static void PrintBindServiceMethodBody(const ServiceDescriptor* service,
     p->Indent();
     p->Print(
         *vars,
-        "$method_field_name$,\n"
+        "$method_method_name_helper$(),\n"
         "$calls_method$(\n");
     p->Indent();
     p->Print(
@@ -1015,17 +1114,18 @@ static void PrintBindServiceMethodBody(const ServiceDescriptor* service,
 }
 
 static void PrintService(const ServiceDescriptor* service,
-                         map<string, string>* vars,
+                         std::map<string, string>* vars,
                          Printer* p,
                          ProtoFlavor flavor,
-                         bool enable_deprecated) {
+                         bool disable_version) {
   (*vars)["service_name"] = service->name();
   (*vars)["file_name"] = service->file()->name();
   (*vars)["service_class_name"] = ServiceClassName(service);
+  (*vars)["grpc_version"] = "";
   #ifdef GRPC_VERSION
+  if (!disable_version) {
     (*vars)["grpc_version"] = " (version " XSTR(GRPC_VERSION) ")";
-  #else
-    (*vars)["grpc_version"] = "";
+  }
   #endif
   // TODO(nmittler): Replace with WriteServiceDocComment once included by protobuf distro.
   GrpcWriteServiceDocComment(p, service);
@@ -1034,7 +1134,7 @@ static void PrintService(const ServiceDescriptor* service,
       "@$Generated$(\n"
       "    value = \"by gRPC proto compiler$grpc_version$\",\n"
       "    comments = \"Source: $file_name$\")\n"
-      "public class $service_class_name$ {\n\n");
+      "public final class $service_class_name$ {\n\n");
   p->Indent();
   p->Print(
       *vars,
@@ -1074,8 +1174,8 @@ static void PrintService(const ServiceDescriptor* service,
   p->Print("}\n\n");
 
   // TODO(nmittler): Replace with WriteDocComment once included by protobuf distro.
-  GrpcWriteDocComment(p, " Creates a new ListenableFuture-style stub that supports unary and "
-                         "streaming output calls on the service");
+  GrpcWriteDocComment(p, " Creates a new ListenableFuture-style stub that supports unary calls "
+                         "on the service");
   p->Print(
       *vars,
       "public static $service_name$FutureStub newFutureStub(\n"
@@ -1088,38 +1188,12 @@ static void PrintService(const ServiceDescriptor* service,
   p->Print("}\n\n");
 
   bool generate_nano = flavor == ProtoFlavor::NANO;
-  PrintStub(service, vars, p, ABSTRACT_CLASS, generate_nano, enable_deprecated);
-  PrintStub(service, vars, p, ASYNC_CLIENT_IMPL, generate_nano, enable_deprecated);
-  PrintStub(service, vars, p, BLOCKING_CLIENT_IMPL, generate_nano, enable_deprecated);
-  PrintStub(service, vars, p, FUTURE_CLIENT_IMPL, generate_nano, enable_deprecated);
+  PrintStub(service, vars, p, ABSTRACT_CLASS, generate_nano);
+  PrintStub(service, vars, p, ASYNC_CLIENT_IMPL, generate_nano);
+  PrintStub(service, vars, p, BLOCKING_CLIENT_IMPL, generate_nano);
+  PrintStub(service, vars, p, FUTURE_CLIENT_IMPL, generate_nano);
 
-  if (enable_deprecated) {
-    PrintDeprecatedDocComment(service, vars, p);
-    PrintStub(service, vars, p, ASYNC_INTERFACE, generate_nano, true);
-    PrintDeprecatedDocComment(service, vars, p);
-    PrintStub(service, vars, p, BLOCKING_CLIENT_INTERFACE, generate_nano, true);
-    PrintDeprecatedDocComment(service, vars, p);
-    PrintStub(service, vars, p, FUTURE_CLIENT_INTERFACE, generate_nano, true);
-
-    PrintDeprecatedDocComment(service, vars, p);
-    p->Print(
-        *vars,
-        "@$Deprecated$ public static abstract class Abstract$service_name$"
-        " extends $service_name$ImplBase {}\n\n");
-
-    // static bindService method
-    PrintDeprecatedDocComment(service, vars, p);
-    p->Print(
-        *vars,
-        "@$Deprecated$ public static $ServerServiceDefinition$ bindService("
-        "final $service_name$ serviceImpl) {\n");
-    (*vars)["instance"] = "serviceImpl";
-    PrintBindServiceMethodBody(service, vars, p, generate_nano);
-    p->Print(
-        *vars,
-        "}\n\n");
-  }
-  PrintMethodHandlerClass(service, vars, p, generate_nano, enable_deprecated);
+  PrintMethodHandlerClass(service, vars, p, generate_nano);
   PrintGetServiceDescriptorMethod(service, vars, p, flavor);
   p->Outdent();
   p->Print("}\n");
@@ -1128,33 +1202,33 @@ static void PrintService(const ServiceDescriptor* service,
 void PrintImports(Printer* p, bool generate_nano) {
   p->Print(
       "import static "
-      "io.grpc.stub.ClientCalls.asyncUnaryCall;\n"
-      "import static "
-      "io.grpc.stub.ClientCalls.asyncServerStreamingCall;\n"
-      "import static "
-      "io.grpc.stub.ClientCalls.asyncClientStreamingCall;\n"
+      "io.grpc.MethodDescriptor.generateFullMethodName;\n"
       "import static "
       "io.grpc.stub.ClientCalls.asyncBidiStreamingCall;\n"
       "import static "
-      "io.grpc.stub.ClientCalls.blockingUnaryCall;\n"
+      "io.grpc.stub.ClientCalls.asyncClientStreamingCall;\n"
+      "import static "
+      "io.grpc.stub.ClientCalls.asyncServerStreamingCall;\n"
+      "import static "
+      "io.grpc.stub.ClientCalls.asyncUnaryCall;\n"
       "import static "
       "io.grpc.stub.ClientCalls.blockingServerStreamingCall;\n"
       "import static "
+      "io.grpc.stub.ClientCalls.blockingUnaryCall;\n"
+      "import static "
       "io.grpc.stub.ClientCalls.futureUnaryCall;\n"
-      "import static "
-      "io.grpc.MethodDescriptor.generateFullMethodName;\n"
-      "import static "
-      "io.grpc.stub.ServerCalls.asyncUnaryCall;\n"
-      "import static "
-      "io.grpc.stub.ServerCalls.asyncServerStreamingCall;\n"
-      "import static "
-      "io.grpc.stub.ServerCalls.asyncClientStreamingCall;\n"
       "import static "
       "io.grpc.stub.ServerCalls.asyncBidiStreamingCall;\n"
       "import static "
-      "io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall;\n"
+      "io.grpc.stub.ServerCalls.asyncClientStreamingCall;\n"
       "import static "
-      "io.grpc.stub.ServerCalls.asyncUnimplementedStreamingCall;\n\n");
+      "io.grpc.stub.ServerCalls.asyncServerStreamingCall;\n"
+      "import static "
+      "io.grpc.stub.ServerCalls.asyncUnaryCall;\n"
+      "import static "
+      "io.grpc.stub.ServerCalls.asyncUnimplementedStreamingCall;\n"
+      "import static "
+      "io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall;\n\n");
   if (generate_nano) {
     p->Print("import java.io.IOException;\n\n");
   }
@@ -1163,13 +1237,13 @@ void PrintImports(Printer* p, bool generate_nano) {
 void GenerateService(const ServiceDescriptor* service,
                      google::protobuf::io::ZeroCopyOutputStream* out,
                      ProtoFlavor flavor,
-                     bool enable_deprecated) {
+                     bool disable_version) {
   // All non-generated classes must be referred by fully qualified names to
   // avoid collision with generated classes.
-  map<string, string> vars;
+  std::map<string, string> vars;
   vars["String"] = "java.lang.String";
-  vars["Override"] = "java.lang.Override";
   vars["Deprecated"] = "java.lang.Deprecated";
+  vars["Override"] = "java.lang.Override";
   vars["Channel"] = "io.grpc.Channel";
   vars["CallOptions"] = "io.grpc.CallOptions";
   vars["MethodType"] = "io.grpc.MethodDescriptor.MethodType";
@@ -1182,6 +1256,10 @@ void GenerateService(const ServiceDescriptor* service,
       "io.grpc.ServiceDescriptor";
   vars["ProtoFileDescriptorSupplier"] =
       "io.grpc.protobuf.ProtoFileDescriptorSupplier";
+  vars["ProtoServiceDescriptorSupplier"] =
+      "io.grpc.protobuf.ProtoServiceDescriptorSupplier";
+  vars["ProtoMethodDescriptorSupplier"] =
+      "io.grpc.protobuf.ProtoMethodDescriptorSupplier";
   vars["AbstractStub"] = "io.grpc.stub.AbstractStub";
   vars["MethodDescriptor"] = "io.grpc.MethodDescriptor";
   vars["NanoUtils"] = "io.grpc.protobuf.nano.NanoUtils";
@@ -1207,7 +1285,7 @@ void GenerateService(const ServiceDescriptor* service,
   if (!vars["Package"].empty()) {
     vars["Package"].append(".");
   }
-  PrintService(service, &vars, &printer, flavor, enable_deprecated);
+  PrintService(service, &vars, &printer, flavor, disable_version);
 }
 
 string ServiceJavaPackage(const FileDescriptor* file, bool nano) {

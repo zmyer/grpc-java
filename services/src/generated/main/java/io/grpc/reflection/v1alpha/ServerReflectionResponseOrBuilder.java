@@ -8,25 +8,25 @@ public interface ServerReflectionResponseOrBuilder extends
     com.google.protobuf.MessageOrBuilder {
 
   /**
-   * <code>optional string valid_host = 1;</code>
+   * <code>string valid_host = 1;</code>
    */
   java.lang.String getValidHost();
   /**
-   * <code>optional string valid_host = 1;</code>
+   * <code>string valid_host = 1;</code>
    */
   com.google.protobuf.ByteString
       getValidHostBytes();
 
   /**
-   * <code>optional .grpc.reflection.v1alpha.ServerReflectionRequest original_request = 2;</code>
+   * <code>.grpc.reflection.v1alpha.ServerReflectionRequest original_request = 2;</code>
    */
   boolean hasOriginalRequest();
   /**
-   * <code>optional .grpc.reflection.v1alpha.ServerReflectionRequest original_request = 2;</code>
+   * <code>.grpc.reflection.v1alpha.ServerReflectionRequest original_request = 2;</code>
    */
   io.grpc.reflection.v1alpha.ServerReflectionRequest getOriginalRequest();
   /**
-   * <code>optional .grpc.reflection.v1alpha.ServerReflectionRequest original_request = 2;</code>
+   * <code>.grpc.reflection.v1alpha.ServerReflectionRequest original_request = 2;</code>
    */
   io.grpc.reflection.v1alpha.ServerReflectionRequestOrBuilder getOriginalRequestOrBuilder();
 
@@ -40,7 +40,20 @@ public interface ServerReflectionResponseOrBuilder extends
    * that were previously sent in response to earlier requests in the stream.
    * </pre>
    *
-   * <code>optional .grpc.reflection.v1alpha.FileDescriptorResponse file_descriptor_response = 4;</code>
+   * <code>.grpc.reflection.v1alpha.FileDescriptorResponse file_descriptor_response = 4;</code>
+   */
+  boolean hasFileDescriptorResponse();
+  /**
+   * <pre>
+   * This message is used to answer file_by_filename, file_containing_symbol,
+   * file_containing_extension requests with transitive dependencies. As
+   * the repeated label is not allowed in oneof fields, we use a
+   * FileDescriptorResponse message to encapsulate the repeated fields.
+   * The reflection service is allowed to avoid sending FileDescriptorProtos
+   * that were previously sent in response to earlier requests in the stream.
+   * </pre>
+   *
+   * <code>.grpc.reflection.v1alpha.FileDescriptorResponse file_descriptor_response = 4;</code>
    */
   io.grpc.reflection.v1alpha.FileDescriptorResponse getFileDescriptorResponse();
   /**
@@ -53,7 +66,7 @@ public interface ServerReflectionResponseOrBuilder extends
    * that were previously sent in response to earlier requests in the stream.
    * </pre>
    *
-   * <code>optional .grpc.reflection.v1alpha.FileDescriptorResponse file_descriptor_response = 4;</code>
+   * <code>.grpc.reflection.v1alpha.FileDescriptorResponse file_descriptor_response = 4;</code>
    */
   io.grpc.reflection.v1alpha.FileDescriptorResponseOrBuilder getFileDescriptorResponseOrBuilder();
 
@@ -62,7 +75,15 @@ public interface ServerReflectionResponseOrBuilder extends
    * This message is used to answer all_extension_numbers_of_type requst.
    * </pre>
    *
-   * <code>optional .grpc.reflection.v1alpha.ExtensionNumberResponse all_extension_numbers_response = 5;</code>
+   * <code>.grpc.reflection.v1alpha.ExtensionNumberResponse all_extension_numbers_response = 5;</code>
+   */
+  boolean hasAllExtensionNumbersResponse();
+  /**
+   * <pre>
+   * This message is used to answer all_extension_numbers_of_type requst.
+   * </pre>
+   *
+   * <code>.grpc.reflection.v1alpha.ExtensionNumberResponse all_extension_numbers_response = 5;</code>
    */
   io.grpc.reflection.v1alpha.ExtensionNumberResponse getAllExtensionNumbersResponse();
   /**
@@ -70,7 +91,7 @@ public interface ServerReflectionResponseOrBuilder extends
    * This message is used to answer all_extension_numbers_of_type requst.
    * </pre>
    *
-   * <code>optional .grpc.reflection.v1alpha.ExtensionNumberResponse all_extension_numbers_response = 5;</code>
+   * <code>.grpc.reflection.v1alpha.ExtensionNumberResponse all_extension_numbers_response = 5;</code>
    */
   io.grpc.reflection.v1alpha.ExtensionNumberResponseOrBuilder getAllExtensionNumbersResponseOrBuilder();
 
@@ -79,7 +100,15 @@ public interface ServerReflectionResponseOrBuilder extends
    * This message is used to answer list_services request.
    * </pre>
    *
-   * <code>optional .grpc.reflection.v1alpha.ListServiceResponse list_services_response = 6;</code>
+   * <code>.grpc.reflection.v1alpha.ListServiceResponse list_services_response = 6;</code>
+   */
+  boolean hasListServicesResponse();
+  /**
+   * <pre>
+   * This message is used to answer list_services request.
+   * </pre>
+   *
+   * <code>.grpc.reflection.v1alpha.ListServiceResponse list_services_response = 6;</code>
    */
   io.grpc.reflection.v1alpha.ListServiceResponse getListServicesResponse();
   /**
@@ -87,7 +116,7 @@ public interface ServerReflectionResponseOrBuilder extends
    * This message is used to answer list_services request.
    * </pre>
    *
-   * <code>optional .grpc.reflection.v1alpha.ListServiceResponse list_services_response = 6;</code>
+   * <code>.grpc.reflection.v1alpha.ListServiceResponse list_services_response = 6;</code>
    */
   io.grpc.reflection.v1alpha.ListServiceResponseOrBuilder getListServicesResponseOrBuilder();
 
@@ -96,7 +125,15 @@ public interface ServerReflectionResponseOrBuilder extends
    * This message is used when an error occurs.
    * </pre>
    *
-   * <code>optional .grpc.reflection.v1alpha.ErrorResponse error_response = 7;</code>
+   * <code>.grpc.reflection.v1alpha.ErrorResponse error_response = 7;</code>
+   */
+  boolean hasErrorResponse();
+  /**
+   * <pre>
+   * This message is used when an error occurs.
+   * </pre>
+   *
+   * <code>.grpc.reflection.v1alpha.ErrorResponse error_response = 7;</code>
    */
   io.grpc.reflection.v1alpha.ErrorResponse getErrorResponse();
   /**
@@ -104,7 +141,7 @@ public interface ServerReflectionResponseOrBuilder extends
    * This message is used when an error occurs.
    * </pre>
    *
-   * <code>optional .grpc.reflection.v1alpha.ErrorResponse error_response = 7;</code>
+   * <code>.grpc.reflection.v1alpha.ErrorResponse error_response = 7;</code>
    */
   io.grpc.reflection.v1alpha.ErrorResponseOrBuilder getErrorResponseOrBuilder();
 

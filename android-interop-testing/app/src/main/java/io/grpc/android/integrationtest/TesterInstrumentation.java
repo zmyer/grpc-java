@@ -1,44 +1,28 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.android.integrationtest;
 
-import com.google.android.gms.common.GooglePlayServicesNotAvailableException;
-import com.google.android.gms.common.GooglePlayServicesRepairableException;
-import com.google.android.gms.security.ProviderInstaller;
-
+import android.app.Activity;
 import android.app.Instrumentation;
 import android.os.Bundle;
 import android.util.Log;
-
+import com.google.android.gms.common.GooglePlayServicesNotAvailableException;
+import com.google.android.gms.common.GooglePlayServicesRepairableException;
+import com.google.android.gms.security.ProviderInstaller;
 import java.io.InputStream;
 import java.lang.Throwable;
 
@@ -54,6 +38,7 @@ public class TesterInstrumentation extends Instrumentation {
   private boolean useTls;
   private boolean useTestCa;
   private String androidSocketFactoryTls;
+  private boolean useGet;
 
   @Override
   public void onCreate(Bundle args) {
@@ -68,6 +53,8 @@ public class TesterInstrumentation extends Instrumentation {
     useTestCa = args.getString("use_test_ca") != null
         ? Boolean.parseBoolean(args.getString("use_test_ca")) : false;
     androidSocketFactoryTls = args.getString("android_socket_factory_tls");
+    useGet = args.getString("use_get") != null
+        ? Boolean.parseBoolean(args.getString("use_get")) : false;
 
     InputStream testCa = null;
     if (useTestCa) {
@@ -102,17 +89,17 @@ public class TesterInstrumentation extends Instrumentation {
               Bundle bundle = new Bundle();
               bundle.putString("grpc test result", result);
               if (InteropTester.SUCCESS_MESSAGE.equals(result)) {
-                finish(0, bundle);
+                finish(Activity.RESULT_OK, bundle);
               } else {
-                finish(1, bundle);
+                finish(Activity.RESULT_CANCELED, bundle);
               }
             }
-          }
-      ).execute();
+          },
+          useGet).execute();
     } catch (Throwable t) {
       Bundle bundle = new Bundle();
       bundle.putString("Exception encountered", t.toString());
-      finish(1, bundle);
+      finish(Activity.RESULT_CANCELED, bundle);
     }
   }
 }

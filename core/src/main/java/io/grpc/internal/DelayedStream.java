@@ -1,32 +1,17 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
@@ -35,16 +20,15 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
 import com.google.common.annotations.VisibleForTesting;
-
+import io.grpc.Attributes;
 import io.grpc.Compressor;
-import io.grpc.Decompressor;
+import io.grpc.Deadline;
+import io.grpc.DecompressorRegistry;
 import io.grpc.Metadata;
 import io.grpc.Status;
-
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
-
 import javax.annotation.concurrent.GuardedBy;
 
 /**
@@ -71,6 +55,44 @@ class DelayedStream implements ClientStream {
   private List<Runnable> pendingCalls = new ArrayList<Runnable>();
   @GuardedBy("this")
   private DelayedStreamListener delayedListener;
+
+  @Override
+  public void setMaxInboundMessageSize(final int maxSize) {
+    if (passThrough) {
+      realStream.setMaxInboundMessageSize(maxSize);
+    } else {
+      delayOrExecute(new Runnable() {
+        @Override
+        public void run() {
+          realStream.setMaxInboundMessageSize(maxSize);
+        }
+      });
+    }
+  }
+
+  @Override
+  public void setMaxOutboundMessageSize(final int maxSize) {
+    if (passThrough) {
+      realStream.setMaxOutboundMessageSize(maxSize);
+    } else {
+      delayOrExecute(new Runnable() {
+        @Override
+        public void run() {
+          realStream.setMaxOutboundMessageSize(maxSize);
+        }
+      });
+    }
+  }
+
+  @Override
+  public void setDeadline(final Deadline deadline) {
+    delayOrExecute(new Runnable() {
+      @Override
+      public void run() {
+        realStream.setDeadline(deadline);
+      }
+    });
+  }
 
   /**
    * Transfers all pending and future requests and mutations to the given stream.
@@ -190,6 +212,12 @@ class DelayedStream implements ClientStream {
   }
 
   @Override
+  public Attributes getAttributes() {
+    checkState(passThrough, "Called getAttributes before attributes are ready");
+    return realStream.getAttributes();
+  }
+
+  @Override
   public void writeMessage(final InputStream message) {
     checkNotNull(message, "message");
     if (passThrough) {
@@ -286,16 +314,25 @@ class DelayedStream implements ClientStream {
   }
 
   @Override
-  public void setDecompressor(Decompressor decompressor) {
-    checkNotNull(decompressor, "decompressor");
-    // This method being called only makes sense after setStream() has been called (but not
-    // necessarily returned), but there is not necessarily a happens-before relationship. This
-    // synchronized block creates one.
-    synchronized (this) { }
-    checkState(realStream != null, "How did we receive a reply before the request is sent?");
-    // ClientStreamListenerImpl (in ClientCallImpl) requires setDecompressor to be set immediately,
-    // since messages may be processed immediately after this method returns.
-    realStream.setDecompressor(decompressor);
+  public void setFullStreamDecompression(final boolean fullStreamDecompression) {
+    delayOrExecute(
+        new Runnable() {
+          @Override
+          public void run() {
+            realStream.setFullStreamDecompression(fullStreamDecompression);
+          }
+        });
+  }
+
+  @Override
+  public void setDecompressorRegistry(final DecompressorRegistry decompressorRegistry) {
+    checkNotNull(decompressorRegistry, "decompressorRegistry");
+    delayOrExecute(new Runnable() {
+      @Override
+      public void run() {
+        realStream.setDecompressorRegistry(decompressorRegistry);
+      }
+    });
   }
 
   @Override
@@ -347,14 +384,14 @@ class DelayedStream implements ClientStream {
     }
 
     @Override
-    public void messageRead(final InputStream message) {
+    public void messagesAvailable(final MessageProducer producer) {
       if (passThrough) {
-        realListener.messageRead(message);
+        realListener.messagesAvailable(producer);
       } else {
         delayOrExecute(new Runnable() {
           @Override
           public void run() {
-            realListener.messageRead(message);
+            realListener.messagesAvailable(producer);
           }
         });
       }
@@ -390,6 +427,18 @@ class DelayedStream implements ClientStream {
         @Override
         public void run() {
           realListener.closed(status, trailers);
+        }
+      });
+    }
+
+    @Override
+    public void closed(
+        final Status status, final RpcProgress rpcProgress,
+        final Metadata trailers) {
+      delayOrExecute(new Runnable() {
+        @Override
+        public void run() {
+          realListener.closed(status, rpcProgress, trailers);
         }
       });
     }

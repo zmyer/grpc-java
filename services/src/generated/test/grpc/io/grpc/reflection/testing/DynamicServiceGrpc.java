@@ -1,26 +1,29 @@
 package io.grpc.reflection.testing;
 
-import static io.grpc.stub.ClientCalls.asyncUnaryCall;
-import static io.grpc.stub.ClientCalls.asyncServerStreamingCall;
-import static io.grpc.stub.ClientCalls.asyncClientStreamingCall;
-import static io.grpc.stub.ClientCalls.asyncBidiStreamingCall;
-import static io.grpc.stub.ClientCalls.blockingUnaryCall;
-import static io.grpc.stub.ClientCalls.blockingServerStreamingCall;
-import static io.grpc.stub.ClientCalls.futureUnaryCall;
 import static io.grpc.MethodDescriptor.generateFullMethodName;
-import static io.grpc.stub.ServerCalls.asyncUnaryCall;
-import static io.grpc.stub.ServerCalls.asyncServerStreamingCall;
-import static io.grpc.stub.ServerCalls.asyncClientStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncBidiStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncClientStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncServerStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncUnaryCall;
+import static io.grpc.stub.ClientCalls.blockingServerStreamingCall;
+import static io.grpc.stub.ClientCalls.blockingUnaryCall;
+import static io.grpc.stub.ClientCalls.futureUnaryCall;
 import static io.grpc.stub.ServerCalls.asyncBidiStreamingCall;
-import static io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall;
+import static io.grpc.stub.ServerCalls.asyncClientStreamingCall;
+import static io.grpc.stub.ServerCalls.asyncServerStreamingCall;
+import static io.grpc.stub.ServerCalls.asyncUnaryCall;
 import static io.grpc.stub.ServerCalls.asyncUnimplementedStreamingCall;
+import static io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall;
 
 /**
+ * <pre>
+ * A DynamicService
+ * </pre>
  */
 @javax.annotation.Generated(
-    value = "by gRPC proto compiler (version 1.1.0-SNAPSHOT)",
-    comments = "Source: io/grpc/reflection/testing/reflection_test.proto")
-public class DynamicServiceGrpc {
+    value = "by gRPC proto compiler",
+    comments = "Source: io/grpc/reflection/testing/dynamic_reflection_test.proto")
+public final class DynamicServiceGrpc {
 
   private DynamicServiceGrpc() {}
 
@@ -28,14 +31,42 @@ public class DynamicServiceGrpc {
 
   // Static method descriptors that strictly reflect the proto.
   @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
-  public static final io.grpc.MethodDescriptor<io.grpc.reflection.testing.Request,
-      io.grpc.reflection.testing.Reply> METHOD_METHOD =
-      io.grpc.MethodDescriptor.create(
-          io.grpc.MethodDescriptor.MethodType.UNARY,
-          generateFullMethodName(
-              "grpc.reflection.testing.DynamicService", "Method"),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.reflection.testing.Request.getDefaultInstance()),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.reflection.testing.Reply.getDefaultInstance()));
+  @java.lang.Deprecated // Use {@link #getMethodMethod()} instead. 
+  public static final io.grpc.MethodDescriptor<io.grpc.reflection.testing.DynamicRequest,
+      io.grpc.reflection.testing.DynamicReply> METHOD_METHOD = getMethodMethodHelper();
+
+  private static volatile io.grpc.MethodDescriptor<io.grpc.reflection.testing.DynamicRequest,
+      io.grpc.reflection.testing.DynamicReply> getMethodMethod;
+
+  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  public static io.grpc.MethodDescriptor<io.grpc.reflection.testing.DynamicRequest,
+      io.grpc.reflection.testing.DynamicReply> getMethodMethod() {
+    return getMethodMethodHelper();
+  }
+
+  private static io.grpc.MethodDescriptor<io.grpc.reflection.testing.DynamicRequest,
+      io.grpc.reflection.testing.DynamicReply> getMethodMethodHelper() {
+    io.grpc.MethodDescriptor<io.grpc.reflection.testing.DynamicRequest, io.grpc.reflection.testing.DynamicReply> getMethodMethod;
+    if ((getMethodMethod = DynamicServiceGrpc.getMethodMethod) == null) {
+      synchronized (DynamicServiceGrpc.class) {
+        if ((getMethodMethod = DynamicServiceGrpc.getMethodMethod) == null) {
+          DynamicServiceGrpc.getMethodMethod = getMethodMethod = 
+              io.grpc.MethodDescriptor.<io.grpc.reflection.testing.DynamicRequest, io.grpc.reflection.testing.DynamicReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(
+                  "grpc.reflection.testing.DynamicService", "Method"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.reflection.testing.DynamicRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.reflection.testing.DynamicReply.getDefaultInstance()))
+                  .setSchemaDescriptor(new DynamicServiceMethodDescriptorSupplier("Method"))
+                  .build();
+          }
+        }
+     }
+     return getMethodMethod;
+  }
 
   /**
    * Creates a new async stub that supports all call types for the service
@@ -53,7 +84,7 @@ public class DynamicServiceGrpc {
   }
 
   /**
-   * Creates a new ListenableFuture-style stub that supports unary and streaming output calls on the service
+   * Creates a new ListenableFuture-style stub that supports unary calls on the service
    */
   public static DynamicServiceFutureStub newFutureStub(
       io.grpc.Channel channel) {
@@ -61,30 +92,39 @@ public class DynamicServiceGrpc {
   }
 
   /**
+   * <pre>
+   * A DynamicService
+   * </pre>
    */
   public static abstract class DynamicServiceImplBase implements io.grpc.BindableService {
 
     /**
+     * <pre>
+     * A method
+     * </pre>
      */
-    public void method(io.grpc.reflection.testing.Request request,
-        io.grpc.stub.StreamObserver<io.grpc.reflection.testing.Reply> responseObserver) {
-      asyncUnimplementedUnaryCall(METHOD_METHOD, responseObserver);
+    public void method(io.grpc.reflection.testing.DynamicRequest request,
+        io.grpc.stub.StreamObserver<io.grpc.reflection.testing.DynamicReply> responseObserver) {
+      asyncUnimplementedUnaryCall(getMethodMethodHelper(), responseObserver);
     }
 
-    @java.lang.Override public io.grpc.ServerServiceDefinition bindService() {
+    @java.lang.Override public final io.grpc.ServerServiceDefinition bindService() {
       return io.grpc.ServerServiceDefinition.builder(getServiceDescriptor())
           .addMethod(
-            METHOD_METHOD,
+            getMethodMethodHelper(),
             asyncUnaryCall(
               new MethodHandlers<
-                io.grpc.reflection.testing.Request,
-                io.grpc.reflection.testing.Reply>(
+                io.grpc.reflection.testing.DynamicRequest,
+                io.grpc.reflection.testing.DynamicReply>(
                   this, METHODID_METHOD)))
           .build();
     }
   }
 
   /**
+   * <pre>
+   * A DynamicService
+   * </pre>
    */
   public static final class DynamicServiceStub extends io.grpc.stub.AbstractStub<DynamicServiceStub> {
     private DynamicServiceStub(io.grpc.Channel channel) {
@@ -103,15 +143,21 @@ public class DynamicServiceGrpc {
     }
 
     /**
+     * <pre>
+     * A method
+     * </pre>
      */
-    public void method(io.grpc.reflection.testing.Request request,
-        io.grpc.stub.StreamObserver<io.grpc.reflection.testing.Reply> responseObserver) {
+    public void method(io.grpc.reflection.testing.DynamicRequest request,
+        io.grpc.stub.StreamObserver<io.grpc.reflection.testing.DynamicReply> responseObserver) {
       asyncUnaryCall(
-          getChannel().newCall(METHOD_METHOD, getCallOptions()), request, responseObserver);
+          getChannel().newCall(getMethodMethodHelper(), getCallOptions()), request, responseObserver);
     }
   }
 
   /**
+   * <pre>
+   * A DynamicService
+   * </pre>
    */
   public static final class DynamicServiceBlockingStub extends io.grpc.stub.AbstractStub<DynamicServiceBlockingStub> {
     private DynamicServiceBlockingStub(io.grpc.Channel channel) {
@@ -130,14 +176,20 @@ public class DynamicServiceGrpc {
     }
 
     /**
+     * <pre>
+     * A method
+     * </pre>
      */
-    public io.grpc.reflection.testing.Reply method(io.grpc.reflection.testing.Request request) {
+    public io.grpc.reflection.testing.DynamicReply method(io.grpc.reflection.testing.DynamicRequest request) {
       return blockingUnaryCall(
-          getChannel(), METHOD_METHOD, getCallOptions(), request);
+          getChannel(), getMethodMethodHelper(), getCallOptions(), request);
     }
   }
 
   /**
+   * <pre>
+   * A DynamicService
+   * </pre>
    */
   public static final class DynamicServiceFutureStub extends io.grpc.stub.AbstractStub<DynamicServiceFutureStub> {
     private DynamicServiceFutureStub(io.grpc.Channel channel) {
@@ -156,17 +208,20 @@ public class DynamicServiceGrpc {
     }
 
     /**
+     * <pre>
+     * A method
+     * </pre>
      */
-    public com.google.common.util.concurrent.ListenableFuture<io.grpc.reflection.testing.Reply> method(
-        io.grpc.reflection.testing.Request request) {
+    public com.google.common.util.concurrent.ListenableFuture<io.grpc.reflection.testing.DynamicReply> method(
+        io.grpc.reflection.testing.DynamicRequest request) {
       return futureUnaryCall(
-          getChannel().newCall(METHOD_METHOD, getCallOptions()), request);
+          getChannel().newCall(getMethodMethodHelper(), getCallOptions()), request);
     }
   }
 
   private static final int METHODID_METHOD = 0;
 
-  private static class MethodHandlers<Req, Resp> implements
+  private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
       io.grpc.stub.ServerCalls.ServerStreamingMethod<Req, Resp>,
       io.grpc.stub.ServerCalls.ClientStreamingMethod<Req, Resp>,
@@ -174,7 +229,7 @@ public class DynamicServiceGrpc {
     private final DynamicServiceImplBase serviceImpl;
     private final int methodId;
 
-    public MethodHandlers(DynamicServiceImplBase serviceImpl, int methodId) {
+    MethodHandlers(DynamicServiceImplBase serviceImpl, int methodId) {
       this.serviceImpl = serviceImpl;
       this.methodId = methodId;
     }
@@ -184,8 +239,8 @@ public class DynamicServiceGrpc {
     public void invoke(Req request, io.grpc.stub.StreamObserver<Resp> responseObserver) {
       switch (methodId) {
         case METHODID_METHOD:
-          serviceImpl.method((io.grpc.reflection.testing.Request) request,
-              (io.grpc.stub.StreamObserver<io.grpc.reflection.testing.Reply>) responseObserver);
+          serviceImpl.method((io.grpc.reflection.testing.DynamicRequest) request,
+              (io.grpc.stub.StreamObserver<io.grpc.reflection.testing.DynamicReply>) responseObserver);
           break;
         default:
           throw new AssertionError();
@@ -203,22 +258,56 @@ public class DynamicServiceGrpc {
     }
   }
 
-  private static final class DynamicServiceDescriptorSupplier implements io.grpc.protobuf.ProtoFileDescriptorSupplier {
+  private static abstract class DynamicServiceBaseDescriptorSupplier
+      implements io.grpc.protobuf.ProtoFileDescriptorSupplier, io.grpc.protobuf.ProtoServiceDescriptorSupplier {
+    DynamicServiceBaseDescriptorSupplier() {}
+
     @java.lang.Override
     public com.google.protobuf.Descriptors.FileDescriptor getFileDescriptor() {
-      return io.grpc.reflection.testing.ReflectionTestProto.getDescriptor();
+      return io.grpc.reflection.testing.DynamicReflectionTestProto.getDescriptor();
+    }
+
+    @java.lang.Override
+    public com.google.protobuf.Descriptors.ServiceDescriptor getServiceDescriptor() {
+      return getFileDescriptor().findServiceByName("DynamicService");
     }
   }
 
-  private static io.grpc.ServiceDescriptor serviceDescriptor;
+  private static final class DynamicServiceFileDescriptorSupplier
+      extends DynamicServiceBaseDescriptorSupplier {
+    DynamicServiceFileDescriptorSupplier() {}
+  }
 
-  public static synchronized io.grpc.ServiceDescriptor getServiceDescriptor() {
-    if (serviceDescriptor == null) {
-      serviceDescriptor = new io.grpc.ServiceDescriptor(SERVICE_NAME,
-          new DynamicServiceDescriptorSupplier(),
-          METHOD_METHOD);
+  private static final class DynamicServiceMethodDescriptorSupplier
+      extends DynamicServiceBaseDescriptorSupplier
+      implements io.grpc.protobuf.ProtoMethodDescriptorSupplier {
+    private final String methodName;
+
+    DynamicServiceMethodDescriptorSupplier(String methodName) {
+      this.methodName = methodName;
     }
 
-    return serviceDescriptor;
+    @java.lang.Override
+    public com.google.protobuf.Descriptors.MethodDescriptor getMethodDescriptor() {
+      return getServiceDescriptor().findMethodByName(methodName);
+    }
+  }
+
+  private static volatile io.grpc.ServiceDescriptor serviceDescriptor;
+
+  public static io.grpc.ServiceDescriptor getServiceDescriptor() {
+    io.grpc.ServiceDescriptor result = serviceDescriptor;
+    if (result == null) {
+      synchronized (DynamicServiceGrpc.class) {
+        result = serviceDescriptor;
+        if (result == null) {
+          serviceDescriptor = result = io.grpc.ServiceDescriptor.newBuilder(SERVICE_NAME)
+              .setSchemaDescriptor(new DynamicServiceFileDescriptorSupplier())
+              .addMethod(getMethodMethodHelper())
+              .build();
+        }
+      }
+    }
+    return result;
   }
 }

@@ -1,44 +1,26 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
 
 import com.google.common.annotations.VisibleForTesting;
-
+import io.grpc.ServiceProviders.PriorityAccessor;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
-import java.util.ServiceConfigurationError;
-import java.util.ServiceLoader;
 
 /**
  * Provider of managed channels for transport agnostic consumption.
@@ -49,73 +31,24 @@ import java.util.ServiceLoader;
  */
 @Internal
 public abstract class ManagedChannelProvider {
-  private static final ManagedChannelProvider provider
-      = load(getCorrectClassLoader());
-
   @VisibleForTesting
-  static ManagedChannelProvider load(ClassLoader classLoader) {
-    Iterable<ManagedChannelProvider> candidates;
-    if (isAndroid()) {
-      candidates = getCandidatesViaHardCoded(classLoader);
-    } else {
-      candidates = getCandidatesViaServiceLoader(classLoader);
-    }
-    List<ManagedChannelProvider> list = new ArrayList<ManagedChannelProvider>();
-    for (ManagedChannelProvider current : candidates) {
-      if (!current.isAvailable()) {
-        continue;
-      }
-      list.add(current);
-    }
-    if (list.isEmpty()) {
-      return null;
-    } else {
-      return Collections.max(list, new Comparator<ManagedChannelProvider>() {
+  static final Iterable<Class<?>> HARDCODED_CLASSES = new HardcodedClasses();
+
+  private static final ManagedChannelProvider provider = ServiceProviders.load(
+      ManagedChannelProvider.class,
+      HARDCODED_CLASSES,
+      ManagedChannelProvider.class.getClassLoader(),
+      new PriorityAccessor<ManagedChannelProvider>() {
         @Override
-        public int compare(ManagedChannelProvider f1, ManagedChannelProvider f2) {
-          return f1.priority() - f2.priority();
+        public boolean isAvailable(ManagedChannelProvider provider) {
+          return provider.isAvailable();
+        }
+
+        @Override
+        public int getPriority(ManagedChannelProvider provider) {
+          return provider.priority();
         }
       });
-    }
-  }
-
-  @VisibleForTesting
-  public static Iterable<ManagedChannelProvider> getCandidatesViaServiceLoader(
-      ClassLoader classLoader) {
-    return ServiceLoader.load(ManagedChannelProvider.class, classLoader);
-  }
-
-  /**
-   * Load providers from a hard-coded list. This avoids using getResource(), which has performance
-   * problems on Android (see https://github.com/grpc/grpc-java/issues/2037). Any provider that may
-   * be used on Android is free to be added here.
-   */
-  @VisibleForTesting
-  public static Iterable<ManagedChannelProvider> getCandidatesViaHardCoded(
-      ClassLoader classLoader) {
-    List<ManagedChannelProvider> list = new ArrayList<ManagedChannelProvider>();
-    try {
-      list.add(create(Class.forName("io.grpc.okhttp.OkHttpChannelProvider", true, classLoader)));
-    } catch (ClassNotFoundException ex) {
-      // ignore
-    }
-    try {
-      list.add(create(Class.forName("io.grpc.netty.NettyChannelProvider", true, classLoader)));
-    } catch (ClassNotFoundException ex) {
-      // ignore
-    }
-    return list;
-  }
-
-  @VisibleForTesting
-  static ManagedChannelProvider create(Class<?> rawClass) {
-    try {
-      return rawClass.asSubclass(ManagedChannelProvider.class).getConstructor().newInstance();
-    } catch (Throwable t) {
-      throw new ServiceConfigurationError(
-          "Provider " + rawClass.getName() + " could not be instantiated: " + t, t);
-    }
-  }
 
   /**
    * Returns the ClassLoader-wide default channel.
@@ -128,27 +61,6 @@ public abstract class ManagedChannelProvider {
           + "Try adding a dependency on the grpc-okhttp or grpc-netty artifact");
     }
     return provider;
-  }
-
-  private static ClassLoader getCorrectClassLoader() {
-    if (isAndroid()) {
-      // When android:sharedUserId or android:process is used, Android will setup a dummy
-      // ClassLoader for the thread context (http://stackoverflow.com/questions/13407006),
-      // instead of letting users to manually set context class loader, we choose the
-      // correct class loader here.
-      return ManagedChannelProvider.class.getClassLoader();
-    }
-    return Thread.currentThread().getContextClassLoader();
-  }
-
-  protected static boolean isAndroid() {
-    try {
-      Class.forName("android.app.Application", /*initialize=*/ false, null);
-      return true;
-    } catch (Exception e) {
-      // If Application isn't loaded, it might as well not be Android.
-      return false;
-    }
   }
 
   /**
@@ -175,11 +87,32 @@ public abstract class ManagedChannelProvider {
    */
   protected abstract ManagedChannelBuilder<?> builderForTarget(String target);
 
+  /**
+   * Thrown when no suitable {@link ManagedChannelProvider} objects can be found.
+   */
   public static final class ProviderNotFoundException extends RuntimeException {
     private static final long serialVersionUID = 1;
 
     public ProviderNotFoundException(String msg) {
       super(msg);
+    }
+  }
+
+  private static final class HardcodedClasses implements Iterable<Class<?>> {
+    @Override
+    public Iterator<Class<?>> iterator() {
+      List<Class<?>> list = new ArrayList<Class<?>>();
+      try {
+        list.add(Class.forName("io.grpc.okhttp.OkHttpChannelProvider"));
+      } catch (ClassNotFoundException ex) {
+        // ignore
+      }
+      try {
+        list.add(Class.forName("io.grpc.netty.NettyChannelProvider"));
+      } catch (ClassNotFoundException ex) {
+        // ignore
+      }
+      return list.iterator();
     }
   }
 }

@@ -1,26 +1,26 @@
 package io.grpc.benchmarks.proto;
 
-import static io.grpc.stub.ClientCalls.asyncUnaryCall;
-import static io.grpc.stub.ClientCalls.asyncServerStreamingCall;
-import static io.grpc.stub.ClientCalls.asyncClientStreamingCall;
-import static io.grpc.stub.ClientCalls.asyncBidiStreamingCall;
-import static io.grpc.stub.ClientCalls.blockingUnaryCall;
-import static io.grpc.stub.ClientCalls.blockingServerStreamingCall;
-import static io.grpc.stub.ClientCalls.futureUnaryCall;
 import static io.grpc.MethodDescriptor.generateFullMethodName;
-import static io.grpc.stub.ServerCalls.asyncUnaryCall;
-import static io.grpc.stub.ServerCalls.asyncServerStreamingCall;
-import static io.grpc.stub.ServerCalls.asyncClientStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncBidiStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncClientStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncServerStreamingCall;
+import static io.grpc.stub.ClientCalls.asyncUnaryCall;
+import static io.grpc.stub.ClientCalls.blockingServerStreamingCall;
+import static io.grpc.stub.ClientCalls.blockingUnaryCall;
+import static io.grpc.stub.ClientCalls.futureUnaryCall;
 import static io.grpc.stub.ServerCalls.asyncBidiStreamingCall;
-import static io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall;
+import static io.grpc.stub.ServerCalls.asyncClientStreamingCall;
+import static io.grpc.stub.ServerCalls.asyncServerStreamingCall;
+import static io.grpc.stub.ServerCalls.asyncUnaryCall;
 import static io.grpc.stub.ServerCalls.asyncUnimplementedStreamingCall;
+import static io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall;
 
 /**
  */
 @javax.annotation.Generated(
-    value = "by gRPC proto compiler (version 1.1.0-SNAPSHOT)",
-    comments = "Source: services.proto")
-public class WorkerServiceGrpc {
+    value = "by gRPC proto compiler",
+    comments = "Source: grpc/testing/services.proto")
+public final class WorkerServiceGrpc {
 
   private WorkerServiceGrpc() {}
 
@@ -28,41 +28,153 @@ public class WorkerServiceGrpc {
 
   // Static method descriptors that strictly reflect the proto.
   @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  @java.lang.Deprecated // Use {@link #getRunServerMethod()} instead. 
   public static final io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.ServerArgs,
-      io.grpc.benchmarks.proto.Control.ServerStatus> METHOD_RUN_SERVER =
-      io.grpc.MethodDescriptor.create(
-          io.grpc.MethodDescriptor.MethodType.BIDI_STREAMING,
-          generateFullMethodName(
-              "grpc.testing.WorkerService", "RunServer"),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.benchmarks.proto.Control.ServerArgs.getDefaultInstance()),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.benchmarks.proto.Control.ServerStatus.getDefaultInstance()));
+      io.grpc.benchmarks.proto.Control.ServerStatus> METHOD_RUN_SERVER = getRunServerMethodHelper();
+
+  private static volatile io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.ServerArgs,
+      io.grpc.benchmarks.proto.Control.ServerStatus> getRunServerMethod;
+
   @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  public static io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.ServerArgs,
+      io.grpc.benchmarks.proto.Control.ServerStatus> getRunServerMethod() {
+    return getRunServerMethodHelper();
+  }
+
+  private static io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.ServerArgs,
+      io.grpc.benchmarks.proto.Control.ServerStatus> getRunServerMethodHelper() {
+    io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.ServerArgs, io.grpc.benchmarks.proto.Control.ServerStatus> getRunServerMethod;
+    if ((getRunServerMethod = WorkerServiceGrpc.getRunServerMethod) == null) {
+      synchronized (WorkerServiceGrpc.class) {
+        if ((getRunServerMethod = WorkerServiceGrpc.getRunServerMethod) == null) {
+          WorkerServiceGrpc.getRunServerMethod = getRunServerMethod = 
+              io.grpc.MethodDescriptor.<io.grpc.benchmarks.proto.Control.ServerArgs, io.grpc.benchmarks.proto.Control.ServerStatus>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.BIDI_STREAMING)
+              .setFullMethodName(generateFullMethodName(
+                  "grpc.testing.WorkerService", "RunServer"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.benchmarks.proto.Control.ServerArgs.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.benchmarks.proto.Control.ServerStatus.getDefaultInstance()))
+                  .setSchemaDescriptor(new WorkerServiceMethodDescriptorSupplier("RunServer"))
+                  .build();
+          }
+        }
+     }
+     return getRunServerMethod;
+  }
+  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  @java.lang.Deprecated // Use {@link #getRunClientMethod()} instead. 
   public static final io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.ClientArgs,
-      io.grpc.benchmarks.proto.Control.ClientStatus> METHOD_RUN_CLIENT =
-      io.grpc.MethodDescriptor.create(
-          io.grpc.MethodDescriptor.MethodType.BIDI_STREAMING,
-          generateFullMethodName(
-              "grpc.testing.WorkerService", "RunClient"),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.benchmarks.proto.Control.ClientArgs.getDefaultInstance()),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.benchmarks.proto.Control.ClientStatus.getDefaultInstance()));
+      io.grpc.benchmarks.proto.Control.ClientStatus> METHOD_RUN_CLIENT = getRunClientMethodHelper();
+
+  private static volatile io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.ClientArgs,
+      io.grpc.benchmarks.proto.Control.ClientStatus> getRunClientMethod;
+
   @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  public static io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.ClientArgs,
+      io.grpc.benchmarks.proto.Control.ClientStatus> getRunClientMethod() {
+    return getRunClientMethodHelper();
+  }
+
+  private static io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.ClientArgs,
+      io.grpc.benchmarks.proto.Control.ClientStatus> getRunClientMethodHelper() {
+    io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.ClientArgs, io.grpc.benchmarks.proto.Control.ClientStatus> getRunClientMethod;
+    if ((getRunClientMethod = WorkerServiceGrpc.getRunClientMethod) == null) {
+      synchronized (WorkerServiceGrpc.class) {
+        if ((getRunClientMethod = WorkerServiceGrpc.getRunClientMethod) == null) {
+          WorkerServiceGrpc.getRunClientMethod = getRunClientMethod = 
+              io.grpc.MethodDescriptor.<io.grpc.benchmarks.proto.Control.ClientArgs, io.grpc.benchmarks.proto.Control.ClientStatus>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.BIDI_STREAMING)
+              .setFullMethodName(generateFullMethodName(
+                  "grpc.testing.WorkerService", "RunClient"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.benchmarks.proto.Control.ClientArgs.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.benchmarks.proto.Control.ClientStatus.getDefaultInstance()))
+                  .setSchemaDescriptor(new WorkerServiceMethodDescriptorSupplier("RunClient"))
+                  .build();
+          }
+        }
+     }
+     return getRunClientMethod;
+  }
+  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  @java.lang.Deprecated // Use {@link #getCoreCountMethod()} instead. 
   public static final io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.CoreRequest,
-      io.grpc.benchmarks.proto.Control.CoreResponse> METHOD_CORE_COUNT =
-      io.grpc.MethodDescriptor.create(
-          io.grpc.MethodDescriptor.MethodType.UNARY,
-          generateFullMethodName(
-              "grpc.testing.WorkerService", "CoreCount"),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.benchmarks.proto.Control.CoreRequest.getDefaultInstance()),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.benchmarks.proto.Control.CoreResponse.getDefaultInstance()));
+      io.grpc.benchmarks.proto.Control.CoreResponse> METHOD_CORE_COUNT = getCoreCountMethodHelper();
+
+  private static volatile io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.CoreRequest,
+      io.grpc.benchmarks.proto.Control.CoreResponse> getCoreCountMethod;
+
   @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  public static io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.CoreRequest,
+      io.grpc.benchmarks.proto.Control.CoreResponse> getCoreCountMethod() {
+    return getCoreCountMethodHelper();
+  }
+
+  private static io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.CoreRequest,
+      io.grpc.benchmarks.proto.Control.CoreResponse> getCoreCountMethodHelper() {
+    io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.CoreRequest, io.grpc.benchmarks.proto.Control.CoreResponse> getCoreCountMethod;
+    if ((getCoreCountMethod = WorkerServiceGrpc.getCoreCountMethod) == null) {
+      synchronized (WorkerServiceGrpc.class) {
+        if ((getCoreCountMethod = WorkerServiceGrpc.getCoreCountMethod) == null) {
+          WorkerServiceGrpc.getCoreCountMethod = getCoreCountMethod = 
+              io.grpc.MethodDescriptor.<io.grpc.benchmarks.proto.Control.CoreRequest, io.grpc.benchmarks.proto.Control.CoreResponse>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(
+                  "grpc.testing.WorkerService", "CoreCount"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.benchmarks.proto.Control.CoreRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.benchmarks.proto.Control.CoreResponse.getDefaultInstance()))
+                  .setSchemaDescriptor(new WorkerServiceMethodDescriptorSupplier("CoreCount"))
+                  .build();
+          }
+        }
+     }
+     return getCoreCountMethod;
+  }
+  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  @java.lang.Deprecated // Use {@link #getQuitWorkerMethod()} instead. 
   public static final io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.Void,
-      io.grpc.benchmarks.proto.Control.Void> METHOD_QUIT_WORKER =
-      io.grpc.MethodDescriptor.create(
-          io.grpc.MethodDescriptor.MethodType.UNARY,
-          generateFullMethodName(
-              "grpc.testing.WorkerService", "QuitWorker"),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.benchmarks.proto.Control.Void.getDefaultInstance()),
-          io.grpc.protobuf.ProtoUtils.marshaller(io.grpc.benchmarks.proto.Control.Void.getDefaultInstance()));
+      io.grpc.benchmarks.proto.Control.Void> METHOD_QUIT_WORKER = getQuitWorkerMethodHelper();
+
+  private static volatile io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.Void,
+      io.grpc.benchmarks.proto.Control.Void> getQuitWorkerMethod;
+
+  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  public static io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.Void,
+      io.grpc.benchmarks.proto.Control.Void> getQuitWorkerMethod() {
+    return getQuitWorkerMethodHelper();
+  }
+
+  private static io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.Void,
+      io.grpc.benchmarks.proto.Control.Void> getQuitWorkerMethodHelper() {
+    io.grpc.MethodDescriptor<io.grpc.benchmarks.proto.Control.Void, io.grpc.benchmarks.proto.Control.Void> getQuitWorkerMethod;
+    if ((getQuitWorkerMethod = WorkerServiceGrpc.getQuitWorkerMethod) == null) {
+      synchronized (WorkerServiceGrpc.class) {
+        if ((getQuitWorkerMethod = WorkerServiceGrpc.getQuitWorkerMethod) == null) {
+          WorkerServiceGrpc.getQuitWorkerMethod = getQuitWorkerMethod = 
+              io.grpc.MethodDescriptor.<io.grpc.benchmarks.proto.Control.Void, io.grpc.benchmarks.proto.Control.Void>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(
+                  "grpc.testing.WorkerService", "QuitWorker"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.benchmarks.proto.Control.Void.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.benchmarks.proto.Control.Void.getDefaultInstance()))
+                  .setSchemaDescriptor(new WorkerServiceMethodDescriptorSupplier("QuitWorker"))
+                  .build();
+          }
+        }
+     }
+     return getQuitWorkerMethod;
+  }
 
   /**
    * Creates a new async stub that supports all call types for the service
@@ -80,7 +192,7 @@ public class WorkerServiceGrpc {
   }
 
   /**
-   * Creates a new ListenableFuture-style stub that supports unary and streaming output calls on the service
+   * Creates a new ListenableFuture-style stub that supports unary calls on the service
    */
   public static WorkerServiceFutureStub newFutureStub(
       io.grpc.Channel channel) {
@@ -103,7 +215,7 @@ public class WorkerServiceGrpc {
      */
     public io.grpc.stub.StreamObserver<io.grpc.benchmarks.proto.Control.ServerArgs> runServer(
         io.grpc.stub.StreamObserver<io.grpc.benchmarks.proto.Control.ServerStatus> responseObserver) {
-      return asyncUnimplementedStreamingCall(METHOD_RUN_SERVER, responseObserver);
+      return asyncUnimplementedStreamingCall(getRunServerMethodHelper(), responseObserver);
     }
 
     /**
@@ -118,7 +230,7 @@ public class WorkerServiceGrpc {
      */
     public io.grpc.stub.StreamObserver<io.grpc.benchmarks.proto.Control.ClientArgs> runClient(
         io.grpc.stub.StreamObserver<io.grpc.benchmarks.proto.Control.ClientStatus> responseObserver) {
-      return asyncUnimplementedStreamingCall(METHOD_RUN_CLIENT, responseObserver);
+      return asyncUnimplementedStreamingCall(getRunClientMethodHelper(), responseObserver);
     }
 
     /**
@@ -128,7 +240,7 @@ public class WorkerServiceGrpc {
      */
     public void coreCount(io.grpc.benchmarks.proto.Control.CoreRequest request,
         io.grpc.stub.StreamObserver<io.grpc.benchmarks.proto.Control.CoreResponse> responseObserver) {
-      asyncUnimplementedUnaryCall(METHOD_CORE_COUNT, responseObserver);
+      asyncUnimplementedUnaryCall(getCoreCountMethodHelper(), responseObserver);
     }
 
     /**
@@ -138,34 +250,34 @@ public class WorkerServiceGrpc {
      */
     public void quitWorker(io.grpc.benchmarks.proto.Control.Void request,
         io.grpc.stub.StreamObserver<io.grpc.benchmarks.proto.Control.Void> responseObserver) {
-      asyncUnimplementedUnaryCall(METHOD_QUIT_WORKER, responseObserver);
+      asyncUnimplementedUnaryCall(getQuitWorkerMethodHelper(), responseObserver);
     }
 
-    @java.lang.Override public io.grpc.ServerServiceDefinition bindService() {
+    @java.lang.Override public final io.grpc.ServerServiceDefinition bindService() {
       return io.grpc.ServerServiceDefinition.builder(getServiceDescriptor())
           .addMethod(
-            METHOD_RUN_SERVER,
+            getRunServerMethodHelper(),
             asyncBidiStreamingCall(
               new MethodHandlers<
                 io.grpc.benchmarks.proto.Control.ServerArgs,
                 io.grpc.benchmarks.proto.Control.ServerStatus>(
                   this, METHODID_RUN_SERVER)))
           .addMethod(
-            METHOD_RUN_CLIENT,
+            getRunClientMethodHelper(),
             asyncBidiStreamingCall(
               new MethodHandlers<
                 io.grpc.benchmarks.proto.Control.ClientArgs,
                 io.grpc.benchmarks.proto.Control.ClientStatus>(
                   this, METHODID_RUN_CLIENT)))
           .addMethod(
-            METHOD_CORE_COUNT,
+            getCoreCountMethodHelper(),
             asyncUnaryCall(
               new MethodHandlers<
                 io.grpc.benchmarks.proto.Control.CoreRequest,
                 io.grpc.benchmarks.proto.Control.CoreResponse>(
                   this, METHODID_CORE_COUNT)))
           .addMethod(
-            METHOD_QUIT_WORKER,
+            getQuitWorkerMethodHelper(),
             asyncUnaryCall(
               new MethodHandlers<
                 io.grpc.benchmarks.proto.Control.Void,
@@ -206,7 +318,7 @@ public class WorkerServiceGrpc {
     public io.grpc.stub.StreamObserver<io.grpc.benchmarks.proto.Control.ServerArgs> runServer(
         io.grpc.stub.StreamObserver<io.grpc.benchmarks.proto.Control.ServerStatus> responseObserver) {
       return asyncBidiStreamingCall(
-          getChannel().newCall(METHOD_RUN_SERVER, getCallOptions()), responseObserver);
+          getChannel().newCall(getRunServerMethodHelper(), getCallOptions()), responseObserver);
     }
 
     /**
@@ -222,7 +334,7 @@ public class WorkerServiceGrpc {
     public io.grpc.stub.StreamObserver<io.grpc.benchmarks.proto.Control.ClientArgs> runClient(
         io.grpc.stub.StreamObserver<io.grpc.benchmarks.proto.Control.ClientStatus> responseObserver) {
       return asyncBidiStreamingCall(
-          getChannel().newCall(METHOD_RUN_CLIENT, getCallOptions()), responseObserver);
+          getChannel().newCall(getRunClientMethodHelper(), getCallOptions()), responseObserver);
     }
 
     /**
@@ -233,7 +345,7 @@ public class WorkerServiceGrpc {
     public void coreCount(io.grpc.benchmarks.proto.Control.CoreRequest request,
         io.grpc.stub.StreamObserver<io.grpc.benchmarks.proto.Control.CoreResponse> responseObserver) {
       asyncUnaryCall(
-          getChannel().newCall(METHOD_CORE_COUNT, getCallOptions()), request, responseObserver);
+          getChannel().newCall(getCoreCountMethodHelper(), getCallOptions()), request, responseObserver);
     }
 
     /**
@@ -244,7 +356,7 @@ public class WorkerServiceGrpc {
     public void quitWorker(io.grpc.benchmarks.proto.Control.Void request,
         io.grpc.stub.StreamObserver<io.grpc.benchmarks.proto.Control.Void> responseObserver) {
       asyncUnaryCall(
-          getChannel().newCall(METHOD_QUIT_WORKER, getCallOptions()), request, responseObserver);
+          getChannel().newCall(getQuitWorkerMethodHelper(), getCallOptions()), request, responseObserver);
     }
   }
 
@@ -273,7 +385,7 @@ public class WorkerServiceGrpc {
      */
     public io.grpc.benchmarks.proto.Control.CoreResponse coreCount(io.grpc.benchmarks.proto.Control.CoreRequest request) {
       return blockingUnaryCall(
-          getChannel(), METHOD_CORE_COUNT, getCallOptions(), request);
+          getChannel(), getCoreCountMethodHelper(), getCallOptions(), request);
     }
 
     /**
@@ -283,7 +395,7 @@ public class WorkerServiceGrpc {
      */
     public io.grpc.benchmarks.proto.Control.Void quitWorker(io.grpc.benchmarks.proto.Control.Void request) {
       return blockingUnaryCall(
-          getChannel(), METHOD_QUIT_WORKER, getCallOptions(), request);
+          getChannel(), getQuitWorkerMethodHelper(), getCallOptions(), request);
     }
   }
 
@@ -313,7 +425,7 @@ public class WorkerServiceGrpc {
     public com.google.common.util.concurrent.ListenableFuture<io.grpc.benchmarks.proto.Control.CoreResponse> coreCount(
         io.grpc.benchmarks.proto.Control.CoreRequest request) {
       return futureUnaryCall(
-          getChannel().newCall(METHOD_CORE_COUNT, getCallOptions()), request);
+          getChannel().newCall(getCoreCountMethodHelper(), getCallOptions()), request);
     }
 
     /**
@@ -324,7 +436,7 @@ public class WorkerServiceGrpc {
     public com.google.common.util.concurrent.ListenableFuture<io.grpc.benchmarks.proto.Control.Void> quitWorker(
         io.grpc.benchmarks.proto.Control.Void request) {
       return futureUnaryCall(
-          getChannel().newCall(METHOD_QUIT_WORKER, getCallOptions()), request);
+          getChannel().newCall(getQuitWorkerMethodHelper(), getCallOptions()), request);
     }
   }
 
@@ -333,7 +445,7 @@ public class WorkerServiceGrpc {
   private static final int METHODID_RUN_SERVER = 2;
   private static final int METHODID_RUN_CLIENT = 3;
 
-  private static class MethodHandlers<Req, Resp> implements
+  private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
       io.grpc.stub.ServerCalls.ServerStreamingMethod<Req, Resp>,
       io.grpc.stub.ServerCalls.ClientStreamingMethod<Req, Resp>,
@@ -341,7 +453,7 @@ public class WorkerServiceGrpc {
     private final WorkerServiceImplBase serviceImpl;
     private final int methodId;
 
-    public MethodHandlers(WorkerServiceImplBase serviceImpl, int methodId) {
+    MethodHandlers(WorkerServiceImplBase serviceImpl, int methodId) {
       this.serviceImpl = serviceImpl;
       this.methodId = methodId;
     }
@@ -380,25 +492,59 @@ public class WorkerServiceGrpc {
     }
   }
 
-  private static final class WorkerServiceDescriptorSupplier implements io.grpc.protobuf.ProtoFileDescriptorSupplier {
+  private static abstract class WorkerServiceBaseDescriptorSupplier
+      implements io.grpc.protobuf.ProtoFileDescriptorSupplier, io.grpc.protobuf.ProtoServiceDescriptorSupplier {
+    WorkerServiceBaseDescriptorSupplier() {}
+
     @java.lang.Override
     public com.google.protobuf.Descriptors.FileDescriptor getFileDescriptor() {
       return io.grpc.benchmarks.proto.Services.getDescriptor();
     }
+
+    @java.lang.Override
+    public com.google.protobuf.Descriptors.ServiceDescriptor getServiceDescriptor() {
+      return getFileDescriptor().findServiceByName("WorkerService");
+    }
   }
 
-  private static io.grpc.ServiceDescriptor serviceDescriptor;
+  private static final class WorkerServiceFileDescriptorSupplier
+      extends WorkerServiceBaseDescriptorSupplier {
+    WorkerServiceFileDescriptorSupplier() {}
+  }
 
-  public static synchronized io.grpc.ServiceDescriptor getServiceDescriptor() {
-    if (serviceDescriptor == null) {
-      serviceDescriptor = new io.grpc.ServiceDescriptor(SERVICE_NAME,
-          new WorkerServiceDescriptorSupplier(),
-          METHOD_RUN_SERVER,
-          METHOD_RUN_CLIENT,
-          METHOD_CORE_COUNT,
-          METHOD_QUIT_WORKER);
+  private static final class WorkerServiceMethodDescriptorSupplier
+      extends WorkerServiceBaseDescriptorSupplier
+      implements io.grpc.protobuf.ProtoMethodDescriptorSupplier {
+    private final String methodName;
+
+    WorkerServiceMethodDescriptorSupplier(String methodName) {
+      this.methodName = methodName;
     }
 
-    return serviceDescriptor;
+    @java.lang.Override
+    public com.google.protobuf.Descriptors.MethodDescriptor getMethodDescriptor() {
+      return getServiceDescriptor().findMethodByName(methodName);
+    }
+  }
+
+  private static volatile io.grpc.ServiceDescriptor serviceDescriptor;
+
+  public static io.grpc.ServiceDescriptor getServiceDescriptor() {
+    io.grpc.ServiceDescriptor result = serviceDescriptor;
+    if (result == null) {
+      synchronized (WorkerServiceGrpc.class) {
+        result = serviceDescriptor;
+        if (result == null) {
+          serviceDescriptor = result = io.grpc.ServiceDescriptor.newBuilder(SERVICE_NAME)
+              .setSchemaDescriptor(new WorkerServiceFileDescriptorSupplier())
+              .addMethod(getRunServerMethodHelper())
+              .addMethod(getRunClientMethodHelper())
+              .addMethod(getCoreCountMethodHelper())
+              .addMethod(getQuitWorkerMethodHelper())
+              .build();
+        }
+      }
+    }
+    return result;
   }
 }

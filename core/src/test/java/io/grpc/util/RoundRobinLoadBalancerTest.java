@@ -1,58 +1,70 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2016 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.util;
 
+import static com.google.common.truth.Truth.assertThat;
+import static io.grpc.ConnectivityState.CONNECTING;
+import static io.grpc.ConnectivityState.IDLE;
+import static io.grpc.ConnectivityState.READY;
+import static io.grpc.ConnectivityState.TRANSIENT_FAILURE;
+import static io.grpc.util.RoundRobinLoadBalancerFactory.RoundRobinLoadBalancer.STATE_INFO;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.eq;
+import static org.mockito.Matchers.isA;
+import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
-import com.google.common.base.Supplier;
 import com.google.common.collect.Lists;
-
+import com.google.common.collect.Maps;
 import io.grpc.Attributes;
+import io.grpc.ConnectivityState;
+import io.grpc.ConnectivityStateInfo;
 import io.grpc.EquivalentAddressGroup;
 import io.grpc.LoadBalancer;
-
-import io.grpc.ResolvedServerInfo;
-import io.grpc.ResolvedServerInfoGroup;
+import io.grpc.LoadBalancer.Helper;
+import io.grpc.LoadBalancer.PickSubchannelArgs;
+import io.grpc.LoadBalancer.Subchannel;
+import io.grpc.Metadata;
+import io.grpc.Metadata.Key;
 import io.grpc.Status;
-import io.grpc.TransportManager;
-import io.grpc.TransportManager.InterimTransport;
-
+import io.grpc.internal.GrpcAttributes;
+import io.grpc.util.RoundRobinLoadBalancerFactory.Picker;
+import io.grpc.util.RoundRobinLoadBalancerFactory.Ref;
+import io.grpc.util.RoundRobinLoadBalancerFactory.RoundRobinLoadBalancer;
+import java.net.SocketAddress;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -61,124 +73,613 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
-import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
-
-import java.net.SocketAddress;
-import java.util.List;
+import org.mockito.invocation.InvocationOnMock;
+import org.mockito.stubbing.Answer;
 
 /** Unit test for {@link RoundRobinLoadBalancerFactory}. */
 @RunWith(JUnit4.class)
 public class RoundRobinLoadBalancerTest {
-  private LoadBalancer<Transport> loadBalancer;
+  private RoundRobinLoadBalancer loadBalancer;
+  private List<EquivalentAddressGroup> servers = Lists.newArrayList();
+  private Map<EquivalentAddressGroup, Subchannel> subchannels = Maps.newLinkedHashMap();
+  private static final Attributes.Key<String> MAJOR_KEY = Attributes.Key.of("major-key");
+  private Attributes affinity = Attributes.newBuilder().set(MAJOR_KEY, "I got the keys").build();
 
-  private List<ResolvedServerInfoGroup> servers;
-  private List<EquivalentAddressGroup> addressGroupList;
+  @Captor
+  private ArgumentCaptor<Picker> pickerCaptor;
+  @Captor
+  private ArgumentCaptor<ConnectivityState> stateCaptor;
+  @Captor
+  private ArgumentCaptor<EquivalentAddressGroup> eagCaptor;
+  @Mock
+  private Helper mockHelper;
 
-  @Mock private TransportManager<Transport> mockTransportManager;
-  @Mock private Transport mockTransport0;
-  @Mock private Transport mockTransport1;
-  @Mock private Transport mockTransport2;
-  @Mock private InterimTransport<Transport> mockInterimTransport;
-  @Mock private Transport mockInterimTransportAsTransport;
-  @Captor private ArgumentCaptor<Supplier<Transport>> transportSupplierCaptor;
+  @Mock // This LoadBalancer doesn't use any of the arg fields, as verified in tearDown().
+  private PickSubchannelArgs mockArgs;
 
   @Before
   public void setUp() {
     MockitoAnnotations.initMocks(this);
-    loadBalancer = RoundRobinLoadBalancerFactory.getInstance().newLoadBalancer(
-        "fakeservice", mockTransportManager);
-    addressGroupList = Lists.newArrayList();
-    servers = Lists.newArrayList();
+
     for (int i = 0; i < 3; i++) {
-      ResolvedServerInfoGroup.Builder resolvedServerInfoGroup = ResolvedServerInfoGroup.builder();
-      for (int j = 0; j < 3; j++) {
-        resolvedServerInfoGroup.add(
-            new ResolvedServerInfo(new FakeSocketAddress("servergroup" + i + "server" + j)));
-      }
-      servers.add(resolvedServerInfoGroup.build());
-      addressGroupList.add(resolvedServerInfoGroup.build().toEquivalentAddressGroup());
+      SocketAddress addr = new FakeSocketAddress("server" + i);
+      EquivalentAddressGroup eag = new EquivalentAddressGroup(addr);
+      servers.add(eag);
+      Subchannel sc = mock(Subchannel.class);
+      when(sc.getAddresses()).thenReturn(eag);
+      subchannels.put(eag, sc);
     }
-    when(mockTransportManager.getTransport(eq(addressGroupList.get(0))))
-        .thenReturn(mockTransport0);
-    when(mockTransportManager.getTransport(eq(addressGroupList.get(1))))
-        .thenReturn(mockTransport1);
-    when(mockTransportManager.getTransport(eq(addressGroupList.get(2))))
-        .thenReturn(mockTransport2);
-    when(mockTransportManager.createInterimTransport()).thenReturn(mockInterimTransport);
-    when(mockInterimTransport.transport()).thenReturn(mockInterimTransportAsTransport);
+
+    when(mockHelper.createSubchannel(any(EquivalentAddressGroup.class), any(Attributes.class)))
+        .then(new Answer<Subchannel>() {
+          @Override
+          public Subchannel answer(InvocationOnMock invocation) throws Throwable {
+            Object[] args = invocation.getArguments();
+            Subchannel subchannel = subchannels.get(args[0]);
+            when(subchannel.getAttributes()).thenReturn((Attributes) args[1]);
+            return subchannel;
+          }
+        });
+
+    loadBalancer = (RoundRobinLoadBalancer) RoundRobinLoadBalancerFactory.getInstance()
+        .newLoadBalancer(mockHelper);
   }
 
-  @Test
-  public void pickBeforeResolved() throws Exception {
-    Transport t1 = loadBalancer.pickTransport(null);
-    Transport t2 = loadBalancer.pickTransport(null);
-    assertSame(mockInterimTransportAsTransport, t1);
-    assertSame(mockInterimTransportAsTransport, t2);
-    verify(mockTransportManager).createInterimTransport();
-    verify(mockTransportManager, never()).getTransport(any(EquivalentAddressGroup.class));
-    verify(mockInterimTransport, times(2)).transport();
-
-    loadBalancer.handleResolvedAddresses(servers, Attributes.EMPTY);
-    verify(mockInterimTransport).closeWithRealTransports(transportSupplierCaptor.capture());
-    assertSame(mockTransport0, transportSupplierCaptor.getValue().get());
-    assertSame(mockTransport1, transportSupplierCaptor.getValue().get());
-    InOrder inOrder = Mockito.inOrder(mockTransportManager);
-    inOrder.verify(mockTransportManager).getTransport(eq(addressGroupList.get(0)));
-    inOrder.verify(mockTransportManager).getTransport(eq(addressGroupList.get(1)));
-    inOrder.verifyNoMoreInteractions();
-    verifyNoMoreInteractions(mockInterimTransport);
-  }
-
-  @Test
-  public void pickBeforeNameResolutionError() {
-    Transport t1 = loadBalancer.pickTransport(null);
-    Transport t2 = loadBalancer.pickTransport(null);
-    assertSame(mockInterimTransportAsTransport, t1);
-    assertSame(mockInterimTransportAsTransport, t2);
-    verify(mockTransportManager).createInterimTransport();
-    verify(mockTransportManager, never()).getTransport(any(EquivalentAddressGroup.class));
-    verify(mockInterimTransport, times(2)).transport();
-
-    loadBalancer.handleNameResolutionError(Status.UNAVAILABLE);
-    verify(mockInterimTransport).closeWithError(any(Status.class));
-    // Ensure a shutdown after error closes without incident
-    loadBalancer.shutdown();
-    // Ensure a name resolution error after shutdown does nothing
-    loadBalancer.handleNameResolutionError(Status.UNAVAILABLE);
-    verifyNoMoreInteractions(mockInterimTransport);
-  }
-
-  @Test
-  public void pickBeforeShutdown() {
-    Transport t1 = loadBalancer.pickTransport(null);
-    Transport t2 = loadBalancer.pickTransport(null);
-    assertSame(mockInterimTransportAsTransport, t1);
-    assertSame(mockInterimTransportAsTransport, t2);
-    verify(mockTransportManager).createInterimTransport();
-    verify(mockTransportManager, never()).getTransport(any(EquivalentAddressGroup.class));
-    verify(mockInterimTransport, times(2)).transport();
-
-    loadBalancer.shutdown();
-    verify(mockInterimTransport).closeWithError(any(Status.class));
-    // Ensure double shutdown just returns immediately without closing again.
-    loadBalancer.shutdown();
-    verifyNoMoreInteractions(mockInterimTransport);
+  @After
+  public void tearDown() throws Exception {
+    verifyNoMoreInteractions(mockArgs);
   }
 
   @Test
   public void pickAfterResolved() throws Exception {
-    loadBalancer.handleResolvedAddresses(servers, Attributes.EMPTY);
-    InOrder inOrder = Mockito.inOrder(mockTransportManager);
-    for (int i = 0; i < 100; i++) {
-      assertSame(mockTransport0, loadBalancer.pickTransport(null));
-      inOrder.verify(mockTransportManager).getTransport(eq(addressGroupList.get(0)));
-      assertSame(mockTransport1, loadBalancer.pickTransport(null));
-      inOrder.verify(mockTransportManager).getTransport(eq(addressGroupList.get(1)));
-      assertSame(mockTransport2, loadBalancer.pickTransport(null));
-      inOrder.verify(mockTransportManager).getTransport(eq(addressGroupList.get(2)));
+    final Subchannel readySubchannel = subchannels.values().iterator().next();
+    loadBalancer.handleResolvedAddressGroups(servers, affinity);
+    loadBalancer.handleSubchannelState(readySubchannel, ConnectivityStateInfo.forNonError(READY));
+
+    verify(mockHelper, times(3)).createSubchannel(eagCaptor.capture(),
+        any(Attributes.class));
+
+    assertThat(eagCaptor.getAllValues()).containsAllIn(subchannels.keySet());
+    for (Subchannel subchannel : subchannels.values()) {
+      verify(subchannel).requestConnection();
+      verify(subchannel, never()).shutdown();
     }
-    inOrder.verifyNoMoreInteractions();
+
+    verify(mockHelper, times(2))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+
+    assertEquals(CONNECTING, stateCaptor.getAllValues().get(0));
+    assertEquals(READY, stateCaptor.getAllValues().get(1));
+    assertThat(pickerCaptor.getValue().getList()).containsExactly(readySubchannel);
+
+    verifyNoMoreInteractions(mockHelper);
+  }
+
+  @Test
+  public void pickAfterResolvedUpdatedHosts() throws Exception {
+    Subchannel removedSubchannel = mock(Subchannel.class);
+    Subchannel oldSubchannel = mock(Subchannel.class);
+    Subchannel newSubchannel = mock(Subchannel.class);
+
+    for (Subchannel subchannel : Lists.newArrayList(removedSubchannel, oldSubchannel,
+        newSubchannel)) {
+      when(subchannel.getAttributes()).thenReturn(Attributes.newBuilder().set(STATE_INFO,
+          new Ref<ConnectivityStateInfo>(
+              ConnectivityStateInfo.forNonError(READY))).build());
+    }
+
+    FakeSocketAddress removedAddr = new FakeSocketAddress("removed");
+    FakeSocketAddress oldAddr = new FakeSocketAddress("old");
+    FakeSocketAddress newAddr = new FakeSocketAddress("new");
+
+    final Map<EquivalentAddressGroup, Subchannel> subchannels2 = Maps.newHashMap();
+    subchannels2.put(new EquivalentAddressGroup(removedAddr), removedSubchannel);
+    subchannels2.put(new EquivalentAddressGroup(oldAddr), oldSubchannel);
+
+    List<EquivalentAddressGroup> currentServers =
+        Lists.newArrayList(
+            new EquivalentAddressGroup(removedAddr),
+            new EquivalentAddressGroup(oldAddr));
+
+    doAnswer(new Answer<Subchannel>() {
+      @Override
+      public Subchannel answer(InvocationOnMock invocation) throws Throwable {
+        Object[] args = invocation.getArguments();
+        return subchannels2.get(args[0]);
+      }
+    }).when(mockHelper).createSubchannel(any(EquivalentAddressGroup.class), any(Attributes.class));
+
+    loadBalancer.handleResolvedAddressGroups(currentServers, affinity);
+
+    InOrder inOrder = inOrder(mockHelper);
+
+    inOrder.verify(mockHelper).updateBalancingState(eq(READY), pickerCaptor.capture());
+    Picker picker = pickerCaptor.getValue();
+    assertNull(picker.getStatus());
+    assertThat(picker.getList()).containsExactly(removedSubchannel, oldSubchannel);
+
+    verify(removedSubchannel, times(1)).requestConnection();
+    verify(oldSubchannel, times(1)).requestConnection();
+
+    assertThat(loadBalancer.getSubchannels()).containsExactly(removedSubchannel,
+        oldSubchannel);
+
+    subchannels2.clear();
+    subchannels2.put(new EquivalentAddressGroup(oldAddr), oldSubchannel);
+    subchannels2.put(new EquivalentAddressGroup(newAddr), newSubchannel);
+
+    List<EquivalentAddressGroup> latestServers =
+        Lists.newArrayList(
+            new EquivalentAddressGroup(oldAddr),
+            new EquivalentAddressGroup(newAddr));
+
+    loadBalancer.handleResolvedAddressGroups(latestServers, affinity);
+
+    verify(newSubchannel, times(1)).requestConnection();
+    verify(removedSubchannel, times(1)).shutdown();
+
+    assertThat(loadBalancer.getSubchannels()).containsExactly(oldSubchannel,
+        newSubchannel);
+
+    verify(mockHelper, times(3)).createSubchannel(any(EquivalentAddressGroup.class),
+        any(Attributes.class));
+    inOrder.verify(mockHelper).updateBalancingState(eq(READY), pickerCaptor.capture());
+
+    picker = pickerCaptor.getValue();
+    assertNull(picker.getStatus());
+    assertThat(picker.getList()).containsExactly(oldSubchannel, newSubchannel);
+
+    verifyNoMoreInteractions(mockHelper);
+  }
+
+  @Test
+  public void pickAfterStateChange() throws Exception {
+    InOrder inOrder = inOrder(mockHelper);
+    loadBalancer.handleResolvedAddressGroups(servers, Attributes.EMPTY);
+    Subchannel subchannel = loadBalancer.getSubchannels().iterator().next();
+    Ref<ConnectivityStateInfo> subchannelStateInfo = subchannel.getAttributes().get(
+        STATE_INFO);
+
+    inOrder.verify(mockHelper).updateBalancingState(eq(CONNECTING), isA(Picker.class));
+    assertThat(subchannelStateInfo.value).isEqualTo(ConnectivityStateInfo.forNonError(IDLE));
+
+    loadBalancer.handleSubchannelState(subchannel,
+        ConnectivityStateInfo.forNonError(READY));
+    inOrder.verify(mockHelper).updateBalancingState(eq(READY), pickerCaptor.capture());
+    assertNull(pickerCaptor.getValue().getStatus());
+    assertThat(subchannelStateInfo.value).isEqualTo(
+        ConnectivityStateInfo.forNonError(READY));
+
+    Status error = Status.UNKNOWN.withDescription("¯\\_(ツ)_//¯");
+    loadBalancer.handleSubchannelState(subchannel,
+        ConnectivityStateInfo.forTransientFailure(error));
+    assertThat(subchannelStateInfo.value).isEqualTo(
+        ConnectivityStateInfo.forTransientFailure(error));
+    inOrder.verify(mockHelper).updateBalancingState(eq(CONNECTING), pickerCaptor.capture());
+    assertNull(pickerCaptor.getValue().getStatus());
+
+    loadBalancer.handleSubchannelState(subchannel,
+        ConnectivityStateInfo.forNonError(IDLE));
+    inOrder.verify(mockHelper).updateBalancingState(eq(CONNECTING), pickerCaptor.capture());
+    assertNull(pickerCaptor.getValue().getStatus());
+    assertThat(subchannelStateInfo.value).isEqualTo(
+        ConnectivityStateInfo.forNonError(IDLE));
+
+    verify(subchannel, times(2)).requestConnection();
+    verify(mockHelper, times(3)).createSubchannel(any(EquivalentAddressGroup.class),
+        any(Attributes.class));
+    verifyNoMoreInteractions(mockHelper);
+  }
+
+  @Test
+  public void pickerRoundRobin() throws Exception {
+    Subchannel subchannel = mock(Subchannel.class);
+    Subchannel subchannel1 = mock(Subchannel.class);
+    Subchannel subchannel2 = mock(Subchannel.class);
+
+    Picker picker = new Picker(Collections.unmodifiableList(Lists.<Subchannel>newArrayList(
+        subchannel, subchannel1, subchannel2)), null /* status */, null /* stickinessState */);
+
+    assertThat(picker.getList()).containsExactly(subchannel, subchannel1, subchannel2);
+
+    assertEquals(subchannel, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(subchannel1, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(subchannel2, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(subchannel, picker.pickSubchannel(mockArgs).getSubchannel());
+  }
+
+  @Test
+  public void pickerEmptyList() throws Exception {
+    Picker picker =
+        new Picker(Lists.<Subchannel>newArrayList(), Status.UNKNOWN, null /* stickinessState */);
+
+    assertEquals(null, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(Status.UNKNOWN,
+        picker.pickSubchannel(mockArgs).getStatus());
+  }
+
+  @Test
+  public void nameResolutionErrorWithNoChannels() throws Exception {
+    Status error = Status.NOT_FOUND.withDescription("nameResolutionError");
+    loadBalancer.handleNameResolutionError(error);
+    verify(mockHelper).updateBalancingState(eq(TRANSIENT_FAILURE), pickerCaptor.capture());
+    LoadBalancer.PickResult pickResult = pickerCaptor.getValue().pickSubchannel(mockArgs);
+    assertNull(pickResult.getSubchannel());
+    assertEquals(error, pickResult.getStatus());
+    verifyNoMoreInteractions(mockHelper);
+  }
+
+  @Test
+  public void nameResolutionErrorWithActiveChannels() throws Exception {
+    final Subchannel readySubchannel = subchannels.values().iterator().next();
+    loadBalancer.handleResolvedAddressGroups(servers, affinity);
+    loadBalancer.handleSubchannelState(readySubchannel, ConnectivityStateInfo.forNonError(READY));
+    loadBalancer.handleNameResolutionError(Status.NOT_FOUND.withDescription("nameResolutionError"));
+
+    verify(mockHelper, times(3)).createSubchannel(any(EquivalentAddressGroup.class),
+        any(Attributes.class));
+    verify(mockHelper, times(3))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+
+    Iterator<ConnectivityState> stateIterator = stateCaptor.getAllValues().iterator();
+    assertEquals(CONNECTING, stateIterator.next());
+    assertEquals(READY, stateIterator.next());
+    assertEquals(TRANSIENT_FAILURE, stateIterator.next());
+
+    LoadBalancer.PickResult pickResult = pickerCaptor.getValue().pickSubchannel(mockArgs);
+    assertEquals(readySubchannel, pickResult.getSubchannel());
+    assertEquals(Status.OK.getCode(), pickResult.getStatus().getCode());
+
+    LoadBalancer.PickResult pickResult2 = pickerCaptor.getValue().pickSubchannel(mockArgs);
+    assertEquals(readySubchannel, pickResult2.getSubchannel());
+    verifyNoMoreInteractions(mockHelper);
+  }
+
+  @Test
+  public void subchannelStateIsolation() throws Exception {
+    Iterator<Subchannel> subchannelIterator = subchannels.values().iterator();
+    Subchannel sc1 = subchannelIterator.next();
+    Subchannel sc2 = subchannelIterator.next();
+    Subchannel sc3 = subchannelIterator.next();
+
+    loadBalancer.handleResolvedAddressGroups(servers, Attributes.EMPTY);
+    verify(sc1, times(1)).requestConnection();
+    verify(sc2, times(1)).requestConnection();
+    verify(sc3, times(1)).requestConnection();
+
+    loadBalancer.handleSubchannelState(sc1, ConnectivityStateInfo.forNonError(READY));
+    loadBalancer.handleSubchannelState(sc2, ConnectivityStateInfo.forNonError(READY));
+    loadBalancer.handleSubchannelState(sc3, ConnectivityStateInfo.forNonError(READY));
+    loadBalancer.handleSubchannelState(sc2, ConnectivityStateInfo.forNonError(IDLE));
+    loadBalancer
+        .handleSubchannelState(sc3, ConnectivityStateInfo.forTransientFailure(Status.UNAVAILABLE));
+
+    verify(mockHelper, times(6))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+    Iterator<ConnectivityState> stateIterator = stateCaptor.getAllValues().iterator();
+    Iterator<Picker> pickers = pickerCaptor.getAllValues().iterator();
+    // The picker is incrementally updated as subchannels become READY
+    assertEquals(CONNECTING, stateIterator.next());
+    assertThat(pickers.next().getList()).isEmpty();
+    assertEquals(READY, stateIterator.next());
+    assertThat(pickers.next().getList()).containsExactly(sc1);
+    assertEquals(READY, stateIterator.next());
+    assertThat(pickers.next().getList()).containsExactly(sc1, sc2);
+    assertEquals(READY, stateIterator.next());
+    assertThat(pickers.next().getList()).containsExactly(sc1, sc2, sc3);
+    // The IDLE subchannel is dropped from the picker, but a reconnection is requested
+    assertEquals(READY, stateIterator.next());
+    assertThat(pickers.next().getList()).containsExactly(sc1, sc3);
+    verify(sc2, times(2)).requestConnection();
+    // The failing subchannel is dropped from the picker, with no requested reconnect
+    assertEquals(READY, stateIterator.next());
+    assertThat(pickers.next().getList()).containsExactly(sc1);
+    verify(sc3, times(1)).requestConnection();
+    assertThat(stateIterator.hasNext()).isFalse();
+    assertThat(pickers.hasNext()).isFalse();
+  }
+
+  @Test
+  public void noStickinessEnabled_withStickyHeader() {
+    loadBalancer.handleResolvedAddressGroups(servers, Attributes.EMPTY);
+    for (Subchannel subchannel : subchannels.values()) {
+      loadBalancer.handleSubchannelState(subchannel, ConnectivityStateInfo.forNonError(READY));
+    }
+    verify(mockHelper, times(4))
+        .updateBalancingState(any(ConnectivityState.class), pickerCaptor.capture());
+    Picker picker = pickerCaptor.getValue();
+
+    Key<String> stickinessKey = Key.of("my-sticky-key", Metadata.ASCII_STRING_MARSHALLER);
+    Metadata headerWithStickinessValue = new Metadata();
+    headerWithStickinessValue.put(stickinessKey, "my-sticky-value");
+    doReturn(headerWithStickinessValue).when(mockArgs).getHeaders();
+
+    Iterator<Subchannel> subchannelIterator = loadBalancer.getSubchannels().iterator();
+    Subchannel sc1 = subchannelIterator.next();
+    Subchannel sc2 = subchannelIterator.next();
+    Subchannel sc3 = subchannelIterator.next();
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(sc2, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(sc3, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    assertNull(loadBalancer.getStickinessMapForTest());
+  }
+
+  @Test
+  public void stickinessEnabled_withoutStickyHeader() {
+    Map<String, Object> serviceConfig = new HashMap<String, Object>();
+    serviceConfig.put("stickinessMetadataKey", "my-sticky-key");
+    Attributes attributes = Attributes.newBuilder()
+        .set(GrpcAttributes.NAME_RESOLVER_SERVICE_CONFIG, serviceConfig).build();
+    loadBalancer.handleResolvedAddressGroups(servers, attributes);
+    for (Subchannel subchannel : subchannels.values()) {
+      loadBalancer.handleSubchannelState(subchannel, ConnectivityStateInfo.forNonError(READY));
+    }
+    verify(mockHelper, times(4))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+    Picker picker = pickerCaptor.getValue();
+
+    doReturn(new Metadata()).when(mockArgs).getHeaders();
+
+    Iterator<Subchannel> subchannelIterator = loadBalancer.getSubchannels().iterator();
+    Subchannel sc1 = subchannelIterator.next();
+    Subchannel sc2 = subchannelIterator.next();
+    Subchannel sc3 = subchannelIterator.next();
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(sc2, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(sc3, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    verify(mockArgs, times(4)).getHeaders();
+    assertNotNull(loadBalancer.getStickinessMapForTest());
+    assertThat(loadBalancer.getStickinessMapForTest()).isEmpty();
+  }
+
+  @Test
+  public void stickinessEnabled_withStickyHeader() {
+    Map<String, Object> serviceConfig = new HashMap<String, Object>();
+    serviceConfig.put("stickinessMetadataKey", "my-sticky-key");
+    Attributes attributes = Attributes.newBuilder()
+        .set(GrpcAttributes.NAME_RESOLVER_SERVICE_CONFIG, serviceConfig).build();
+    loadBalancer.handleResolvedAddressGroups(servers, attributes);
+    for (Subchannel subchannel : subchannels.values()) {
+      loadBalancer.handleSubchannelState(subchannel, ConnectivityStateInfo.forNonError(READY));
+    }
+    verify(mockHelper, times(4))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+    Picker picker = pickerCaptor.getValue();
+
+    Key<String> stickinessKey = Key.of("my-sticky-key", Metadata.ASCII_STRING_MARSHALLER);
+    Metadata headerWithStickinessValue = new Metadata();
+    headerWithStickinessValue.put(stickinessKey, "my-sticky-value");
+    doReturn(headerWithStickinessValue).when(mockArgs).getHeaders();
+
+    Subchannel sc1 = loadBalancer.getSubchannels().iterator().next();
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    verify(mockArgs, atLeast(4)).getHeaders();
+    assertNotNull(loadBalancer.getStickinessMapForTest());
+    assertThat(loadBalancer.getStickinessMapForTest()).hasSize(1);
+  }
+
+  @Test
+  public void stickinessEnabled_withDifferentStickyHeaders() {
+    Map<String, Object> serviceConfig = new HashMap<String, Object>();
+    serviceConfig.put("stickinessMetadataKey", "my-sticky-key");
+    Attributes attributes = Attributes.newBuilder()
+        .set(GrpcAttributes.NAME_RESOLVER_SERVICE_CONFIG, serviceConfig).build();
+    loadBalancer.handleResolvedAddressGroups(servers, attributes);
+    for (Subchannel subchannel : subchannels.values()) {
+      loadBalancer.handleSubchannelState(subchannel, ConnectivityStateInfo.forNonError(READY));
+    }
+    verify(mockHelper, times(4))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+    Picker picker = pickerCaptor.getValue();
+
+    Key<String> stickinessKey = Key.of("my-sticky-key", Metadata.ASCII_STRING_MARSHALLER);
+    Metadata headerWithStickinessValue1 = new Metadata();
+    headerWithStickinessValue1.put(stickinessKey, "my-sticky-value");
+
+    Metadata headerWithStickinessValue2 = new Metadata();
+    headerWithStickinessValue2.put(stickinessKey, "my-sticky-value2");
+
+    Iterator<Subchannel> subchannelIterator = loadBalancer.getSubchannels().iterator();
+    Subchannel sc1 = subchannelIterator.next();
+    Subchannel sc2 = subchannelIterator.next();
+
+    doReturn(headerWithStickinessValue1).when(mockArgs).getHeaders();
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    doReturn(headerWithStickinessValue2).when(mockArgs).getHeaders();
+    assertEquals(sc2, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    doReturn(headerWithStickinessValue1).when(mockArgs).getHeaders();
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    doReturn(headerWithStickinessValue2).when(mockArgs).getHeaders();
+    assertEquals(sc2, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    verify(mockArgs, atLeast(4)).getHeaders();
+    assertNotNull(loadBalancer.getStickinessMapForTest());
+    assertThat(loadBalancer.getStickinessMapForTest()).hasSize(2);
+  }
+
+  @Test
+  public void stickiness_goToTransientFailure_pick_backToReady() {
+    Map<String, Object> serviceConfig = new HashMap<String, Object>();
+    serviceConfig.put("stickinessMetadataKey", "my-sticky-key");
+    Attributes attributes = Attributes.newBuilder()
+        .set(GrpcAttributes.NAME_RESOLVER_SERVICE_CONFIG, serviceConfig).build();
+    loadBalancer.handleResolvedAddressGroups(servers, attributes);
+    for (Subchannel subchannel : subchannels.values()) {
+      loadBalancer.handleSubchannelState(subchannel, ConnectivityStateInfo.forNonError(READY));
+    }
+    verify(mockHelper, times(4))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+    Picker picker = pickerCaptor.getValue();
+
+    Key<String> stickinessKey = Key.of("my-sticky-key", Metadata.ASCII_STRING_MARSHALLER);
+    Metadata headerWithStickinessValue = new Metadata();
+    headerWithStickinessValue.put(stickinessKey, "my-sticky-value");
+    doReturn(headerWithStickinessValue).when(mockArgs).getHeaders();
+
+    Iterator<Subchannel> subchannelIterator = loadBalancer.getSubchannels().iterator();
+    Subchannel sc1 = subchannelIterator.next();
+    Subchannel sc2 = subchannelIterator.next();
+
+    // first pick
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    // go to transient failure
+    loadBalancer
+        .handleSubchannelState(sc1, ConnectivityStateInfo.forTransientFailure(Status.UNAVAILABLE));
+
+    verify(mockHelper, times(5))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+    picker = pickerCaptor.getValue();
+    // second pick
+    assertEquals(sc2, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    // go back to ready
+    loadBalancer.handleSubchannelState(sc1, ConnectivityStateInfo.forNonError(READY));
+
+    verify(mockHelper, times(6))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+    picker = pickerCaptor.getValue();
+    // third pick
+    assertEquals(sc2, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    verify(mockArgs, atLeast(3)).getHeaders();
+    assertNotNull(loadBalancer.getStickinessMapForTest());
+    assertThat(loadBalancer.getStickinessMapForTest()).hasSize(1);
+  }
+
+  @Test
+  public void stickiness_goToTransientFailure_backToReady_pick() {
+    Map<String, Object> serviceConfig = new HashMap<String, Object>();
+    serviceConfig.put("stickinessMetadataKey", "my-sticky-key");
+    Attributes attributes = Attributes.newBuilder()
+        .set(GrpcAttributes.NAME_RESOLVER_SERVICE_CONFIG, serviceConfig).build();
+    loadBalancer.handleResolvedAddressGroups(servers, attributes);
+    for (Subchannel subchannel : subchannels.values()) {
+      loadBalancer.handleSubchannelState(subchannel, ConnectivityStateInfo.forNonError(READY));
+    }
+    verify(mockHelper, times(4))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+    Picker picker = pickerCaptor.getValue();
+
+    Key<String> stickinessKey = Key.of("my-sticky-key", Metadata.ASCII_STRING_MARSHALLER);
+    Metadata headerWithStickinessValue1 = new Metadata();
+    headerWithStickinessValue1.put(stickinessKey, "my-sticky-value");
+    doReturn(headerWithStickinessValue1).when(mockArgs).getHeaders();
+
+    Iterator<Subchannel> subchannelIterator = loadBalancer.getSubchannels().iterator();
+    Subchannel sc1 = subchannelIterator.next();
+    Subchannel sc2 = subchannelIterator.next();
+
+    // first pick
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    // go to transient failure
+    loadBalancer
+        .handleSubchannelState(sc1, ConnectivityStateInfo.forTransientFailure(Status.UNAVAILABLE));
+
+    Metadata headerWithStickinessValue2 = new Metadata();
+    headerWithStickinessValue2.put(stickinessKey, "my-sticky-value2");
+    doReturn(headerWithStickinessValue2).when(mockArgs).getHeaders();
+    verify(mockHelper, times(5))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+    picker = pickerCaptor.getValue();
+    // second pick with a different stickiness value
+    assertEquals(sc2, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    // go back to ready
+    loadBalancer.handleSubchannelState(sc1, ConnectivityStateInfo.forNonError(READY));
+
+    doReturn(headerWithStickinessValue1).when(mockArgs).getHeaders();
+    verify(mockHelper, times(6))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+    picker = pickerCaptor.getValue();
+    // third pick with my-sticky-value1
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    verify(mockArgs, atLeast(3)).getHeaders();
+    assertNotNull(loadBalancer.getStickinessMapForTest());
+    assertThat(loadBalancer.getStickinessMapForTest()).hasSize(2);
+  }
+
+  @Test
+  public void stickiness_oneSubchannelShutdown() {
+    Map<String, Object> serviceConfig = new HashMap<String, Object>();
+    serviceConfig.put("stickinessMetadataKey", "my-sticky-key");
+    Attributes attributes = Attributes.newBuilder()
+        .set(GrpcAttributes.NAME_RESOLVER_SERVICE_CONFIG, serviceConfig).build();
+    loadBalancer.handleResolvedAddressGroups(servers, attributes);
+    for (Subchannel subchannel : subchannels.values()) {
+      loadBalancer.handleSubchannelState(subchannel, ConnectivityStateInfo.forNonError(READY));
+    }
+    verify(mockHelper, times(4))
+        .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
+    Picker picker = pickerCaptor.getValue();
+
+    Key<String> stickinessKey = Key.of("my-sticky-key", Metadata.ASCII_STRING_MARSHALLER);
+    Metadata headerWithStickinessValue = new Metadata();
+    headerWithStickinessValue.put(stickinessKey, "my-sticky-value");
+    doReturn(headerWithStickinessValue).when(mockArgs).getHeaders();
+
+    Iterator<Subchannel> subchannelIterator = loadBalancer.getSubchannels().iterator();
+    Subchannel sc1 = subchannelIterator.next();
+    Subchannel sc2 = subchannelIterator.next();
+
+    assertEquals(sc1, picker.pickSubchannel(mockArgs).getSubchannel());
+
+    loadBalancer
+        .handleSubchannelState(sc1, ConnectivityStateInfo.forNonError(ConnectivityState.SHUTDOWN));
+
+    assertNull(loadBalancer.getStickinessMapForTest().get("my-sticky-value").value);
+
+    assertEquals(sc2, picker.pickSubchannel(mockArgs).getSubchannel());
+    assertThat(loadBalancer.getStickinessMapForTest()).hasSize(1);
+    verify(mockArgs, atLeast(2)).getHeaders();
+  }
+
+  @Test
+  public void stickiness_resolveTwice_metadataKeyChanged() {
+    Map<String, Object> serviceConfig1 = new HashMap<String, Object>();
+    serviceConfig1.put("stickinessMetadataKey", "my-sticky-key1");
+    Attributes attributes1 = Attributes.newBuilder()
+        .set(GrpcAttributes.NAME_RESOLVER_SERVICE_CONFIG, serviceConfig1).build();
+    loadBalancer.handleResolvedAddressGroups(servers, attributes1);
+    Map<String, ?> stickinessMap1 = loadBalancer.getStickinessMapForTest();
+
+    Map<String, Object> serviceConfig2 = new HashMap<String, Object>();
+    serviceConfig2.put("stickinessMetadataKey", "my-sticky-key2");
+    Attributes attributes2 = Attributes.newBuilder()
+        .set(GrpcAttributes.NAME_RESOLVER_SERVICE_CONFIG, serviceConfig2).build();
+    loadBalancer.handleResolvedAddressGroups(servers, attributes2);
+    Map<String, ?> stickinessMap2 = loadBalancer.getStickinessMapForTest();
+
+    assertNotSame(stickinessMap1, stickinessMap2);
+  }
+
+  @Test
+  public void stickiness_resolveTwice_metadataKeyUnChanged() {
+    Map<String, Object> serviceConfig1 = new HashMap<String, Object>();
+    serviceConfig1.put("stickinessMetadataKey", "my-sticky-key1");
+    Attributes attributes1 = Attributes.newBuilder()
+        .set(GrpcAttributes.NAME_RESOLVER_SERVICE_CONFIG, serviceConfig1).build();
+    loadBalancer.handleResolvedAddressGroups(servers, attributes1);
+    Map<String, ?> stickinessMap1 = loadBalancer.getStickinessMapForTest();
+
+    loadBalancer.handleResolvedAddressGroups(servers, attributes1);
+    Map<String, ?> stickinessMap2 = loadBalancer.getStickinessMapForTest();
+
+    assertSame(stickinessMap1, stickinessMap2);
   }
 
   private static class FakeSocketAddress extends SocketAddress {
@@ -193,6 +694,4 @@ public class RoundRobinLoadBalancerTest {
       return "FakeSocketAddress-" + name;
     }
   }
-
-  private static class Transport {}
 }

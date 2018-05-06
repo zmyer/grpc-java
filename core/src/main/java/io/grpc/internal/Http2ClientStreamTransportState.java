@@ -1,51 +1,34 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
 import com.google.common.base.Charsets;
 import com.google.common.base.Preconditions;
-
 import io.grpc.InternalMetadata;
+import io.grpc.InternalStatus;
 import io.grpc.Metadata;
 import io.grpc.Status;
-
 import java.nio.charset.Charset;
-
 import javax.annotation.Nullable;
 
 /**
  * Base implementation for client streams using HTTP2 as the transport.
  */
-public abstract class Http2ClientStreamTransportState extends AbstractClientStream2.TransportState {
+public abstract class Http2ClientStreamTransportState extends AbstractClientStream.TransportState {
 
   /**
    * Metadata marshaller for HTTP status lines.
@@ -60,7 +43,7 @@ public abstract class Http2ClientStreamTransportState extends AbstractClientStre
         /**
          * RFC 7231 says status codes are 3 digits long.
          *
-         * @see: <a href="https://tools.ietf.org/html/rfc7231#section-6">RFC 7231</a>
+         * @see <a href="https://tools.ietf.org/html/rfc7231#section-6">RFC 7231</a>
          */
         @Override
         public Integer parseAsciiString(byte[] serialized) {
@@ -81,15 +64,19 @@ public abstract class Http2ClientStreamTransportState extends AbstractClientStre
   private Charset errorCharset = Charsets.UTF_8;
   private boolean headersReceived;
 
-  protected Http2ClientStreamTransportState(int maxMessageSize, StatsTraceContext statsTraceCtx) {
-    super(maxMessageSize, statsTraceCtx);
+  protected Http2ClientStreamTransportState(
+      int maxMessageSize,
+      StatsTraceContext statsTraceCtx,
+      TransportTracer transportTracer) {
+    super(maxMessageSize, statsTraceCtx, transportTracer);
   }
 
   /**
    * Called to process a failure in HTTP/2 processing. It should notify the transport to cancel the
    * stream and call {@code transportReportStatus()}.
    */
-  protected abstract void http2ProcessingFailed(Status status, Metadata trailers);
+  protected abstract void http2ProcessingFailed(
+      Status status, boolean stopDelivery, Metadata trailers);
 
   /**
    * Called by subclasses whenever {@code Headers} are received from the transport.
@@ -147,9 +134,16 @@ public abstract class Http2ClientStreamTransportState extends AbstractClientStre
           + ReadableBuffers.readAsString(frame, errorCharset));
       frame.close();
       if (transportError.getDescription().length() > 1000 || endOfStream) {
-        http2ProcessingFailed(transportError, transportErrorMetadata);
+        http2ProcessingFailed(transportError, false, transportErrorMetadata);
       }
     } else {
+      if (!headersReceived) {
+        http2ProcessingFailed(
+            Status.INTERNAL.withDescription("headers not received before payload"),
+            false,
+            new Metadata());
+        return;
+      }
       inboundDataReceived(frame);
       if (endOfStream) {
         // This is a protocol violation as we expect to receive trailers.
@@ -176,7 +170,7 @@ public abstract class Http2ClientStreamTransportState extends AbstractClientStre
     }
     if (transportError != null) {
       transportError = transportError.augmentDescription("trailers: " + trailers);
-      http2ProcessingFailed(transportError, transportErrorMetadata);
+      http2ProcessingFailed(transportError, false, transportErrorMetadata);
     } else {
       Status status = statusFromTrailers(trailers);
       stripTransportDetails(trailers);
@@ -188,9 +182,9 @@ public abstract class Http2ClientStreamTransportState extends AbstractClientStre
    * Extract the response status from trailers.
    */
   private Status statusFromTrailers(Metadata trailers) {
-    Status status = trailers.get(Status.CODE_KEY);
+    Status status = trailers.get(InternalStatus.CODE_KEY);
     if (status != null) {
-      return status.withDescription(trailers.get(Status.MESSAGE_KEY));
+      return status.withDescription(trailers.get(InternalStatus.MESSAGE_KEY));
     }
     // No status; something is broken. Try to provide a resonanable error.
     if (headersReceived) {
@@ -232,7 +226,7 @@ public abstract class Http2ClientStreamTransportState extends AbstractClientStre
   private static Charset extractCharset(Metadata headers) {
     String contentType = headers.get(GrpcUtil.CONTENT_TYPE_KEY);
     if (contentType != null) {
-      String[] split = contentType.split("charset=");
+      String[] split = contentType.split("charset=", 2);
       try {
         return Charset.forName(split[split.length - 1].trim());
       } catch (Exception t) {
@@ -248,7 +242,7 @@ public abstract class Http2ClientStreamTransportState extends AbstractClientStre
    */
   private static void stripTransportDetails(Metadata metadata) {
     metadata.discardAll(HTTP2_STATUS);
-    metadata.discardAll(Status.CODE_KEY);
-    metadata.discardAll(Status.MESSAGE_KEY);
+    metadata.discardAll(InternalStatus.CODE_KEY);
+    metadata.discardAll(InternalStatus.MESSAGE_KEY);
   }
 }

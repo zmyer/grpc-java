@@ -1,37 +1,26 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
+import io.grpc.Attributes;
+import io.grpc.Deadline;
+import io.grpc.DecompressorRegistry;
 import io.grpc.Status;
+import javax.annotation.Nonnull;
 
 /**
  * Extension of {@link Stream} to support client-side termination semantics.
@@ -66,6 +55,20 @@ public interface ClientStream extends Stream {
   void setAuthority(String authority);
 
   /**
+   * Enables full-stream decompression, allowing the client stream to use {@link
+   * GzipInflatingBuffer} to decode inbound GZIP compressed streams.
+   */
+  void setFullStreamDecompression(boolean fullStreamDecompression);
+
+  /**
+   * Sets the registry to find a decompressor for the framer. May only be called before {@link
+   * #start}. If the transport does not support compression, this may do nothing.
+   *
+   * @param decompressorRegistry the registry of decompressors for decoding responses
+   */
+  void setDecompressorRegistry(DecompressorRegistry decompressorRegistry);
+
+  /**
    * Starts stream. This method may only be called once.  It is safe to do latent initialization of
    * the stream up until {@link #start} is called.
    *
@@ -74,4 +77,24 @@ public interface ClientStream extends Stream {
    * @param listener non-{@code null} listener of stream events
    */
   void start(ClientStreamListener listener);
+
+  /**
+   * Sets the max size accepted from the remote endpoint.
+   */
+  void setMaxInboundMessageSize(int maxSize);
+
+  /**
+   * Sets the max size sent to the remote endpoint.
+   */
+  void setMaxOutboundMessageSize(int maxSize);
+
+  /**
+   * Sets the effective deadline of the RPC.
+   */
+  void setDeadline(@Nonnull Deadline deadline);
+
+  /**
+   * Attributes that the stream holds at the current moment.
+   */
+  Attributes getAttributes();
 }

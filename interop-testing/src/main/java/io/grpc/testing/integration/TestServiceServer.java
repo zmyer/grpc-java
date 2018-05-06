@@ -1,78 +1,62 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.testing.integration;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.MoreExecutors;
-
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
+import io.grpc.alts.AltsServerBuilder;
+import io.grpc.internal.testing.TestUtils;
 import io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.NettyServerBuilder;
-import io.grpc.testing.TestUtils;
 import io.netty.handler.ssl.SslContext;
-
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Server that manages startup/shutdown of a single {@code TestService}.
- */
+/** Server that manages startup/shutdown of a single {@code TestService}. */
 public class TestServiceServer {
-  /**
-   * The main application allowing this server to be launched from the command line.
-   */
+  /** The main application allowing this server to be launched from the command line. */
   public static void main(String[] args) throws Exception {
+    // Let Netty use Conscrypt if it is available.
+    TestUtils.installConscryptIfAvailable();
     final TestServiceServer server = new TestServiceServer();
     server.parseArgs(args);
     if (server.useTls) {
       System.out.println(
           "\nUsing fake CA for TLS certificate. Test clients should expect host\n"
-          + "*.test.google.fr and our test CA. For the Java test client binary, use:\n"
-          + "--server_host_override=foo.test.google.fr --use_test_ca=true\n");
+              + "*.test.google.fr and our test CA. For the Java test client binary, use:\n"
+              + "--server_host_override=foo.test.google.fr --use_test_ca=true\n");
     }
 
-    Runtime.getRuntime().addShutdownHook(new Thread() {
-      @Override
-      public void run() {
-        try {
-          System.out.println("Shutting down");
-          server.stop();
-        } catch (Exception e) {
-          e.printStackTrace();
-        }
-      }
-    });
+    Runtime.getRuntime()
+        .addShutdownHook(
+            new Thread() {
+              @Override
+              public void run() {
+                try {
+                  System.out.println("Shutting down");
+                  server.stop();
+                } catch (Exception e) {
+                  e.printStackTrace();
+                }
+              }
+            });
     server.start();
     System.out.println("Server started on port " + server.port);
     server.blockUntilShutdown();
@@ -80,6 +64,7 @@ public class TestServiceServer {
 
   private int port = 8080;
   private boolean useTls = true;
+  private boolean useAlts = false;
 
   private ScheduledExecutorService executor;
   private Server server;
@@ -109,6 +94,8 @@ public class TestServiceServer {
         port = Integer.parseInt(value);
       } else if ("use_tls".equals(key)) {
         useTls = Boolean.parseBoolean(value);
+      } else if ("use_alts".equals(key)) {
+        useAlts = Boolean.parseBoolean(value);
       } else if ("grpc_version".equals(key)) {
         if (!"2".equals(value)) {
           System.err.println("Only grpc version 2 is supported");
@@ -121,13 +108,18 @@ public class TestServiceServer {
         break;
       }
     }
+    if (useAlts) {
+      useTls = false;
+    }
     if (usage) {
       TestServiceServer s = new TestServiceServer();
       System.out.println(
           "Usage: [ARGS...]"
-          + "\n"
-          + "\n  --port=PORT           Port to connect to. Default " + s.port
-          + "\n  --use_tls=true|false  Whether to use TLS. Default " + s.useTls
+              + "\n"
+              + "\n  --port=PORT           Port to connect to. Default " + s.port
+              + "\n  --use_tls=true|false  Whether to use TLS. Default " + s.useTls
+              + "\n  --use_alts=true|false Whether to use ALTS. Enable ALTS will disable TLS."
+              + "\n                        Default " + s.useAlts
       );
       System.exit(1);
     }
@@ -137,17 +129,31 @@ public class TestServiceServer {
   void start() throws Exception {
     executor = Executors.newSingleThreadScheduledExecutor();
     SslContext sslContext = null;
-    if (useTls) {
-      sslContext = GrpcSslContexts.forServer(
-              TestUtils.loadCert("server1.pem"), TestUtils.loadCert("server1.key")).build();
+    if (useAlts) {
+      server =
+          AltsServerBuilder.forPort(port)
+              .addService(
+                  ServerInterceptors.intercept(
+                      new TestServiceImpl(executor), TestServiceImpl.interceptors()))
+              .build()
+              .start();
+    } else {
+      if (useTls) {
+        sslContext =
+            GrpcSslContexts.forServer(
+                    TestUtils.loadCert("server1.pem"), TestUtils.loadCert("server1.key"))
+                .build();
+      }
+      server =
+          NettyServerBuilder.forPort(port)
+              .sslContext(sslContext)
+              .maxInboundMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
+              .addService(
+                  ServerInterceptors.intercept(
+                      new TestServiceImpl(executor), TestServiceImpl.interceptors()))
+              .build()
+              .start();
     }
-    server = NettyServerBuilder.forPort(port)
-        .sslContext(sslContext)
-        .maxMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
-        .addService(ServerInterceptors.intercept(
-            new TestServiceImpl(executor),
-            TestUtils.echoRequestHeadersInterceptor(Util.METADATA_KEY)))
-        .build().start();
   }
 
   @VisibleForTesting
@@ -164,9 +170,7 @@ public class TestServiceServer {
     return server.getPort();
   }
 
-  /**
-   * Await termination on the main thread since the grpc library uses daemon threads.
-   */
+  /** Await termination on the main thread since the grpc library uses daemon threads. */
   private void blockUntilShutdown() throws InterruptedException {
     if (server != null) {
       server.awaitTermination();

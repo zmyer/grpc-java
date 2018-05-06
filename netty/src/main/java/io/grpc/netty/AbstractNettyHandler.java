@@ -1,52 +1,32 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.netty;
 
-import static io.netty.buffer.Unpooled.directBuffer;
-import static io.netty.buffer.Unpooled.unreleasableBuffer;
 import static io.netty.handler.codec.http2.Http2CodecUtil.getEmbeddedHttp2Exception;
-import static java.util.concurrent.TimeUnit.SECONDS;
 
 import com.google.common.annotations.VisibleForTesting;
-
-import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http2.Http2ConnectionDecoder;
 import io.netty.handler.codec.http2.Http2ConnectionEncoder;
 import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.codec.http2.Http2LocalFlowController;
 import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.Http2Stream;
-
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -54,23 +34,23 @@ import java.util.concurrent.TimeUnit;
  * shutdown the connection) as well as sending the initial connection window at startup.
  */
 abstract class AbstractNettyHandler extends GrpcHttp2ConnectionHandler {
-  private static long GRACEFUL_SHUTDOWN_TIMEOUT = SECONDS.toMillis(5);
+  private static final long GRACEFUL_SHUTDOWN_NO_TIMEOUT = -1;
   private boolean autoTuneFlowControlOn = false;
   private int initialConnectionWindow;
   private ChannelHandlerContext ctx;
   private final FlowControlPinger flowControlPing = new FlowControlPinger();
 
-  private static final int BDP_MEASUREMENT_PING = 1234;
-  private static final ByteBuf payloadBuf =
-      unreleasableBuffer(directBuffer(8).writeLong(BDP_MEASUREMENT_PING));
+  private static final long BDP_MEASUREMENT_PING = 1234;
 
-  AbstractNettyHandler(Http2ConnectionDecoder decoder,
-                       Http2ConnectionEncoder encoder,
-                       Http2Settings initialSettings) {
-    super(decoder, encoder, initialSettings);
+  AbstractNettyHandler(
+      ChannelPromise channelUnused,
+      Http2ConnectionDecoder decoder,
+      Http2ConnectionEncoder encoder,
+      Http2Settings initialSettings) {
+    super(channelUnused, decoder, encoder, initialSettings);
 
-    // Set the timeout for graceful shutdown.
-    gracefulShutdownTimeoutMillis(GRACEFUL_SHUTDOWN_TIMEOUT);
+    // During a graceful shutdown, wait until all streams are closed.
+    gracefulShutdownTimeoutMillis(GRACEFUL_SHUTDOWN_NO_TIMEOUT);
 
     // Extract the connection window from the settings if it was set.
     this.initialConnectionWindow = initialSettings.initialWindowSize() == null ? -1 :
@@ -98,7 +78,7 @@ abstract class AbstractNettyHandler extends GrpcHttp2ConnectionHandler {
     if (embedded == null) {
       // There was no embedded Http2Exception, assume it's a connection error. Subclasses are
       // responsible for storing the appropriate status and shutting down the connection.
-      onError(ctx, cause);
+      onError(ctx, /* outbound= */ false, cause);
     } else {
       super.exceptionCaught(ctx, cause);
     }
@@ -145,7 +125,7 @@ abstract class AbstractNettyHandler extends GrpcHttp2ConnectionHandler {
     private float lastBandwidth; // bytes per second
     private long lastPingTime;
 
-    public int payload() {
+    public long payload() {
       return BDP_MEASUREMENT_PING;
     }
 
@@ -202,7 +182,7 @@ abstract class AbstractNettyHandler extends GrpcHttp2ConnectionHandler {
     private void sendPing(ChannelHandlerContext ctx) {
       setDataSizeSincePing(0);
       lastPingTime = System.nanoTime();
-      encoder().writePing(ctx, false, payloadBuf.slice(), ctx.newPromise());
+      encoder().writePing(ctx, false, BDP_MEASUREMENT_PING, ctx.newPromise());
       pingCount++;
     }
 

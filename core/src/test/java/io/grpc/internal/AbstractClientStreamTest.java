@@ -1,50 +1,51 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
+import static com.google.common.truth.Truth.assertThat;
+import static io.grpc.internal.ClientStreamListener.RpcProgress.PROCESSED;
 import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.isA;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.same;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
+import io.grpc.Attributes;
 import io.grpc.Codec;
+import io.grpc.Deadline;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.Status.Code;
-import io.grpc.internal.AbstractStream.Phase;
+import io.grpc.StreamTracer;
+import io.grpc.internal.AbstractClientStream.TransportState;
 import io.grpc.internal.MessageFramerTest.ByteWritableBuffer;
-
+import io.grpc.internal.testing.TestClientStreamTracer;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.concurrent.TimeUnit;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -52,9 +53,11 @@ import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
-import org.mockito.Captor;
+import org.mockito.Matchers;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
+import org.mockito.invocation.InvocationOnMock;
+import org.mockito.stubbing.Answer;
 
 /**
  * Test for {@link AbstractClientStream}.  This class tries to test functionality in
@@ -65,12 +68,23 @@ public class AbstractClientStreamTest {
 
   @Rule public final ExpectedException thrown = ExpectedException.none();
 
+  private final StatsTraceContext statsTraceCtx = StatsTraceContext.NOOP;
+  private final TransportTracer transportTracer = new TransportTracer();
   @Mock private ClientStreamListener mockListener;
-  @Captor private ArgumentCaptor<Status> statusCaptor;
 
   @Before
   public void setUp() {
     MockitoAnnotations.initMocks(this);
+
+    doAnswer(new Answer<Void>() {
+      @Override
+      public Void answer(InvocationOnMock invocation) throws Throwable {
+        StreamListener.MessageProducer producer =
+            (StreamListener.MessageProducer) invocation.getArguments()[0];
+        while (producer.next() != null) {}
+        return null;
+      }
+    }).when(mockListener).messagesAvailable(Matchers.<StreamListener.MessageProducer>any());
   }
 
   private final WritableBufferAllocator allocator = new WritableBufferAllocator() {
@@ -84,7 +98,8 @@ public class AbstractClientStreamTest {
   public void cancel_doNotAcceptOk() {
     for (Code code : Code.values()) {
       ClientStreamListener listener = new NoopClientStreamListener();
-      AbstractClientStream stream = new BaseAbstractClientStream(allocator);
+      AbstractClientStream stream =
+          new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
       stream.start(listener);
       if (code != Code.OK) {
         stream.cancel(Status.fromCodeValue(code.value()));
@@ -102,7 +117,8 @@ public class AbstractClientStreamTest {
   @Test
   public void cancel_failsOnNull() {
     ClientStreamListener listener = new NoopClientStreamListener();
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
     stream.start(listener);
     thrown.expect(NullPointerException.class);
 
@@ -111,22 +127,26 @@ public class AbstractClientStreamTest {
 
   @Test
   public void cancel_notifiesOnlyOnce() {
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator) {
+    final BaseTransportState state = new BaseTransportState(statsTraceCtx, transportTracer);
+    AbstractClientStream stream = new BaseAbstractClientStream(allocator, state, new BaseSink() {
       @Override
-      protected void sendCancel(Status errorStatus) {
-        transportReportStatus(errorStatus, true/*stop delivery*/, new Metadata());
+      public void cancel(Status errorStatus) {
+        // Cancel should eventually result in a transportReportStatus on the transport thread
+        state.transportReportStatus(errorStatus, true/*stop delivery*/, new Metadata());
       }
-    };
+    }, statsTraceCtx, transportTracer);
     stream.start(mockListener);
 
     stream.cancel(Status.DEADLINE_EXCEEDED);
+    stream.cancel(Status.DEADLINE_EXCEEDED);
 
-    verify(mockListener).closed(isA(Status.class), isA(Metadata.class));
+    verify(mockListener).closed(any(Status.class), same(PROCESSED), any(Metadata.class));
   }
 
   @Test
   public void startFailsOnNullListener() {
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
 
     thrown.expect(NullPointerException.class);
 
@@ -135,149 +155,357 @@ public class AbstractClientStreamTest {
 
   @Test
   public void cantCallStartTwice() {
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
     stream.start(mockListener);
     thrown.expect(IllegalStateException.class);
 
     stream.start(mockListener);
-  }
-
-  @Test
-  public void deframeFailed_notifiesListener() {
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator) {
-      @Override
-      protected void sendCancel(Status errorStatus) {
-        transportReportStatus(errorStatus, true/*stop delivery*/, new Metadata());
-      }
-    };
-    stream.start(mockListener);
-
-    stream.deframeFailed(new RuntimeException("something bad"));
-
-    verify(mockListener).closed(statusCaptor.capture(), isA(Metadata.class));
-    assertEquals(Code.INTERNAL, statusCaptor.getValue().getCode());
   }
 
   @Test
   public void inboundDataReceived_failsOnNullFrame() {
     ClientStreamListener listener = new NoopClientStreamListener();
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
     stream.start(listener);
+
+    TransportState state = stream.transportState();
+
     thrown.expect(NullPointerException.class);
-
-    stream.inboundDataReceived(null);
-  }
-
-  @Test
-  public void inboundDataReceived_failsOnNoHeaders() {
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
-    stream.start(mockListener);
-    stream.inboundPhase(Phase.HEADERS);
-
-    stream.inboundDataReceived(ReadableBuffers.empty());
-
-    verify(mockListener).closed(statusCaptor.capture(), isA(Metadata.class));
-    assertEquals(Code.INTERNAL, statusCaptor.getValue().getCode());
+    state.inboundDataReceived(null);
   }
 
   @Test
   public void inboundHeadersReceived_notifiesListener() {
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
     stream.start(mockListener);
     Metadata headers = new Metadata();
 
-    stream.inboundHeadersReceived(headers);
+    stream.transportState().inboundHeadersReceived(headers);
     verify(mockListener).headersRead(headers);
   }
 
   @Test
-  public void inboundHeadersReceived_failsOnPhaseStatus() {
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
+  public void inboundHeadersReceived_failsIfStatusReported() {
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
     stream.start(mockListener);
-    Metadata headers = new Metadata();
-    stream.inboundPhase(Phase.STATUS);
+    stream.transportState().transportReportStatus(Status.CANCELLED, false, new Metadata());
+
+    TransportState state = stream.transportState();
 
     thrown.expect(IllegalStateException.class);
-
-    stream.inboundHeadersReceived(headers);
+    state.inboundHeadersReceived(new Metadata());
   }
 
   @Test
-  public void inboundHeadersReceived_succeedsOnPhaseMessage() {
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
+  public void inboundHeadersReceived_acceptsGzipContentEncoding() {
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
     stream.start(mockListener);
     Metadata headers = new Metadata();
-    stream.inboundPhase(Phase.MESSAGE);
+    headers.put(GrpcUtil.CONTENT_ENCODING_KEY, "gzip");
 
-    stream.inboundHeadersReceived(headers);
+    stream.setFullStreamDecompression(true);
+    stream.transportState().inboundHeadersReceived(headers);
 
     verify(mockListener).headersRead(headers);
   }
 
   @Test
-  public void inboundHeadersReceived_acceptsGzipEncoding() {
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
+  // https://tools.ietf.org/html/rfc7231#section-3.1.2.1
+  public void inboundHeadersReceived_contentEncodingIsCaseInsensitive() {
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
+    stream.start(mockListener);
+    Metadata headers = new Metadata();
+    headers.put(GrpcUtil.CONTENT_ENCODING_KEY, "gZIp");
+
+    stream.setFullStreamDecompression(true);
+    stream.transportState().inboundHeadersReceived(headers);
+
+    verify(mockListener).headersRead(headers);
+  }
+
+  @Test
+  public void inboundHeadersReceived_failsOnUnrecognizedContentEncoding() {
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
+    stream.start(mockListener);
+    Metadata headers = new Metadata();
+    headers.put(GrpcUtil.CONTENT_ENCODING_KEY, "not-a-real-compression-method");
+
+    stream.setFullStreamDecompression(true);
+    stream.transportState().inboundHeadersReceived(headers);
+
+    verifyNoMoreInteractions(mockListener);
+    Throwable t = ((BaseTransportState) stream.transportState()).getDeframeFailedCause();
+    assertEquals(Status.INTERNAL.getCode(), Status.fromThrowable(t).getCode());
+    assertTrue(
+        "unexpected deframe failed description",
+        Status.fromThrowable(t)
+            .getDescription()
+            .startsWith("Can't find full stream decompressor for"));
+  }
+
+  @Test
+  public void inboundHeadersReceived_disallowsContentAndMessageEncoding() {
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
+    stream.start(mockListener);
+    Metadata headers = new Metadata();
+    headers.put(GrpcUtil.CONTENT_ENCODING_KEY, "gzip");
+    headers.put(GrpcUtil.MESSAGE_ENCODING_KEY, new Codec.Gzip().getMessageEncoding());
+
+    stream.setFullStreamDecompression(true);
+    stream.transportState().inboundHeadersReceived(headers);
+
+    verifyNoMoreInteractions(mockListener);
+    Throwable t = ((BaseTransportState) stream.transportState()).getDeframeFailedCause();
+    assertEquals(Status.INTERNAL.getCode(), Status.fromThrowable(t).getCode());
+    assertTrue(
+        "unexpected deframe failed description",
+        Status.fromThrowable(t)
+            .getDescription()
+            .equals("Full stream and gRPC message encoding cannot both be set"));
+  }
+
+  @Test
+  public void inboundHeadersReceived_acceptsGzipMessageEncoding() {
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
     stream.start(mockListener);
     Metadata headers = new Metadata();
     headers.put(GrpcUtil.MESSAGE_ENCODING_KEY, new Codec.Gzip().getMessageEncoding());
 
-    stream.inboundHeadersReceived(headers);
+    stream.transportState().inboundHeadersReceived(headers);
     verify(mockListener).headersRead(headers);
   }
 
   @Test
-  public void inboundHeadersReceived_acceptsIdentityEncoding() {
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
+  public void inboundHeadersReceived_acceptsIdentityMessageEncoding() {
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
     stream.start(mockListener);
     Metadata headers = new Metadata();
     headers.put(GrpcUtil.MESSAGE_ENCODING_KEY, Codec.Identity.NONE.getMessageEncoding());
 
-    stream.inboundHeadersReceived(headers);
+    stream.transportState().inboundHeadersReceived(headers);
     verify(mockListener).headersRead(headers);
   }
 
   @Test
+  public void inboundHeadersReceived_failsOnUnrecognizedMessageEncoding() {
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
+    stream.start(mockListener);
+    Metadata headers = new Metadata();
+    headers.put(GrpcUtil.MESSAGE_ENCODING_KEY, "not-a-real-compression-method");
+
+    stream.transportState().inboundHeadersReceived(headers);
+
+    verifyNoMoreInteractions(mockListener);
+    Throwable t = ((BaseTransportState) stream.transportState()).getDeframeFailedCause();
+    assertEquals(Status.INTERNAL.getCode(), Status.fromThrowable(t).getCode());
+    assertTrue(
+        "unexpected deframe failed description",
+        Status.fromThrowable(t).getDescription().startsWith("Can't find decompressor for"));
+  }
+
+  @Test
   public void rstStreamClosesStream() {
-    AbstractClientStream stream = new BaseAbstractClientStream(allocator);
+    AbstractClientStream stream =
+        new BaseAbstractClientStream(allocator, statsTraceCtx, transportTracer);
     stream.start(mockListener);
     // The application will call request when waiting for a message, which will in turn call this
     // on the transport thread.
-    stream.requestMessagesFromDeframer(1);
+    stream.transportState().requestMessagesFromDeframer(1);
     // Send first byte of 2 byte message
-    stream.deframe(ReadableBuffers.wrap(new byte[] {0, 0, 0, 0, 2, 1}), false);
+    stream.transportState().deframe(ReadableBuffers.wrap(new byte[] {0, 0, 0, 0, 2, 1}));
     Status status = Status.INTERNAL;
     // Simulate getting a reset
-    stream.transportReportStatus(status, false /*stop delivery*/, new Metadata());
+    stream.transportState().transportReportStatus(status, false /*stop delivery*/, new Metadata());
 
-    assertTrue(stream.isClosed());
+    verify(mockListener).closed(any(Status.class), same(PROCESSED), any(Metadata.class));
+  }
+  
+  @Test
+  public void getRequest() {
+    AbstractClientStream.Sink sink = mock(AbstractClientStream.Sink.class);
+    final TestClientStreamTracer tracer = new TestClientStreamTracer();
+    StatsTraceContext statsTraceCtx = new StatsTraceContext(new StreamTracer[]{tracer});
+    AbstractClientStream stream = new BaseAbstractClientStream(
+        allocator,
+        new BaseTransportState(statsTraceCtx, transportTracer),
+        sink,
+        statsTraceCtx,
+        transportTracer,
+        true);
+    stream.start(mockListener);
+    stream.writeMessage(new ByteArrayInputStream(new byte[1]));
+    // writeHeaders will be delayed since we're sending a GET request.
+    verify(sink, never()).writeHeaders(any(Metadata.class), any(byte[].class));
+    // halfClose will trigger writeHeaders.
+    stream.halfClose();
+    ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+    verify(sink).writeHeaders(any(Metadata.class), payloadCaptor.capture());
+    assertTrue(payloadCaptor.getValue() != null);
+    // GET requests don't have BODY.
+    verify(sink, never())
+        .writeFrame(
+            any(WritableBuffer.class), any(Boolean.class), any(Boolean.class), any(Integer.class));
+    assertThat(tracer.nextOutboundEvent()).isEqualTo("outboundMessage(0)");
+    assertThat(tracer.nextOutboundEvent()).matches("outboundMessageSent\\(0, [0-9]+, [0-9]+\\)");
+    assertNull(tracer.nextOutboundEvent());
+    assertNull(tracer.nextInboundEvent());
+    assertEquals(1, tracer.getOutboundWireSize());
+    assertEquals(1, tracer.getOutboundUncompressedSize());
+  }
+
+  @Test
+  public void writeMessage_closesStream() throws IOException {
+    AbstractClientStream.Sink sink = mock(AbstractClientStream.Sink.class);
+    final TestClientStreamTracer tracer = new TestClientStreamTracer();
+    StatsTraceContext statsTraceCtx = new StatsTraceContext(new StreamTracer[] {tracer});
+    AbstractClientStream stream = new BaseAbstractClientStream(
+        allocator,
+        new BaseTransportState(statsTraceCtx, transportTracer),
+        sink,
+        statsTraceCtx,
+        transportTracer,
+        true);
+    stream.start(mockListener);
+    InputStream input = mock(InputStream.class, delegatesTo(new ByteArrayInputStream(new byte[1])));
+    stream.writeMessage(input);
+    verify(input).close();
+  }
+
+  @Test
+  public void deadlineTimeoutPopulatedToHeaders() {
+    AbstractClientStream.Sink sink = mock(AbstractClientStream.Sink.class);
+    ClientStream stream = new BaseAbstractClientStream(
+        allocator, new BaseTransportState(statsTraceCtx, transportTracer), sink, statsTraceCtx,
+        transportTracer);
+
+    stream.setDeadline(Deadline.after(1, TimeUnit.SECONDS));
+    stream.start(mockListener);
+
+    ArgumentCaptor<Metadata> headersCaptor = ArgumentCaptor.forClass(Metadata.class);
+    verify(sink).writeHeaders(headersCaptor.capture(), any(byte[].class));
+
+    Metadata headers = headersCaptor.getValue();
+    assertTrue(headers.containsKey(GrpcUtil.TIMEOUT_KEY));
+    assertThat(headers.get(GrpcUtil.TIMEOUT_KEY).longValue())
+        .isLessThan(TimeUnit.SECONDS.toNanos(1));
+    assertThat(headers.get(GrpcUtil.TIMEOUT_KEY).longValue())
+        .isGreaterThan(TimeUnit.MILLISECONDS.toNanos(600));
   }
 
   /**
    * No-op base class for testing.
    */
   private static class BaseAbstractClientStream extends AbstractClientStream {
-    protected BaseAbstractClientStream(WritableBufferAllocator allocator) {
-      super(allocator, DEFAULT_MAX_MESSAGE_SIZE, StatsTraceContext.NOOP);
+    private final TransportState state;
+    private final Sink sink;
+
+    public BaseAbstractClientStream(
+        WritableBufferAllocator allocator,
+        StatsTraceContext statsTraceCtx,
+        TransportTracer transportTracer) {
+      this(
+          allocator,
+          new BaseTransportState(statsTraceCtx, transportTracer),
+          new BaseSink(),
+          statsTraceCtx,
+          transportTracer);
+    }
+
+    public BaseAbstractClientStream(
+        WritableBufferAllocator allocator,
+        TransportState state,
+        Sink sink,
+        StatsTraceContext statsTraceCtx,
+        TransportTracer transportTracer) {
+      this(allocator, state, sink, statsTraceCtx, transportTracer, false);
+    }
+
+    public BaseAbstractClientStream(
+        WritableBufferAllocator allocator,
+        TransportState state,
+        Sink sink,
+        StatsTraceContext statsTraceCtx,
+        TransportTracer transportTracer,
+        boolean useGet) {
+      super(allocator, statsTraceCtx, transportTracer, new Metadata(), useGet);
+      this.state = state;
+      this.sink = sink;
+    }
+
+    @Override
+    protected Sink abstractClientStreamSink() {
+      return sink;
+    }
+
+    @Override
+    public TransportState transportState() {
+      return state;
     }
 
     @Override
     public void setAuthority(String authority) {}
 
     @Override
+    public void setMaxInboundMessageSize(int maxSize) {}
+
+    @Override
+    public void setMaxOutboundMessageSize(int maxSize) {}
+
+    @Override
+    public Attributes getAttributes() {
+      return Attributes.EMPTY;
+    }
+  }
+
+  private static class BaseSink implements AbstractClientStream.Sink {
+    @Override
+    public void writeHeaders(Metadata headers, byte[] payload) {}
+
+    @Override
     public void request(int numMessages) {}
 
     @Override
-    protected void sendFrame(WritableBuffer frame, boolean endOfStream, boolean flush) {}
+    public void writeFrame(
+        WritableBuffer frame, boolean endOfStream, boolean flush, int numMessages) {}
 
     @Override
-    protected void sendCancel(Status reason) {}
+    public void cancel(Status reason) {}
+  }
 
-    @Override
-    public int id() {
-      return ABSENT_ID;
+  private static class BaseTransportState extends AbstractClientStream.TransportState {
+    private Throwable deframeFailedCause;
+
+    private Throwable getDeframeFailedCause() {
+      return deframeFailedCause;
+    }
+
+    public BaseTransportState(StatsTraceContext statsTraceCtx, TransportTracer transportTracer) {
+      super(DEFAULT_MAX_MESSAGE_SIZE, statsTraceCtx, transportTracer);
     }
 
     @Override
-    protected void returnProcessedBytes(int processedBytes) {}
+    public void deframeFailed(Throwable cause) {
+      assertNull("deframeFailed already called", deframeFailedCause);
+      deframeFailedCause = cause;
+    }
+
+    @Override
+    public void bytesRead(int processedBytes) {}
+
+    @Override
+    public void runOnTransportThread(Runnable r) {
+      r.run();
+    }
   }
 }

@@ -1,76 +1,100 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.okhttp;
 
-import static io.grpc.internal.GrpcUtil.DEFAULT_KEEPALIVE_DELAY_NANOS;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static io.grpc.internal.GrpcUtil.DEFAULT_KEEPALIVE_TIMEOUT_NANOS;
+import static io.grpc.internal.GrpcUtil.DEFAULT_KEEPALIVE_TIME_NANOS;
+import static io.grpc.internal.GrpcUtil.KEEPALIVE_TIME_NANOS_DISABLED;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-
-import com.squareup.okhttp.CipherSuite;
-import com.squareup.okhttp.ConnectionSpec;
-import com.squareup.okhttp.TlsVersion;
-
 import io.grpc.Attributes;
 import io.grpc.ExperimentalApi;
 import io.grpc.Internal;
 import io.grpc.NameResolver;
 import io.grpc.internal.AbstractManagedChannelImplBuilder;
+import io.grpc.internal.AtomicBackoff;
 import io.grpc.internal.ClientTransportFactory;
 import io.grpc.internal.ConnectionClientTransport;
 import io.grpc.internal.GrpcUtil;
+import io.grpc.internal.KeepAliveManager;
+import io.grpc.internal.ProxyParameters;
 import io.grpc.internal.SharedResourceHolder;
 import io.grpc.internal.SharedResourceHolder.Resource;
+import io.grpc.internal.TransportTracer;
+import io.grpc.okhttp.internal.CipherSuite;
+import io.grpc.okhttp.internal.ConnectionSpec;
 import io.grpc.okhttp.internal.Platform;
-
+import io.grpc.okhttp.internal.TlsVersion;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.security.GeneralSecurityException;
+import java.security.KeyStore;
+import java.security.SecureRandom;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-
 import javax.annotation.Nullable;
+import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManagerFactory;
 
 /** Convenience class for building channels with the OkHttp transport. */
 @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1785")
 public class OkHttpChannelBuilder extends
         AbstractManagedChannelImplBuilder<OkHttpChannelBuilder> {
 
-  public static final ConnectionSpec DEFAULT_CONNECTION_SPEC =
+  /**
+   * ConnectionSpec closely matching the default configuration that could be used as a basis for
+   * modification.
+   *
+   * <p>Since this field is the only reference in gRPC to ConnectionSpec that may not be ProGuarded,
+   * we are removing the field to reduce method count. We've been unable to find any existing users
+   * of the field, and any such user would highly likely at least be changing the cipher suites,
+   * which is sort of the only part that's non-obvious. Any existing user should instead create
+   * their own spec from scratch or base it off ConnectionSpec.MODERN_TLS if believed to be
+   * necessary. If this was providing you with value and don't want to see it removed, open a GitHub
+   * issue to discuss keeping it.
+   *
+   * @deprecated Deemed of little benefit and users weren't using it. Just define one yourself
+   */
+  @Deprecated
+  public static final com.squareup.okhttp.ConnectionSpec DEFAULT_CONNECTION_SPEC =
+      new com.squareup.okhttp.ConnectionSpec.Builder(com.squareup.okhttp.ConnectionSpec.MODERN_TLS)
+          .cipherSuites(
+              // The following items should be sync with Netty's Http2SecurityUtil.CIPHERS.
+              com.squareup.okhttp.CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+              com.squareup.okhttp.CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+              com.squareup.okhttp.CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+              com.squareup.okhttp.CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+              com.squareup.okhttp.CipherSuite.TLS_DHE_RSA_WITH_AES_128_GCM_SHA256,
+              com.squareup.okhttp.CipherSuite.TLS_DHE_DSS_WITH_AES_128_GCM_SHA256,
+              com.squareup.okhttp.CipherSuite.TLS_DHE_RSA_WITH_AES_256_GCM_SHA384,
+              com.squareup.okhttp.CipherSuite.TLS_DHE_DSS_WITH_AES_256_GCM_SHA384)
+          .tlsVersions(com.squareup.okhttp.TlsVersion.TLS_1_2)
+          .supportsTlsExtensions(true)
+          .build();
+
+  @VisibleForTesting
+  static final ConnectionSpec INTERNAL_DEFAULT_CONNECTION_SPEC =
       new ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
           .cipherSuites(
               // The following items should be sync with Netty's Http2SecurityUtil.CIPHERS.
@@ -86,6 +110,7 @@ public class OkHttpChannelBuilder extends
           .supportsTlsExtensions(true)
           .build();
 
+  private static final long AS_LARGE_AS_INFINITE = TimeUnit.DAYS.toNanos(1000L);
   private static final Resource<ExecutorService> SHARED_EXECUTOR =
       new Resource<ExecutorService>() {
         @Override
@@ -113,13 +138,15 @@ public class OkHttpChannelBuilder extends
   }
 
   private Executor transportExecutor;
+  private ScheduledExecutorService scheduledExecutorService;
 
   private SSLSocketFactory sslSocketFactory;
-  private ConnectionSpec connectionSpec = DEFAULT_CONNECTION_SPEC;
+  private HostnameVerifier hostnameVerifier;
+  private ConnectionSpec connectionSpec = INTERNAL_DEFAULT_CONNECTION_SPEC;
   private NegotiationType negotiationType = NegotiationType.TLS;
-  private boolean enableKeepAlive;
-  private long keepAliveDelayNanos;
-  private long keepAliveTimeoutNanos;
+  private long keepAliveTimeNanos = KEEPALIVE_TIME_NANOS_DISABLED;
+  private long keepAliveTimeoutNanos = DEFAULT_KEEPALIVE_TIMEOUT_NANOS;
+  private boolean keepAliveWithoutCalls;
 
   protected OkHttpChannelBuilder(String host, int port) {
     this(GrpcUtil.authorityFromHostAndPort(host, port));
@@ -127,6 +154,13 @@ public class OkHttpChannelBuilder extends
 
   private OkHttpChannelBuilder(String target) {
     super(target);
+  }
+
+  @VisibleForTesting
+  final OkHttpChannelBuilder setTransportTracerFactory(
+      TransportTracer.Factory transportTracerFactory) {
+    this.transportTracerFactory = transportTracerFactory;
+    return this;
   }
 
   /**
@@ -157,26 +191,73 @@ public class OkHttpChannelBuilder extends
 
   /**
    * Enable keepalive with default delay and timeout.
+   *
+   * @deprecated Use {@link #keepAliveTime} instead
    */
+  @Deprecated
   public final OkHttpChannelBuilder enableKeepAlive(boolean enable) {
-    enableKeepAlive = enable;
     if (enable) {
-      keepAliveDelayNanos = DEFAULT_KEEPALIVE_DELAY_NANOS;
-      keepAliveTimeoutNanos = DEFAULT_KEEPALIVE_TIMEOUT_NANOS;
+      return keepAliveTime(DEFAULT_KEEPALIVE_TIME_NANOS, TimeUnit.NANOSECONDS);
+    } else {
+      return keepAliveTime(KEEPALIVE_TIME_NANOS_DISABLED, TimeUnit.NANOSECONDS);
+    }
+  }
+
+  /**
+   * Enable keepalive with custom delay and timeout.
+   *
+   * @deprecated Use {@link #keepAliveTime} and {@link #keepAliveTimeout} instead
+   */
+  @Deprecated
+  public final OkHttpChannelBuilder enableKeepAlive(boolean enable, long keepAliveTime,
+      TimeUnit delayUnit, long keepAliveTimeout, TimeUnit timeoutUnit) {
+    if (enable) {
+      return keepAliveTime(keepAliveTime, delayUnit)
+          .keepAliveTimeout(keepAliveTimeout, timeoutUnit);
+    } else {
+      return keepAliveTime(KEEPALIVE_TIME_NANOS_DISABLED, TimeUnit.NANOSECONDS);
+    }
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * @since 1.3.0
+   */
+  @Override
+  public OkHttpChannelBuilder keepAliveTime(long keepAliveTime, TimeUnit timeUnit) {
+    Preconditions.checkArgument(keepAliveTime > 0L, "keepalive time must be positive");
+    keepAliveTimeNanos = timeUnit.toNanos(keepAliveTime);
+    keepAliveTimeNanos = KeepAliveManager.clampKeepAliveTimeInNanos(keepAliveTimeNanos);
+    if (keepAliveTimeNanos >= AS_LARGE_AS_INFINITE) {
+      // Bump keepalive time to infinite. This disables keepalive.
+      keepAliveTimeNanos = KEEPALIVE_TIME_NANOS_DISABLED;
     }
     return this;
   }
 
   /**
-   * Enable keepalive with custom delay and timeout.
+   * {@inheritDoc}
+   *
+   * @since 1.3.0
    */
-  public final OkHttpChannelBuilder enableKeepAlive(boolean enable, long keepAliveDelay,
-      TimeUnit delayUnit, long keepAliveTimeout, TimeUnit timeoutUnit) {
-    enableKeepAlive = enable;
-    if (enable) {
-      keepAliveDelayNanos = delayUnit.toNanos(keepAliveDelay);
-      keepAliveTimeoutNanos = timeoutUnit.toNanos(keepAliveTimeout);
-    }
+  @Override
+  public OkHttpChannelBuilder keepAliveTimeout(long keepAliveTimeout, TimeUnit timeUnit) {
+    Preconditions.checkArgument(keepAliveTimeout > 0L, "keepalive timeout must be positive");
+    keepAliveTimeoutNanos = timeUnit.toNanos(keepAliveTimeout);
+    keepAliveTimeoutNanos = KeepAliveManager.clampKeepAliveTimeoutInNanos(keepAliveTimeoutNanos);
+    return this;
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * @since 1.3.0
+   * @see #keepAliveTime(long, TimeUnit)
+   */
+  @Override
+  public OkHttpChannelBuilder keepAliveWithoutCalls(boolean enable) {
+    keepAliveWithoutCalls = enable;
     return this;
   }
 
@@ -195,27 +276,56 @@ public class OkHttpChannelBuilder extends
   }
 
   /**
+   * Set the hostname verifier to use when using TLS negotiation. The hostnameVerifier is only used
+   * if using TLS negotiation. If the hostname verifier is not set, a default hostname verifier is
+   * used.
+   *
+   * <p>Be careful when setting a custom hostname verifier! By setting a non-null value, you are
+   * replacing all default verification behavior. If the hostname verifier you supply does not
+   * effectively supply the same checks, you may be removing the security assurances that TLS aims
+   * to provide.</p>
+   *
+   * <p>This method should not be used to avoid hostname verification, even during testing, since
+   * {@link #overrideAuthority} is a safer alternative as it does not disable any security checks.
+   * </p>
+   *
+   * @see io.grpc.okhttp.internal.OkHostnameVerifier
+   *
+   * @since 1.6.0
+   * @return this
+   *
+   */
+  public final OkHttpChannelBuilder hostnameVerifier(@Nullable HostnameVerifier hostnameVerifier) {
+    this.hostnameVerifier = hostnameVerifier;
+    return this;
+  }
+
+  /**
    * For secure connection, provides a ConnectionSpec to specify Cipher suite and
    * TLS versions.
    *
-   * <p>By default {@link #DEFAULT_CONNECTION_SPEC} will be used.
+   * <p>By default a modern, HTTP/2-compatible spec will be used.
    *
    * <p>This method is only used when building a secure connection. For plaintext
-   * connection, use {@link #usePlaintext} instead.
+   * connection, use {@link #usePlaintext()} instead.
    *
    * @throws IllegalArgumentException
    *         If {@code connectionSpec} is not with TLS
    */
-  public final OkHttpChannelBuilder connectionSpec(ConnectionSpec connectionSpec) {
+  public final OkHttpChannelBuilder connectionSpec(
+      com.squareup.okhttp.ConnectionSpec connectionSpec) {
     Preconditions.checkArgument(connectionSpec.isTls(), "plaintext ConnectionSpec is not accepted");
-    this.connectionSpec = connectionSpec;
+    this.connectionSpec = Utils.convertSpec(connectionSpec);
     return this;
   }
 
   /**
    * Equivalent to using {@link #negotiationType(NegotiationType)} with {@code PLAINTEXT}.
+   *
+   * @deprecated use {@link #usePlaintext()} instead.
    */
   @Override
+  @Deprecated
   public final OkHttpChannelBuilder usePlaintext(boolean skipNegotiation) {
     if (skipNegotiation) {
       negotiationType(NegotiationType.PLAINTEXT);
@@ -225,11 +335,49 @@ public class OkHttpChannelBuilder extends
     return this;
   }
 
+  /**
+   * Equivalent to using {@link #negotiationType(NegotiationType)} with {@code PLAINTEXT}.
+   */
   @Override
+  public final OkHttpChannelBuilder usePlaintext() {
+    negotiationType(NegotiationType.PLAINTEXT);
+    return this;
+  }
+
+  /**
+   * Equivalent to using {@link #negotiationType(NegotiationType)} with {@code TLS}.
+   */
+  @Override
+  public final OkHttpChannelBuilder useTransportSecurity() {
+    negotiationType(NegotiationType.TLS);
+    return this;
+  }
+
+  /**
+   * Provides a custom scheduled executor service.
+   *
+   * <p>It's an optional parameter. If the user has not provided a scheduled executor service when
+   * the channel is built, the builder will use a static cached thread pool.
+   *
+   * @return this
+   *
+   * @since 1.11.0
+   */
+  public final OkHttpChannelBuilder scheduledExecutorService(
+      ScheduledExecutorService scheduledExecutorService) {
+    this.scheduledExecutorService =
+        checkNotNull(scheduledExecutorService, "scheduledExecutorService");
+    return this;
+  }
+
+  @Override
+  @Internal
   protected final ClientTransportFactory buildTransportFactory() {
-    return new OkHttpTransportFactory(transportExecutor,
-        createSocketFactory(), connectionSpec, maxInboundMessageSize(), enableKeepAlive,
-        keepAliveDelayNanos, keepAliveTimeoutNanos);
+    boolean enableKeepAlive = keepAliveTimeNanos != KEEPALIVE_TIME_NANOS_DISABLED;
+    return new OkHttpTransportFactory(transportExecutor, scheduledExecutorService,
+        createSocketFactory(), hostnameVerifier, connectionSpec, maxInboundMessageSize(),
+        enableKeepAlive, keepAliveTimeNanos, keepAliveTimeoutNanos, keepAliveWithoutCalls,
+        transportTracerFactory);
   }
 
   @Override
@@ -256,7 +404,25 @@ public class OkHttpChannelBuilder extends
       case TLS:
         try {
           if (sslSocketFactory == null) {
-            SSLContext sslContext = SSLContext.getInstance("Default", Platform.get().getProvider());
+            SSLContext sslContext;
+            if (GrpcUtil.IS_RESTRICTED_APPENGINE) {
+              // The following auth code circumvents the following AccessControlException:
+              // access denied ("java.util.PropertyPermission" "javax.net.ssl.keyStore" "read")
+              // Conscrypt will attempt to load the default KeyStore if a trust manager is not
+              // provided, which is forbidden on AppEngine
+              sslContext = SSLContext.getInstance("TLS", Platform.get().getProvider());
+              TrustManagerFactory trustManagerFactory =
+                  TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+              trustManagerFactory.init((KeyStore) null);
+              sslContext.init(
+                  null,
+                  trustManagerFactory.getTrustManagers(),
+                  // Use an algorithm that doesn't need /dev/urandom
+                  SecureRandom.getInstance("SHA1PRNG", Platform.get().getProvider()));
+
+            } else {
+              sslContext = SSLContext.getInstance("Default", Platform.get().getProvider());
+            }
             sslSocketFactory = sslContext.getSocketFactory();
           }
           return sslSocketFactory;
@@ -277,30 +443,47 @@ public class OkHttpChannelBuilder extends
   static final class OkHttpTransportFactory implements ClientTransportFactory {
     private final Executor executor;
     private final boolean usingSharedExecutor;
+    private final boolean usingSharedScheduler;
+    private final TransportTracer.Factory transportTracerFactory;
     @Nullable
     private final SSLSocketFactory socketFactory;
+    @Nullable
+    private final HostnameVerifier hostnameVerifier;
     private final ConnectionSpec connectionSpec;
     private final int maxMessageSize;
-    private boolean enableKeepAlive;
-    private long keepAliveDelayNanos;
-    private long keepAliveTimeoutNanos;
+    private final boolean enableKeepAlive;
+    private final AtomicBackoff keepAliveTimeNanos;
+    private final long keepAliveTimeoutNanos;
+    private final boolean keepAliveWithoutCalls;
+    private final ScheduledExecutorService timeoutService;
     private boolean closed;
 
     private OkHttpTransportFactory(Executor executor,
+        @Nullable ScheduledExecutorService timeoutService,
         @Nullable SSLSocketFactory socketFactory,
+        @Nullable HostnameVerifier hostnameVerifier,
         ConnectionSpec connectionSpec,
         int maxMessageSize,
         boolean enableKeepAlive,
-        long keepAliveDelayNanos,
-        long keepAliveTimeoutNanos) {
+        long keepAliveTimeNanos,
+        long keepAliveTimeoutNanos,
+        boolean keepAliveWithoutCalls,
+        TransportTracer.Factory transportTracerFactory) {
+      usingSharedScheduler = timeoutService == null;
+      this.timeoutService = usingSharedScheduler
+          ? SharedResourceHolder.get(GrpcUtil.TIMER_SERVICE) : timeoutService;
       this.socketFactory = socketFactory;
+      this.hostnameVerifier = hostnameVerifier;
       this.connectionSpec = connectionSpec;
       this.maxMessageSize = maxMessageSize;
       this.enableKeepAlive = enableKeepAlive;
-      this.keepAliveDelayNanos = keepAliveDelayNanos;
+      this.keepAliveTimeNanos = new AtomicBackoff("keepalive time nanos", keepAliveTimeNanos);
       this.keepAliveTimeoutNanos = keepAliveTimeoutNanos;
+      this.keepAliveWithoutCalls = keepAliveWithoutCalls;
 
       usingSharedExecutor = executor == null;
+      this.transportTracerFactory =
+          Preconditions.checkNotNull(transportTracerFactory, "transportTracerFactory");
       if (usingSharedExecutor) {
         // The executor was unspecified, using the shared executor.
         this.executor = SharedResourceHolder.get(SHARED_EXECUTOR);
@@ -311,17 +494,41 @@ public class OkHttpChannelBuilder extends
 
     @Override
     public ConnectionClientTransport newClientTransport(
-        SocketAddress addr, String authority, @Nullable String userAgent) {
+        SocketAddress addr, String authority, @Nullable String userAgent,
+        @Nullable ProxyParameters proxy) {
       if (closed) {
         throw new IllegalStateException("The transport factory is closed.");
       }
+      final AtomicBackoff.State keepAliveTimeNanosState = keepAliveTimeNanos.getState();
+      Runnable tooManyPingsRunnable = new Runnable() {
+        @Override
+        public void run() {
+          keepAliveTimeNanosState.backoff();
+        }
+      };
       InetSocketAddress inetSocketAddr = (InetSocketAddress) addr;
-      OkHttpClientTransport transport = new OkHttpClientTransport(inetSocketAddr, authority,
-          userAgent, executor, socketFactory, Utils.convertSpec(connectionSpec), maxMessageSize);
+      OkHttpClientTransport transport = new OkHttpClientTransport(
+          inetSocketAddr,
+          authority,
+          userAgent,
+          executor,
+          socketFactory,
+          hostnameVerifier,
+          connectionSpec,
+          maxMessageSize,
+          proxy,
+          tooManyPingsRunnable,
+          transportTracerFactory.create());
       if (enableKeepAlive) {
-        transport.enableKeepAlive(true, keepAliveDelayNanos, keepAliveTimeoutNanos);
+        transport.enableKeepAlive(
+            true, keepAliveTimeNanosState.get(), keepAliveTimeoutNanos, keepAliveWithoutCalls);
       }
       return transport;
+    }
+
+    @Override
+    public ScheduledExecutorService getScheduledExecutorService() {
+      return timeoutService;
     }
 
     @Override
@@ -330,6 +537,10 @@ public class OkHttpChannelBuilder extends
         return;
       }
       closed = true;
+
+      if (usingSharedScheduler) {
+        SharedResourceHolder.release(GrpcUtil.TIMER_SERVICE, timeoutService);
+      }
 
       if (usingSharedExecutor) {
         SharedResourceHolder.release(SHARED_EXECUTOR, (ExecutorService) executor);

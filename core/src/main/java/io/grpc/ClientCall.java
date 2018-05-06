@@ -1,38 +1,22 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
 
 import com.google.errorprone.annotations.DoNotMock;
-
 import javax.annotation.Nullable;
 
 /**
@@ -113,7 +97,7 @@ import javax.annotation.Nullable;
  * @param <ReqT> type of message sent one or more times to the server.
  * @param <RespT> type of message received one or more times from the server.
  */
-@DoNotMock("Use InProcessTransport and make a fake server instead")
+@DoNotMock("Use InProcessServerBuilder and make a test server instead")
 public abstract class ClientCall<ReqT, RespT> {
   /**
    * Callbacks for receiving metadata, response messages and completion status from the server.
@@ -125,6 +109,9 @@ public abstract class ClientCall<ReqT, RespT> {
 
     /**
      * The response headers have been received. Headers always precede messages.
+     *
+     * <p>Since {@link Metadata} is not thread-safe, the caller must not access (read or write)
+     * {@code headers} after this point.
      *
      * @param headers containing metadata sent by the server at the start of the response.
      */
@@ -143,6 +130,9 @@ public abstract class ClientCall<ReqT, RespT> {
      * processed by the server. No further receiving will occur and no further notifications will be
      * made.
      *
+     * <p>Since {@link Metadata} is not thread-safe, the caller must not access (read or write)
+     * {@code trailers} after this point.
+     *
      * <p>If {@code status} returns false for {@link Status#isOk()}, then the call failed.
      * An additional block of trailer metadata may be received at the end of the call from the
      * server. An empty {@link Metadata} object is passed if no trailers are received.
@@ -157,6 +147,10 @@ public abstract class ClientCall<ReqT, RespT> {
      * {@link #sendMessage}) without requiring excessive buffering internally. This event is
      * just a suggestion and the application is free to ignore it, however doing so may
      * result in excessive buffering within the ClientCall.
+     *
+     * <p>If the type of a call is either {@link MethodDescriptor.MethodType#UNARY} or
+     * {@link MethodDescriptor.MethodType#SERVER_STREAMING}, this callback may not be fired. Calls
+     * that send exactly one message should not await this callback.
      */
     public void onReady() {}
   }
@@ -165,8 +159,10 @@ public abstract class ClientCall<ReqT, RespT> {
    * Start a call, using {@code responseListener} for processing response messages.
    *
    * <p>It must be called prior to any other method on this class, except for {@link #cancel} which
-   * may be called at any time. Since {@link Metadata} is not thread-safe, the caller must not
-   * access {@code headers} after this point.
+   * may be called at any time.
+   *
+   * <p>Since {@link Metadata} is not thread-safe, the caller must not access (read or write) {@code
+   * headers} after this point.
    *
    * @param responseListener receives response messages
    * @param headers which can contain extra call metadata, e.g. authentication credentials.
@@ -190,7 +186,7 @@ public abstract class ClientCall<ReqT, RespT> {
    * <p>If called multiple times, the number of messages able to delivered will be the sum of the
    * calls.
    *
-   * <p>This method is safe to call from multiple threads without external synchronizaton.
+   * <p>This method is safe to call from multiple threads without external synchronization.
    *
    * @param numMessages the requested number of messages to be delivered to the listener. Must be
    *                    non-negative.
@@ -237,7 +233,12 @@ public abstract class ClientCall<ReqT, RespT> {
    * just a suggestion and the application is free to ignore it, however doing so may
    * result in excessive buffering within the call.
    *
-   * <p>This implementation always returns {@code true}.
+   * <p>This abstract class's implementation always returns {@code true}. Implementations generally
+   * override the method.
+   *
+   * <p>If the type of the call is either {@link MethodDescriptor.MethodType#UNARY} or
+   * {@link MethodDescriptor.MethodType#SERVER_STREAMING}, this method may persistently return
+   * false. Calls that send exactly one message should not check this method.
    */
   public boolean isReady() {
     return true;
@@ -251,5 +252,20 @@ public abstract class ClientCall<ReqT, RespT> {
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1703")
   public void setMessageCompression(boolean enabled) {
     // noop
+  }
+
+  /**
+   * Returns additional properties of the call. May only be called after {@link Listener#onHeaders}
+   * or {@link Listener#onClose}. If called prematurely, the implementation may throw {@code
+   * IllegalStateException} or return arbitrary {@code Attributes}.
+   *
+   * <p>{@link Grpc} defines commonly used attributes, but they are not guaranteed to be present.
+   *
+   * @return non-{@code null} attributes
+   * @throws IllegalStateException (optional) if called before permitted
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2607")
+  public Attributes getAttributes() {
+    return Attributes.EMPTY;
   }
 }

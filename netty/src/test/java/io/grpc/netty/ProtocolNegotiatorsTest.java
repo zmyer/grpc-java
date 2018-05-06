@@ -1,75 +1,84 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.netty;
 
+import static com.google.common.base.Charsets.UTF_8;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 
+import io.grpc.internal.testing.TestUtils;
 import io.grpc.netty.ProtocolNegotiators.ServerTlsHandler;
 import io.grpc.netty.ProtocolNegotiators.TlsNegotiator;
-import io.grpc.testing.TestUtils;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.bootstrap.ServerBootstrap;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufUtil;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandler;
 import io.netty.channel.ChannelPipeline;
+import io.netty.channel.DefaultEventLoopGroup;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.channel.local.LocalAddress;
+import io.netty.channel.local.LocalChannel;
+import io.netty.channel.local.LocalServerChannel;
+import io.netty.handler.proxy.ProxyConnectException;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import io.netty.handler.ssl.SupportedCipherSuiteFilter;
-
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
-
 import java.io.File;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.util.logging.Filter;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
-
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLException;
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.ExpectedException;
+import org.junit.rules.Timeout;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 @RunWith(JUnit4.class)
 public class ProtocolNegotiatorsTest {
-  @Rule public final ExpectedException thrown = ExpectedException.none();
+  private static final Runnable NOOP_RUNNABLE = new Runnable() {
+    @Override public void run() {}
+  };
+
+  @Rule public final Timeout globalTimeout = Timeout.seconds(5);
+
+  @Rule
+  public final ExpectedException thrown = ExpectedException.none();
 
   private GrpcHttp2ConnectionHandler grpcHandler = mock(GrpcHttp2ConnectionHandler.class);
 
@@ -84,7 +93,7 @@ public class ProtocolNegotiatorsTest {
     File serverCert = TestUtils.loadCert("server1.pem");
     File key = TestUtils.loadCert("server1.key");
     sslContext = GrpcSslContexts.forServer(serverCert, key)
-            .ciphers(TestUtils.preferredTestCiphers(), SupportedCipherSuiteFilter.INSTANCE).build();
+        .ciphers(TestUtils.preferredTestCiphers(), SupportedCipherSuiteFilter.INSTANCE).build();
     engine = SSLContext.getDefault().createSSLEngine();
   }
 
@@ -93,7 +102,7 @@ public class ProtocolNegotiatorsTest {
     thrown.expect(NullPointerException.class);
     thrown.expectMessage("ssl");
 
-    ProtocolNegotiators.serverTls(null);
+    Object unused = ProtocolNegotiators.serverTls(null);
   }
 
   @Test
@@ -171,11 +180,34 @@ public class ProtocolNegotiatorsTest {
   }
 
   @Test
-  public void tlsHandler_userEventTriggeredSslEvent_supportedProtocol() throws Exception {
+  public void tlsHandler_userEventTriggeredSslEvent_supportedProtocolH2() throws Exception {
     SslHandler goodSslHandler = new SslHandler(engine, false) {
       @Override
       public String applicationProtocol() {
         return "h2";
+      }
+    };
+
+    ChannelHandler handler = new ServerTlsHandler(sslContext, grpcHandler);
+    pipeline.addLast(handler);
+
+    pipeline.replace(SslHandler.class, null, goodSslHandler);
+    channelHandlerCtx = pipeline.context(handler);
+    Object sslEvent = SslHandshakeCompletionEvent.SUCCESS;
+
+    pipeline.fireUserEventTriggered(sslEvent);
+
+    assertTrue(channel.isOpen());
+    ChannelHandlerContext grpcHandlerCtx = pipeline.context(grpcHandler);
+    assertNotNull(grpcHandlerCtx);
+  }
+
+  @Test
+  public void tlsHandler_userEventTriggeredSslEvent_supportedProtocolGrpcExp() throws Exception {
+    SslHandler goodSslHandler = new SslHandler(engine, false) {
+      @Override
+      public String applicationProtocol() {
+        return "grpc-exp";
       }
     };
 
@@ -221,7 +253,7 @@ public class ProtocolNegotiatorsTest {
   public void tls_failsOnNullSslContext() {
     thrown.expect(NullPointerException.class);
 
-    ProtocolNegotiators.tls(null, "authority");
+    Object unused = ProtocolNegotiators.tls(null, "authority");
   }
 
   @Test
@@ -251,5 +283,148 @@ public class ProtocolNegotiatorsTest {
     // invalid.
     assertEquals("bad_host:1234", negotiator.getHost());
     assertEquals(-1, negotiator.getPort());
+  }
+
+  @Test
+  public void httpProxy_nullAddressNpe() throws Exception {
+    thrown.expect(NullPointerException.class);
+    Object unused =
+        ProtocolNegotiators.httpProxy(null, "user", "pass", ProtocolNegotiators.plaintext());
+  }
+
+  @Test
+  public void httpProxy_nullNegotiatorNpe() throws Exception {
+    thrown.expect(NullPointerException.class);
+    Object unused = ProtocolNegotiators.httpProxy(
+        InetSocketAddress.createUnresolved("localhost", 80), "user", "pass", null);
+  }
+
+  @Test
+  public void httpProxy_nullUserPassNoException() throws Exception {
+    assertNotNull(ProtocolNegotiators.httpProxy(
+        InetSocketAddress.createUnresolved("localhost", 80), null, null,
+        ProtocolNegotiators.plaintext()));
+  }
+
+  @Test
+  public void httpProxy_completes() throws Exception {
+    DefaultEventLoopGroup elg = new DefaultEventLoopGroup(1);
+    // ProxyHandler is incompatible with EmbeddedChannel because when channelRegistered() is called
+    // the channel is already active.
+    LocalAddress proxy = new LocalAddress("httpProxy_completes");
+    SocketAddress host = InetSocketAddress.createUnresolved("specialHost", 314);
+
+    ChannelInboundHandler mockHandler = mock(ChannelInboundHandler.class);
+    Channel serverChannel = new ServerBootstrap().group(elg).channel(LocalServerChannel.class)
+        .childHandler(mockHandler)
+        .bind(proxy).sync().channel();
+
+    ProtocolNegotiator nego =
+        ProtocolNegotiators.httpProxy(proxy, null, null, ProtocolNegotiators.plaintext());
+    ChannelHandler handler = nego.newHandler(grpcHandler);
+    Channel channel = new Bootstrap().group(elg).channel(LocalChannel.class).handler(handler)
+        .register().sync().channel();
+    pipeline = channel.pipeline();
+    // Wait for initialization to complete
+    channel.eventLoop().submit(NOOP_RUNNABLE).sync();
+    // The grpcHandler must be in the pipeline, but we don't actually want it during our test
+    // because it will consume all events since it is a mock. We only use it because it is required
+    // to construct the Handler.
+    pipeline.remove(grpcHandler);
+    channel.connect(host).sync();
+    serverChannel.close();
+    ArgumentCaptor<ChannelHandlerContext> contextCaptor =
+        ArgumentCaptor.forClass(ChannelHandlerContext.class);
+    Mockito.verify(mockHandler).channelActive(contextCaptor.capture());
+    ChannelHandlerContext serverContext = contextCaptor.getValue();
+
+    final String golden = "isThisThingOn?";
+    ChannelFuture negotiationFuture = channel.writeAndFlush(bb(golden, channel));
+
+    // Wait for sending initial request to complete
+    channel.eventLoop().submit(NOOP_RUNNABLE).sync();
+    ArgumentCaptor<Object> objectCaptor = ArgumentCaptor.forClass(Object.class);
+    Mockito.verify(mockHandler)
+        .channelRead(any(ChannelHandlerContext.class), objectCaptor.capture());
+    ByteBuf b = (ByteBuf) objectCaptor.getValue();
+    String request = b.toString(UTF_8);
+    b.release();
+    assertTrue("No trailing newline: " + request, request.endsWith("\r\n\r\n"));
+    assertTrue("No CONNECT: " + request, request.startsWith("CONNECT specialHost:314 "));
+    assertTrue("No host header: " + request, request.contains("host: specialHost:314"));
+
+    assertFalse(negotiationFuture.isDone());
+    serverContext.writeAndFlush(bb("HTTP/1.1 200 OK\r\n\r\n", serverContext.channel())).sync();
+    negotiationFuture.sync();
+
+    channel.eventLoop().submit(NOOP_RUNNABLE).sync();
+    objectCaptor.getAllValues().clear();
+    Mockito.verify(mockHandler, times(2))
+        .channelRead(any(ChannelHandlerContext.class), objectCaptor.capture());
+    b = (ByteBuf) objectCaptor.getAllValues().get(1);
+    // If we were using the real grpcHandler, this would have been the HTTP/2 preface
+    String preface = b.toString(UTF_8);
+    b.release();
+    assertEquals(golden, preface);
+
+    channel.close();
+  }
+
+  @Test
+  public void httpProxy_500() throws Exception {
+    DefaultEventLoopGroup elg = new DefaultEventLoopGroup(1);
+    // ProxyHandler is incompatible with EmbeddedChannel because when channelRegistered() is called
+    // the channel is already active.
+    LocalAddress proxy = new LocalAddress("httpProxy_500");
+    SocketAddress host = InetSocketAddress.createUnresolved("specialHost", 314);
+
+    ChannelInboundHandler mockHandler = mock(ChannelInboundHandler.class);
+    Channel serverChannel = new ServerBootstrap().group(elg).channel(LocalServerChannel.class)
+        .childHandler(mockHandler)
+        .bind(proxy).sync().channel();
+
+    ProtocolNegotiator nego =
+        ProtocolNegotiators.httpProxy(proxy, null, null, ProtocolNegotiators.plaintext());
+    ChannelHandler handler = nego.newHandler(grpcHandler);
+    Channel channel = new Bootstrap().group(elg).channel(LocalChannel.class).handler(handler)
+        .register().sync().channel();
+    pipeline = channel.pipeline();
+    // Wait for initialization to complete
+    channel.eventLoop().submit(NOOP_RUNNABLE).sync();
+    // The grpcHandler must be in the pipeline, but we don't actually want it during our test
+    // because it will consume all events since it is a mock. We only use it because it is required
+    // to construct the Handler.
+    pipeline.remove(grpcHandler);
+    channel.connect(host).sync();
+    serverChannel.close();
+    ArgumentCaptor<ChannelHandlerContext> contextCaptor =
+        ArgumentCaptor.forClass(ChannelHandlerContext.class);
+    Mockito.verify(mockHandler).channelActive(contextCaptor.capture());
+    ChannelHandlerContext serverContext = contextCaptor.getValue();
+
+    final String golden = "isThisThingOn?";
+    ChannelFuture negotiationFuture = channel.writeAndFlush(bb(golden, channel));
+
+    // Wait for sending initial request to complete
+    channel.eventLoop().submit(NOOP_RUNNABLE).sync();
+    ArgumentCaptor<Object> objectCaptor = ArgumentCaptor.forClass(Object.class);
+    Mockito.verify(mockHandler)
+        .channelRead(any(ChannelHandlerContext.class), objectCaptor.capture());
+    ByteBuf request = (ByteBuf) objectCaptor.getValue();
+    request.release();
+
+    assertFalse(negotiationFuture.isDone());
+    String response = "HTTP/1.1 500 OMG\r\nContent-Length: 4\r\n\r\noops";
+    serverContext.writeAndFlush(bb(response, serverContext.channel())).sync();
+    thrown.expect(ProxyConnectException.class);
+    try {
+      negotiationFuture.sync();
+    } finally {
+      channel.close();
+    }
+  }
+
+  private static ByteBuf bb(String s, Channel c) {
+    return ByteBufUtil.writeUtf8(c.alloc(), s);
   }
 }

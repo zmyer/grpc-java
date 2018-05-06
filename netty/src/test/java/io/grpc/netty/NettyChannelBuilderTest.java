@@ -1,32 +1,17 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.netty;
@@ -35,26 +20,73 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 
+import io.grpc.ManagedChannel;
+import io.grpc.internal.ProxyParameters;
 import io.grpc.netty.InternalNettyChannelBuilder.OverrideAuthorityChecker;
 import io.grpc.netty.ProtocolNegotiators.TlsNegotiator;
 import io.netty.handler.ssl.SslContext;
-
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.util.concurrent.TimeUnit;
+import javax.net.ssl.SSLException;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.net.InetSocketAddress;
-import java.net.SocketAddress;
-
-import javax.net.ssl.SSLException;
-
 @RunWith(JUnit4.class)
 public class NettyChannelBuilderTest {
 
   @Rule public final ExpectedException thrown = ExpectedException.none();
   private final SslContext noSslContext = null;
+  private final ProxyParameters noProxy = null;
+
+  private void shutdown(ManagedChannel mc) throws Exception {
+    mc.shutdownNow();
+    assertTrue(mc.awaitTermination(1, TimeUnit.SECONDS));
+  }
+
+  @Test
+  public void authorityIsReadable() throws Exception {
+    NettyChannelBuilder builder = NettyChannelBuilder.forAddress("original", 1234);
+
+    ManagedChannel b = builder.build();
+    try {
+      assertEquals("original:1234", b.authority());
+    } finally {
+      shutdown(b);
+    }
+  }
+
+  @Test
+  public void overrideAuthorityIsReadableForAddress() throws Exception {
+    NettyChannelBuilder builder = NettyChannelBuilder.forAddress("original", 1234);
+    overrideAuthorityIsReadableHelper(builder, "override:5678");
+  }
+
+  @Test
+  public void overrideAuthorityIsReadableForTarget() throws Exception {
+    NettyChannelBuilder builder = NettyChannelBuilder.forTarget("original:1234");
+    overrideAuthorityIsReadableHelper(builder, "override:5678");
+  }
+
+  @Test
+  public void overrideAuthorityIsReadableForSocketAddress() throws Exception {
+    NettyChannelBuilder builder = NettyChannelBuilder.forAddress(new SocketAddress(){});
+    overrideAuthorityIsReadableHelper(builder, "override:5678");
+  }
+
+  private void overrideAuthorityIsReadableHelper(NettyChannelBuilder builder,
+      String overrideAuthority) throws Exception {
+    builder.overrideAuthority(overrideAuthority);
+    ManagedChannel channel = builder.build();
+    try {
+      assertEquals(overrideAuthority, channel.authority());
+    } finally {
+      shutdown(channel);
+    }
+  }
 
   @Test
   public void overrideAllowsInvalidAuthority() {
@@ -65,21 +97,19 @@ public class NettyChannelBuilderTest {
         return authority;
       }
     });
-    builder.overrideAuthority("[invalidauthority")
+    Object unused = builder.overrideAuthority("[invalidauthority")
         .negotiationType(NegotiationType.PLAINTEXT)
         .buildTransportFactory();
   }
 
   @Test
   public void failOverrideInvalidAuthority() {
+    NettyChannelBuilder builder = new NettyChannelBuilder(new SocketAddress(){});
+
     thrown.expect(IllegalArgumentException.class);
     thrown.expectMessage("Invalid authority:");
 
-    NettyChannelBuilder builder = new NettyChannelBuilder(new SocketAddress(){});
-
-    builder.overrideAuthority("[invalidauthority")
-        .negotiationType(NegotiationType.PLAINTEXT)
-        .buildTransportFactory();
+    builder.overrideAuthority("[invalidauthority");
   }
 
   @Test
@@ -87,7 +117,8 @@ public class NettyChannelBuilderTest {
     thrown.expect(IllegalArgumentException.class);
     thrown.expectMessage("Invalid host or port");
 
-    NettyChannelBuilder.forAddress(new InetSocketAddress("invalid_authority", 1234));
+    Object unused =
+        NettyChannelBuilder.forAddress(new InetSocketAddress("invalid_authority", 1234));
   }
 
   @Test
@@ -98,12 +129,12 @@ public class NettyChannelBuilderTest {
 
   @Test
   public void failIfSslContextIsNotClient() {
+    SslContext sslContext = mock(SslContext.class);
+    NettyChannelBuilder builder = new NettyChannelBuilder(new SocketAddress(){});
+
     thrown.expect(IllegalArgumentException.class);
     thrown.expectMessage("Server SSL context can not be used for client channel");
 
-    SslContext sslContext = mock(SslContext.class);
-
-    NettyChannelBuilder builder = new NettyChannelBuilder(new SocketAddress(){});
     builder.sslContext(sslContext);
   }
 
@@ -112,7 +143,8 @@ public class NettyChannelBuilderTest {
     ProtocolNegotiator negotiator = NettyChannelBuilder.createProtocolNegotiator(
         "authority",
         NegotiationType.PLAINTEXT,
-        noSslContext);
+        noSslContext,
+        noProxy);
     // just check that the classes are the same, and that negotiator is not null.
     assertTrue(negotiator instanceof ProtocolNegotiators.PlaintextNegotiator);
   }
@@ -122,23 +154,20 @@ public class NettyChannelBuilderTest {
     ProtocolNegotiator negotiator = NettyChannelBuilder.createProtocolNegotiator(
         "authority",
         NegotiationType.PLAINTEXT_UPGRADE,
-        noSslContext);
+        noSslContext,
+        noProxy);
     // just check that the classes are the same, and that negotiator is not null.
     assertTrue(negotiator instanceof ProtocolNegotiators.PlaintextUpgradeNegotiator);
   }
 
   @Test
   public void createProtocolNegotiator_tlsWithNoContext() {
-    ProtocolNegotiator negotiator = NettyChannelBuilder.createProtocolNegotiator(
+    thrown.expect(NullPointerException.class);
+    NettyChannelBuilder.createProtocolNegotiator(
         "authority:1234",
         NegotiationType.TLS,
-        noSslContext);
-
-    assertTrue(negotiator instanceof ProtocolNegotiators.TlsNegotiator);
-    ProtocolNegotiators.TlsNegotiator n = (TlsNegotiator) negotiator;
-
-    assertEquals("authority", n.getHost());
-    assertEquals(1234, n.getPort());
+        noSslContext,
+        noProxy);
   }
 
   @Test
@@ -146,7 +175,8 @@ public class NettyChannelBuilderTest {
     ProtocolNegotiator negotiator = NettyChannelBuilder.createProtocolNegotiator(
         "authority:1234",
         NegotiationType.TLS,
-        GrpcSslContexts.forClient().build());
+        GrpcSslContexts.forClient().build(),
+        noProxy);
 
     assertTrue(negotiator instanceof ProtocolNegotiators.TlsNegotiator);
     ProtocolNegotiators.TlsNegotiator n = (TlsNegotiator) negotiator;
@@ -156,16 +186,35 @@ public class NettyChannelBuilderTest {
   }
 
   @Test
-  public void createProtocolNegotiator_tlsWithAuthorityFallback() {
+  public void createProtocolNegotiator_tlsWithAuthorityFallback() throws SSLException {
     ProtocolNegotiator negotiator = NettyChannelBuilder.createProtocolNegotiator(
         "bad_authority",
         NegotiationType.TLS,
-        noSslContext);
+        GrpcSslContexts.forClient().build(),
+        noProxy);
 
     assertTrue(negotiator instanceof ProtocolNegotiators.TlsNegotiator);
     ProtocolNegotiators.TlsNegotiator n = (TlsNegotiator) negotiator;
 
     assertEquals("bad_authority", n.getHost());
     assertEquals(-1, n.getPort());
+  }
+
+  @Test
+  public void negativeKeepAliveTime() {
+    NettyChannelBuilder builder = NettyChannelBuilder.forTarget("fakeTarget");
+
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("keepalive time must be positive");
+    builder.keepAliveTime(-1L, TimeUnit.HOURS);
+  }
+
+  @Test
+  public void negativeKeepAliveTimeout() {
+    NettyChannelBuilder builder = NettyChannelBuilder.forTarget("fakeTarget");
+
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("keepalive timeout must be positive");
+    builder.keepAliveTimeout(-1L, TimeUnit.HOURS);
   }
 }

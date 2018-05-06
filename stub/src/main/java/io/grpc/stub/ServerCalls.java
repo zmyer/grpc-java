@@ -1,39 +1,26 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.stub;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
-import io.grpc.ExperimentalApi;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
@@ -44,8 +31,12 @@ import io.grpc.Status;
  * Utility functions for adapting {@link ServerCallHandler}s to application service implementation,
  * meant to be used by the generated code.
  */
-@ExperimentalApi("https://github.com/grpc/grpc-java/issues/1790")
 public final class ServerCalls {
+
+  @VisibleForTesting
+  static final String TOO_MANY_REQUESTS = "Too many requests";
+  @VisibleForTesting
+  static final String MISSING_REQUEST = "Half-closed without a request";
 
   private ServerCalls() {
   }
@@ -93,28 +84,114 @@ public final class ServerCalls {
   /**
    * Adaptor to a unary call method.
    */
-  public static interface UnaryMethod<ReqT, RespT> extends UnaryRequestMethod<ReqT, RespT> {
-  }
+  public interface UnaryMethod<ReqT, RespT> extends UnaryRequestMethod<ReqT, RespT> {}
 
   /**
    * Adaptor to a server streaming method.
    */
-  public static interface ServerStreamingMethod<ReqT, RespT>
-      extends UnaryRequestMethod<ReqT, RespT> {
-  }
+  public interface ServerStreamingMethod<ReqT, RespT> extends UnaryRequestMethod<ReqT, RespT> {}
 
   /**
    * Adaptor to a client streaming method.
    */
-  public static interface ClientStreamingMethod<ReqT, RespT>
-      extends StreamingRequestMethod<ReqT, RespT> {
-  }
+  public interface ClientStreamingMethod<ReqT, RespT> extends StreamingRequestMethod<ReqT, RespT> {}
 
   /**
    * Adaptor to a bi-directional streaming method.
    */
-  public static interface BidiStreamingMethod<ReqT, RespT>
-      extends StreamingRequestMethod<ReqT, RespT> {
+  public interface BidiStreamingMethod<ReqT, RespT> extends StreamingRequestMethod<ReqT, RespT> {}
+
+  private static final class UnaryServerCallHandler<ReqT, RespT>
+      implements ServerCallHandler<ReqT, RespT> {
+
+    private final UnaryRequestMethod<ReqT, RespT> method;
+
+    // Non private to avoid synthetic class
+    UnaryServerCallHandler(UnaryRequestMethod<ReqT, RespT> method) {
+      this.method = method;
+    }
+
+    @Override
+    public ServerCall.Listener<ReqT> startCall(ServerCall<ReqT, RespT> call, Metadata headers) {
+      Preconditions.checkArgument(
+          call.getMethodDescriptor().getType().clientSendsOneMessage(),
+          "asyncUnaryRequestCall is only for clientSendsOneMessage methods");
+      ServerCallStreamObserverImpl<ReqT, RespT> responseObserver =
+          new ServerCallStreamObserverImpl<ReqT, RespT>(call);
+      // We expect only 1 request, but we ask for 2 requests here so that if a misbehaving client
+      // sends more than 1 requests, ServerCall will catch it. Note that disabling auto
+      // inbound flow control has no effect on unary calls.
+      call.request(2);
+      return new UnaryServerCallListener(responseObserver, call);
+    }
+
+    private final class UnaryServerCallListener extends ServerCall.Listener<ReqT> {
+      private final ServerCall<ReqT, RespT> call;
+      private final ServerCallStreamObserverImpl<ReqT, RespT> responseObserver;
+      private boolean canInvoke = true;
+      private ReqT request;
+
+      // Non private to avoid synthetic class
+      UnaryServerCallListener(
+          ServerCallStreamObserverImpl<ReqT, RespT> responseObserver,
+          ServerCall<ReqT, RespT> call) {
+        this.call = call;
+        this.responseObserver = responseObserver;
+      }
+
+      @Override
+      public void onMessage(ReqT request) {
+        if (this.request != null) {
+          // Safe to close the call, because the application has not yet been invoked
+          call.close(
+              Status.INTERNAL.withDescription(TOO_MANY_REQUESTS),
+              new Metadata());
+          canInvoke = false;
+          return;
+        }
+
+        // We delay calling method.invoke() until onHalfClose() to make sure the client
+        // half-closes.
+        this.request = request;
+      }
+
+      @Override
+      public void onHalfClose() {
+        if (!canInvoke) {
+          return;
+        }
+        if (request == null) {
+          // Safe to close the call, because the application has not yet been invoked
+          call.close(
+              Status.INTERNAL.withDescription(MISSING_REQUEST),
+              new Metadata());
+          return;
+        }
+
+        method.invoke(request, responseObserver);
+        responseObserver.freeze();
+        if (call.isReady()) {
+          // Since we are calling invoke in halfClose we have missed the onReady
+          // event from the transport so recover it here.
+          onReady();
+        }
+      }
+
+      @Override
+      public void onCancel() {
+        responseObserver.cancelled = true;
+        if (responseObserver.onCancelHandler != null) {
+          responseObserver.onCancelHandler.run();
+        }
+      }
+
+      @Override
+      public void onReady() {
+        if (responseObserver.onReadyHandler != null) {
+          responseObserver.onReadyHandler.run();
+        }
+      }
+    }
   }
 
   /**
@@ -123,60 +200,86 @@ public final class ServerCalls {
    * @param method an adaptor to the actual method on the service implementation.
    */
   private static <ReqT, RespT> ServerCallHandler<ReqT, RespT> asyncUnaryRequestCall(
-      final UnaryRequestMethod<ReqT, RespT> method) {
-    return new ServerCallHandler<ReqT, RespT>() {
-      @Override
-      public ServerCall.Listener<ReqT> startCall(
-          final ServerCall<ReqT, RespT> call,
-          Metadata headers) {
-        final ServerCallStreamObserverImpl<ReqT, RespT> responseObserver =
-            new ServerCallStreamObserverImpl<ReqT, RespT>(call);
-        // We expect only 1 request, but we ask for 2 requests here so that if a misbehaving client
-        // sends more than 1 requests, ServerCall will catch it. Note that disabling auto
-        // inbound flow control has no effect on unary calls.
-        call.request(2);
-        return new EmptyServerCallListener<ReqT>() {
-          ReqT request;
-          @Override
-          public void onMessage(ReqT request) {
-            // We delay calling method.invoke() until onHalfClose() to make sure the client
-            // half-closes.
-            this.request = request;
-          }
+      UnaryRequestMethod<ReqT, RespT> method) {
+    return new UnaryServerCallHandler<ReqT, RespT>(method);
+  }
 
-          @Override
-          public void onHalfClose() {
-            if (request != null) {
-              method.invoke(request, responseObserver);
-              responseObserver.freeze();
-              if (call.isReady()) {
-                // Since we are calling invoke in halfClose we have missed the onReady
-                // event from the transport so recover it here.
-                onReady();
-              }
-            } else {
-              call.close(Status.INTERNAL.withDescription("Half-closed without a request"),
-                  new Metadata());
-            }
-          }
+  private static final class StreamingServerCallHandler<ReqT, RespT>
+      implements ServerCallHandler<ReqT, RespT> {
 
-          @Override
-          public void onCancel() {
-            responseObserver.cancelled = true;
-            if (responseObserver.onCancelHandler != null) {
-              responseObserver.onCancelHandler.run();
-            }
-          }
+    private final StreamingRequestMethod<ReqT, RespT> method;
 
-          @Override
-          public void onReady() {
-            if (responseObserver.onReadyHandler != null) {
-              responseObserver.onReadyHandler.run();
-            }
-          }
-        };
+    // Non private to avoid synthetic class
+    StreamingServerCallHandler(StreamingRequestMethod<ReqT, RespT> method) {
+      this.method = method;
+    }
+
+    @Override
+    public ServerCall.Listener<ReqT> startCall(ServerCall<ReqT, RespT> call, Metadata headers) {
+      ServerCallStreamObserverImpl<ReqT, RespT> responseObserver =
+          new ServerCallStreamObserverImpl<ReqT, RespT>(call);
+      StreamObserver<ReqT> requestObserver = method.invoke(responseObserver);
+      responseObserver.freeze();
+      if (responseObserver.autoFlowControlEnabled) {
+        call.request(1);
       }
-    };
+      return new StreamingServerCallListener(requestObserver, responseObserver, call);
+    }
+
+    private final class StreamingServerCallListener extends ServerCall.Listener<ReqT> {
+
+      private final StreamObserver<ReqT> requestObserver;
+      private final ServerCallStreamObserverImpl<ReqT, RespT> responseObserver;
+      private final ServerCall<ReqT, RespT> call;
+      private boolean halfClosed = false;
+
+      // Non private to avoid synthetic class
+      StreamingServerCallListener(
+          StreamObserver<ReqT> requestObserver,
+          ServerCallStreamObserverImpl<ReqT, RespT> responseObserver,
+          ServerCall<ReqT, RespT> call) {
+        this.requestObserver = requestObserver;
+        this.responseObserver = responseObserver;
+        this.call = call;
+      }
+
+      @Override
+      public void onMessage(ReqT request) {
+        requestObserver.onNext(request);
+
+        // Request delivery of the next inbound message.
+        if (responseObserver.autoFlowControlEnabled) {
+          call.request(1);
+        }
+      }
+
+      @Override
+      public void onHalfClose() {
+        halfClosed = true;
+        requestObserver.onCompleted();
+      }
+
+      @Override
+      public void onCancel() {
+        responseObserver.cancelled = true;
+        if (responseObserver.onCancelHandler != null) {
+          responseObserver.onCancelHandler.run();
+        }
+        if (!halfClosed) {
+          requestObserver.onError(
+              Status.CANCELLED
+                  .withDescription("cancelled before receiving half close")
+                  .asRuntimeException());
+        }
+      }
+
+      @Override
+      public void onReady() {
+        if (responseObserver.onReadyHandler != null) {
+          responseObserver.onReadyHandler.run();
+        }
+      }
+    }
   }
 
   /**
@@ -185,65 +288,15 @@ public final class ServerCalls {
    * @param method an adaptor to the actual method on the service implementation.
    */
   private static <ReqT, RespT> ServerCallHandler<ReqT, RespT> asyncStreamingRequestCall(
-      final StreamingRequestMethod<ReqT, RespT> method) {
-    return new ServerCallHandler<ReqT, RespT>() {
-      @Override
-      public ServerCall.Listener<ReqT> startCall(
-          final ServerCall<ReqT, RespT> call,
-          Metadata headers) {
-        final ServerCallStreamObserverImpl<ReqT, RespT> responseObserver =
-            new ServerCallStreamObserverImpl<ReqT, RespT>(call);
-        final StreamObserver<ReqT> requestObserver = method.invoke(responseObserver);
-        responseObserver.freeze();
-        if (responseObserver.autoFlowControlEnabled) {
-          call.request(1);
-        }
-        return new EmptyServerCallListener<ReqT>() {
-          boolean halfClosed = false;
-
-          @Override
-          public void onMessage(ReqT request) {
-            requestObserver.onNext(request);
-
-            // Request delivery of the next inbound message.
-            if (responseObserver.autoFlowControlEnabled) {
-              call.request(1);
-            }
-          }
-
-          @Override
-          public void onHalfClose() {
-            halfClosed = true;
-            requestObserver.onCompleted();
-          }
-
-          @Override
-          public void onCancel() {
-            responseObserver.cancelled = true;
-            if (responseObserver.onCancelHandler != null) {
-              responseObserver.onCancelHandler.run();
-            }
-            if (!halfClosed) {
-              requestObserver.onError(Status.CANCELLED.asException());
-            }
-          }
-
-          @Override
-          public void onReady() {
-            if (responseObserver.onReadyHandler != null) {
-              responseObserver.onReadyHandler.run();
-            }
-          }
-        };
-      }
-    };
+      StreamingRequestMethod<ReqT, RespT> method) {
+    return new StreamingServerCallHandler<ReqT, RespT>(method);
   }
 
-  private static interface UnaryRequestMethod<ReqT, RespT> {
+  private interface UnaryRequestMethod<ReqT, RespT> {
     void invoke(ReqT request, StreamObserver<RespT> responseObserver);
   }
 
-  private static interface StreamingRequestMethod<ReqT, RespT> {
+  private interface StreamingRequestMethod<ReqT, RespT> {
     StreamObserver<ReqT> invoke(StreamObserver<RespT> responseObserver);
   }
 
@@ -257,6 +310,7 @@ public final class ServerCalls {
     private Runnable onReadyHandler;
     private Runnable onCancelHandler;
 
+    // Non private to avoid synthetic class
     ServerCallStreamObserverImpl(ServerCall<ReqT, RespT> call) {
       this.call = call;
     }
@@ -278,7 +332,7 @@ public final class ServerCalls {
     @Override
     public void onNext(RespT response) {
       if (cancelled) {
-        throw Status.CANCELLED.asRuntimeException();
+        throw Status.CANCELLED.withDescription("call already cancelled").asRuntimeException();
       }
       if (!sentHeaders) {
         call.sendHeaders(new Metadata());
@@ -299,7 +353,7 @@ public final class ServerCalls {
     @Override
     public void onCompleted() {
       if (cancelled) {
-        throw Status.CANCELLED.asRuntimeException();
+        throw Status.CANCELLED.withDescription("call already cancelled").asRuntimeException();
       } else {
         call.close(Status.OK, new Metadata());
       }
@@ -312,9 +366,7 @@ public final class ServerCalls {
 
     @Override
     public void setOnReadyHandler(Runnable r) {
-      if (frozen) {
-        throw new IllegalStateException("Cannot alter onReadyHandler after initialization");
-      }
+      checkState(!frozen, "Cannot alter onReadyHandler after initialization");
       this.onReadyHandler = r;
     }
 
@@ -325,42 +377,19 @@ public final class ServerCalls {
 
     @Override
     public void setOnCancelHandler(Runnable onCancelHandler) {
-      if (frozen) {
-        throw new IllegalStateException("Cannot alter onCancelHandler after initialization");
-      }
+      checkState(!frozen, "Cannot alter onCancelHandler after initialization");
       this.onCancelHandler = onCancelHandler;
     }
 
     @Override
     public void disableAutoInboundFlowControl() {
-      if (frozen) {
-        throw new IllegalStateException("Cannot disable auto flow control after initialization");
-      } else {
-        autoFlowControlEnabled = false;
-      }
+      checkState(!frozen, "Cannot disable auto flow control after initialization");
+      autoFlowControlEnabled = false;
     }
 
     @Override
     public void request(int count) {
       call.request(count);
-    }
-  }
-
-  private static class EmptyServerCallListener<ReqT> extends ServerCall.Listener<ReqT> {
-    @Override
-    public void onMessage(ReqT request) {
-    }
-
-    @Override
-    public void onHalfClose() {
-    }
-
-    @Override
-    public void onCancel() {
-    }
-
-    @Override
-    public void onComplete() {
     }
   }
 
@@ -377,7 +406,7 @@ public final class ServerCalls {
     responseObserver.onError(Status.UNIMPLEMENTED
         .withDescription(String.format("Method %s is unimplemented",
             methodDescriptor.getFullMethodName()))
-        .asException());
+        .asRuntimeException());
   }
 
   /**

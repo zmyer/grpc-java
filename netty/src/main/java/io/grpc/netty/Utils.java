@@ -1,61 +1,51 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.netty;
 
 import static io.grpc.internal.GrpcUtil.CONTENT_TYPE_KEY;
-import static io.grpc.internal.GrpcUtil.USER_AGENT_KEY;
 import static io.grpc.internal.TransportFrameUtil.toHttp2Headers;
 import static io.grpc.internal.TransportFrameUtil.toRawSerializedHeaders;
+import static io.netty.channel.ChannelOption.SO_LINGER;
+import static io.netty.channel.ChannelOption.SO_TIMEOUT;
 import static io.netty.util.CharsetUtil.UTF_8;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-
 import io.grpc.InternalMetadata;
 import io.grpc.Metadata;
 import io.grpc.Status;
+import io.grpc.internal.Channelz;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.SharedResourceHolder.Resource;
-import io.grpc.netty.GrpcHttp2HeadersDecoder.GrpcHttp2InboundHeaders;
+import io.grpc.netty.GrpcHttp2HeadersUtils.GrpcHttp2InboundHeaders;
+import io.grpc.netty.NettySocketSupport.NativeSocketOptions;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelConfig;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.codec.http2.Http2Headers;
 import io.netty.util.AsciiString;
 import io.netty.util.concurrent.DefaultThreadFactory;
-
 import java.io.IOException;
 import java.nio.channels.ClosedChannelException;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
@@ -67,13 +57,14 @@ class Utils {
 
   public static final AsciiString STATUS_OK = AsciiString.of("200");
   public static final AsciiString HTTP_METHOD = AsciiString.of(GrpcUtil.HTTP_METHOD);
+  public static final AsciiString HTTP_GET_METHOD = AsciiString.of("GET");
   public static final AsciiString HTTPS = AsciiString.of("https");
   public static final AsciiString HTTP = AsciiString.of("http");
   public static final AsciiString CONTENT_TYPE_HEADER = AsciiString.of(CONTENT_TYPE_KEY.name());
   public static final AsciiString CONTENT_TYPE_GRPC = AsciiString.of(GrpcUtil.CONTENT_TYPE_GRPC);
-  public static final AsciiString TE_HEADER = AsciiString.of("te");
+  public static final AsciiString TE_HEADER = AsciiString.of(GrpcUtil.TE_HEADER.name());
   public static final AsciiString TE_TRAILERS = AsciiString.of(GrpcUtil.TE_TRAILERS);
-  public static final AsciiString USER_AGENT = AsciiString.of(USER_AGENT_KEY.name());
+  public static final AsciiString USER_AGENT = AsciiString.of(GrpcUtil.USER_AGENT_KEY.name());
 
   public static final Resource<EventLoopGroup> DEFAULT_BOSS_EVENT_LOOP_GROUP =
       new DefaultEventLoopGroupResource(1, "grpc-default-boss-ELG");
@@ -118,20 +109,32 @@ class Utils {
       AsciiString scheme,
       AsciiString defaultPath,
       AsciiString authority,
+      AsciiString method,
       AsciiString userAgent) {
     Preconditions.checkNotNull(defaultPath, "defaultPath");
     Preconditions.checkNotNull(authority, "authority");
+    Preconditions.checkNotNull(method, "method");
+
+    // Discard any application supplied duplicates of the reserved headers
+    headers.discardAll(CONTENT_TYPE_KEY);
+    headers.discardAll(GrpcUtil.TE_HEADER);
+    headers.discardAll(GrpcUtil.USER_AGENT_KEY);
 
     return GrpcHttp2OutboundHeaders.clientRequestHeaders(
         toHttp2Headers(headers),
         authority,
         defaultPath,
-        HTTP_METHOD,
+        method,
         scheme,
         userAgent);
   }
 
   public static Http2Headers convertServerHeaders(Metadata headers) {
+    // Discard any application supplied duplicates of the reserved headers
+    headers.discardAll(CONTENT_TYPE_KEY);
+    headers.discardAll(GrpcUtil.TE_HEADER);
+    headers.discardAll(GrpcUtil.USER_AGENT_KEY);
+
     return GrpcHttp2OutboundHeaders.serverResponseHeaders(toHttp2Headers(headers));
   }
 
@@ -159,13 +162,19 @@ class Utils {
       // ClosedChannelException is used any time the Netty channel is closed. Proper error
       // processing requires remembering the error that occurred before this one and using it
       // instead.
-      return Status.UNKNOWN.withCause(t);
+      //
+      // Netty uses an exception that has no stack trace, while we would never hope to show this to
+      // users, if it happens having the extra information may provide a small hint of where to
+      // look.
+      ClosedChannelException extraT = new ClosedChannelException();
+      extraT.initCause(t);
+      return Status.UNKNOWN.withDescription("channel closed").withCause(extraT);
     }
     if (t instanceof IOException) {
-      return Status.UNAVAILABLE.withCause(t);
+      return Status.UNAVAILABLE.withDescription("io exception").withCause(t);
     }
     if (t instanceof Http2Exception) {
-      return Status.INTERNAL.withCause(t);
+      return Status.INTERNAL.withDescription("http2 exception").withCause(t);
     }
     return s;
   }
@@ -198,6 +207,45 @@ class Utils {
     public String toString() {
       return name;
     }
+  }
+
+  static Channelz.SocketOptions getSocketOptions(Channel channel) {
+    ChannelConfig config = channel.config();
+    Channelz.SocketOptions.Builder b = new Channelz.SocketOptions.Builder();
+
+    // The API allows returning null but not sure if it can happen in practice.
+    // Let's be paranoid and do null checking just in case.
+    Integer lingerSeconds = config.getOption(SO_LINGER);
+    if (lingerSeconds != null) {
+      b.setSocketOptionLingerSeconds(lingerSeconds);
+    }
+
+    Integer timeoutMillis = config.getOption(SO_TIMEOUT);
+    if (timeoutMillis != null) {
+      // in java, SO_TIMEOUT only applies to receiving
+      b.setSocketOptionTimeoutMillis(timeoutMillis);
+    }
+
+    for (Entry<ChannelOption<?>, Object> opt : config.getOptions().entrySet()) {
+      ChannelOption<?> key = opt.getKey();
+      // Constants are pooled, so there should only be one instance of each constant
+      if (key.equals(SO_LINGER) || key.equals(SO_TIMEOUT)) {
+        continue;
+      }
+      Object value = opt.getValue();
+      // zpencer: Can a netty option be null?
+      b.addOption(key.name(), String.valueOf(value));
+    }
+
+    NativeSocketOptions nativeOptions
+        = NettySocketSupport.getNativeSocketOptions(channel);
+    if (nativeOptions != null) {
+      b.setTcpInfo(nativeOptions.tcpInfo); // may be null
+      for (Entry<String, String> entry : nativeOptions.otherInfo.entrySet()) {
+        b.addOption(entry.getKey(), entry.getValue());
+      }
+    }
+    return b.build();
   }
 
   private Utils() {

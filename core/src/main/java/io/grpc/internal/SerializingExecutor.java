@@ -1,45 +1,31 @@
 /*
- * Copyright 2014, Google Inc. All rights reserved.
+ * Copyright 2014 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.internal;
 
-import com.google.common.base.Preconditions;
+import static com.google.common.base.Preconditions.checkNotNull;
 
-import java.util.ArrayDeque;
+import com.google.common.base.Preconditions;
 import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-
-import javax.annotation.concurrent.GuardedBy;
+import javax.annotation.Nullable;
 
 /**
  * Executor ensuring that all {@link Runnable} tasks submitted are executed in order
@@ -47,32 +33,38 @@ import javax.annotation.concurrent.GuardedBy;
  * running at the same time.
  */
 // TODO(madongfly): figure out a way to not expose it or move it to transport package.
-public final class SerializingExecutor implements Executor {
+public final class SerializingExecutor implements Executor, Runnable {
   private static final Logger log =
       Logger.getLogger(SerializingExecutor.class.getName());
+
+  // When using Atomic*FieldUpdater, some Samsung Android 5.0.x devices encounter a bug in their JDK
+  // reflection API that triggers a NoSuchFieldException. When this occurs, fallback to a
+  // synchronized implementation.
+  private static final AtomicHelper atomicHelper = getAtomicHelper();
+
+  private static AtomicHelper getAtomicHelper() {
+    AtomicHelper helper;
+    try {
+      helper =
+          new FieldUpdaterAtomicHelper(
+              AtomicIntegerFieldUpdater.newUpdater(SerializingExecutor.class, "runState"));
+    } catch (Throwable t) {
+      log.log(Level.SEVERE, "FieldUpdaterAtomicHelper failed", t);
+      helper = new SynchronizedAtomicHelper();
+    }
+    return helper;
+  }
+
+  private static final int STOPPED = 0;
+  private static final int RUNNING = -1;
 
   /** Underlying executor that all submitted Runnable objects are run on. */
   private final Executor executor;
 
   /** A list of Runnables to be run in order. */
-  // Initial size set to 4 because it is a nice number and at least the size necessary for handling
-  // a unary response: onHeaders + onPayload + onClose
-  @GuardedBy("internalLock")
-  private final Queue<Runnable> waitQueue = new ArrayDeque<Runnable>(4);
+  private final Queue<Runnable> runQueue = new ConcurrentLinkedQueue<Runnable>();
 
-  /**
-   * We explicitly keep track of if the TaskRunner is currently scheduled to
-   * run.  If it isn't, we start it.  We can't just use
-   * waitQueue.isEmpty() as a proxy because we need to ensure that only one
-   * Runnable submitted is running at a time so even if waitQueue is empty
-   * the isThreadScheduled isn't set to false until after the Runnable is
-   * finished.
-   */
-  @GuardedBy("internalLock")
-  private boolean isThreadScheduled = false;
-
-  /** The object that actually runs the Runnables submitted, reused. */
-  private final TaskRunner taskRunner = new TaskRunner();
+  private volatile int runState = STOPPED;
 
   /**
    * Creates a SerializingExecutor, running tasks using {@code executor}.
@@ -84,89 +76,106 @@ public final class SerializingExecutor implements Executor {
     this.executor = executor;
   }
 
-  private final Object internalLock = new Object() {
-    @Override public String toString() {
-      return "SerializingExecutor lock: " + super.toString();
-    }
-  };
-
   /**
    * Runs the given runnable strictly after all Runnables that were submitted
    * before it, and using the {@code executor} passed to the constructor.     .
    */
   @Override
   public void execute(Runnable r) {
-    Preconditions.checkNotNull(r, "'r' must not be null.");
-    boolean scheduleTaskRunner = false;
-    synchronized (internalLock) {
-      waitQueue.add(r);
+    runQueue.add(checkNotNull(r, "'r' must not be null."));
+    schedule(r);
+  }
 
-      if (!isThreadScheduled) {
-        isThreadScheduled = true;
-        scheduleTaskRunner = true;
-      }
-    }
-    if (scheduleTaskRunner) {
-      boolean threw = true;
+  private void schedule(@Nullable Runnable removable) {
+    if (atomicHelper.runStateCompareAndSet(this, STOPPED, RUNNING)) {
+      boolean success = false;
       try {
-        executor.execute(taskRunner);
-        threw = false;
+        executor.execute(this);
+        success = true;
       } finally {
-        if (threw) {
-          synchronized (internalLock) {
-            // It is possible that at this point that there are still tasks in
-            // the queue, it would be nice to keep trying but the error may not
-            // be recoverable.  So we update our state and propogate so that if
-            // our caller deems it recoverable we won't be stuck.
-            isThreadScheduled = false;
+        // It is possible that at this point that there are still tasks in
+        // the queue, it would be nice to keep trying but the error may not
+        // be recoverable.  So we update our state and propagate so that if
+        // our caller deems it recoverable we won't be stuck.
+        if (!success) {
+          if (removable != null) {
+            // This case can only be reached if 'this' was not currently running, and we failed to
+            // reschedule.  The item should still be in the queue for removal.
+            // ConcurrentLinkedQueue claims that null elements are not allowed, but seems to not
+            // throw if the item to remove is null.  If removable is present in the queue twice,
+            // the wrong one may be removed.  It doesn't seem possible for this case to exist today.
+            // This is important to run in case of RejectedExectuionException, so that future calls
+            // to execute don't succeed and accidentally run a previous runnable.
+            runQueue.remove(removable);
           }
+          atomicHelper.runStateSet(this, STOPPED);
         }
       }
     }
   }
 
-  /**
-   * Task that actually runs the Runnables.  It takes the Runnables off of the
-   * queue one by one and runs them.  After it is done with all Runnables and
-   * there are no more to run, puts the SerializingExecutor in the state where
-   * isThreadScheduled = false and returns.  This allows the current worker
-   * thread to return to the original pool.
-   */
-  private class TaskRunner implements Runnable {
-    @Override
-    public void run() {
-      boolean stillRunning = true;
-      try {
-        while (true) {
-          Runnable nextToRun;
-          synchronized (internalLock) {
-            Preconditions.checkState(isThreadScheduled);
-            nextToRun = waitQueue.poll();
-            if (nextToRun == null) {
-              isThreadScheduled = false;
-              stillRunning = false;
-              break;
-            }
-          }
+  @Override
+  public void run() {
+    Runnable r;
+    try {
+      while ((r = runQueue.poll()) != null) {
+        try {
+          r.run();
+        } catch (RuntimeException e) {
+          // Log it and keep going.
+          log.log(Level.SEVERE, "Exception while executing runnable " + r, e);
+        }
+      }
+    } finally {
+      atomicHelper.runStateSet(this, STOPPED);
+    }
+    if (!runQueue.isEmpty()) {
+      // we didn't enqueue anything but someone else did.
+      schedule(null);
+    }
+  }
 
-          // Always run while not holding the lock, to avoid deadlocks.
-          try {
-            nextToRun.run();
-          } catch (RuntimeException e) {
-            // Log it and keep going.
-            log.log(Level.SEVERE, "Exception while executing runnable "
-                + nextToRun, e);
-          }
+  private abstract static class AtomicHelper {
+    public abstract boolean runStateCompareAndSet(SerializingExecutor obj, int expect, int update);
+
+    public abstract void runStateSet(SerializingExecutor obj, int newValue);
+  }
+
+  private static final class FieldUpdaterAtomicHelper extends AtomicHelper {
+    private final AtomicIntegerFieldUpdater<SerializingExecutor> runStateUpdater;
+
+    private FieldUpdaterAtomicHelper(
+        AtomicIntegerFieldUpdater<SerializingExecutor> runStateUpdater) {
+      this.runStateUpdater = runStateUpdater;
+    }
+
+    @Override
+    public boolean runStateCompareAndSet(SerializingExecutor obj, int expect, int update) {
+      return runStateUpdater.compareAndSet(obj, expect, update);
+    }
+
+    @Override
+    public void runStateSet(SerializingExecutor obj, int newValue) {
+      runStateUpdater.set(obj, newValue);
+    }
+  }
+
+  private static final class SynchronizedAtomicHelper extends AtomicHelper {
+    @Override
+    public boolean runStateCompareAndSet(SerializingExecutor obj, int expect, int update) {
+      synchronized (obj) {
+        if (obj.runState == expect) {
+          obj.runState = update;
+          return true;
         }
-      } finally {
-        if (stillRunning) {
-          // An Error is bubbling up, we should mark ourselves as no longer
-          // running, that way if anyone tries to keep using us we won't be
-          // corrupted.
-          synchronized (internalLock) {
-            isThreadScheduled = false;
-          }
-        }
+        return false;
+      }
+    }
+
+    @Override
+    public void runStateSet(SerializingExecutor obj, int newValue) {
+      synchronized (obj) {
+        obj.runState = newValue;
       }
     }
   }

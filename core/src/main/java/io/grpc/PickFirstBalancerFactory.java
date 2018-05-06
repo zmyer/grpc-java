@@ -1,45 +1,34 @@
 /*
- * Copyright 2015, Google Inc. All rights reserved.
+ * Copyright 2015 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc;
 
-import com.google.common.base.Supplier;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static io.grpc.ConnectivityState.CONNECTING;
+import static io.grpc.ConnectivityState.SHUTDOWN;
+import static io.grpc.ConnectivityState.TRANSIENT_FAILURE;
 
-import io.grpc.TransportManager.InterimTransport;
-
+import com.google.common.annotations.VisibleForTesting;
+import io.grpc.LoadBalancer.PickResult;
+import io.grpc.LoadBalancer.PickSubchannelArgs;
+import io.grpc.LoadBalancer.Subchannel;
+import io.grpc.LoadBalancer.SubchannelPicker;
 import java.net.SocketAddress;
 import java.util.ArrayList;
 import java.util.List;
-
-import javax.annotation.concurrent.GuardedBy;
 
 /**
  * A {@link LoadBalancer} that provides no load balancing mechanism over the
@@ -49,138 +38,131 @@ import javax.annotation.concurrent.GuardedBy;
 @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1771")
 public final class PickFirstBalancerFactory extends LoadBalancer.Factory {
 
-  private static final PickFirstBalancerFactory instance = new PickFirstBalancerFactory();
+  private static final PickFirstBalancerFactory INSTANCE = new PickFirstBalancerFactory();
 
   private PickFirstBalancerFactory() {
   }
 
+  /**
+   * Gets an instance of this factory.
+   */
   public static PickFirstBalancerFactory getInstance() {
-    return instance;
+    return INSTANCE;
   }
 
   @Override
-  public <T> LoadBalancer<T> newLoadBalancer(String serviceName, TransportManager<T> tm) {
-    return new PickFirstBalancer<T>(tm);
+  public LoadBalancer newLoadBalancer(LoadBalancer.Helper helper) {
+    return new PickFirstBalancer(helper);
   }
 
-  private static class PickFirstBalancer<T> extends LoadBalancer<T> {
-    private static final Status SHUTDOWN_STATUS =
-        Status.UNAVAILABLE.augmentDescription("PickFirstBalancer has shut down");
+  @VisibleForTesting
+  static final class PickFirstBalancer extends LoadBalancer {
+    private final Helper helper;
+    private Subchannel subchannel;
 
-    private final Object lock = new Object();
-
-    /** "lock" must be held when mutating. */
-    private volatile EquivalentAddressGroup addresses;
-    @GuardedBy("lock")
-    private InterimTransport<T> interimTransport;
-    @GuardedBy("lock")
-    private Status nameResolutionError;
-    @GuardedBy("lock")
-    private boolean closed;
-
-    private final TransportManager<T> tm;
-
-    private PickFirstBalancer(TransportManager<T> tm) {
-      this.tm = tm;
+    PickFirstBalancer(Helper helper) {
+      this.helper = checkNotNull(helper, "helper");
     }
 
     @Override
-    public T pickTransport(Attributes affinity) {
-      EquivalentAddressGroup addressesCopy = addresses;
-      if (addressesCopy != null) {
-        return tm.getTransport(addressesCopy);
-      }
-      synchronized (lock) {
-        if (closed) {
-          return tm.createFailingTransport(SHUTDOWN_STATUS);
-        }
-        addressesCopy = addresses;
-        if (addressesCopy == null) {
-          if (nameResolutionError != null) {
-            return tm.createFailingTransport(nameResolutionError);
-          }
-          if (interimTransport == null) {
-            interimTransport = tm.createInterimTransport();
-          }
-          return interimTransport.transport();
-        }
-      }
-      return tm.getTransport(addressesCopy);
-    }
+    public void handleResolvedAddressGroups(
+        List<EquivalentAddressGroup> servers, Attributes attributes) {
+      // Flatten servers list received from name resolver into single address group. This means that
+      // as far as load balancer is concerned, there's virtually one single server with multiple
+      // addresses so the connection will be created only for the first address (pick first).
+      EquivalentAddressGroup newEag = flattenEquivalentAddressGroup(servers);
+      if (subchannel == null) {
+        subchannel = helper.createSubchannel(newEag, Attributes.EMPTY);
 
-    @Override
-    public void handleResolvedAddresses(List<ResolvedServerInfoGroup> updatedServers,
-        Attributes attributes) {
-      InterimTransport<T> savedInterimTransport;
-      final EquivalentAddressGroup newAddresses;
-      synchronized (lock) {
-        if (closed) {
-          return;
-        }
-        newAddresses = resolvedServerInfoGroupsToEquivalentAddressGroup(updatedServers);
-        if (newAddresses.equals(addresses)) {
-          return;
-        }
-        addresses = newAddresses;
-        nameResolutionError = null;
-        savedInterimTransport = interimTransport;
-        interimTransport = null;
-      }
-      if (savedInterimTransport != null) {
-        savedInterimTransport.closeWithRealTransports(new Supplier<T>() {
-            @Override public T get() {
-              return tm.getTransport(newAddresses);
-            }
-          });
+        // The channel state does not get updated when doing name resolving today, so for the moment
+        // let LB report CONNECTION and call subchannel.requestConnection() immediately.
+        helper.updateBalancingState(CONNECTING, new Picker(PickResult.withSubchannel(subchannel)));
+        subchannel.requestConnection();
+      } else {
+        helper.updateSubchannelAddresses(subchannel, newEag);
       }
     }
 
     @Override
     public void handleNameResolutionError(Status error) {
-      InterimTransport<T> savedInterimTransport;
-      synchronized (lock) {
-        if (closed) {
-          return;
-        }
-        error = error.augmentDescription("Name resolution failed");
-        savedInterimTransport = interimTransport;
-        interimTransport = null;
-        nameResolutionError = error;
+      if (subchannel != null) {
+        subchannel.shutdown();
+        subchannel = null;
       }
-      if (savedInterimTransport != null) {
-        savedInterimTransport.closeWithError(error);
+      // NB(lukaszx0) Whether we should propagate the error unconditionally is arguable. It's fine
+      // for time being.
+      helper.updateBalancingState(TRANSIENT_FAILURE, new Picker(PickResult.withError(error)));
+    }
+
+    @Override
+    public void handleSubchannelState(Subchannel subchannel, ConnectivityStateInfo stateInfo) {
+      ConnectivityState currentState = stateInfo.getState();
+      if (subchannel != this.subchannel || currentState == SHUTDOWN) {
+        return;
       }
+
+      PickResult pickResult;
+      switch (currentState) {
+        case CONNECTING:
+          pickResult = PickResult.withNoResult();
+          break;
+        case READY:
+        case IDLE:
+          pickResult = PickResult.withSubchannel(subchannel);
+          break;
+        case TRANSIENT_FAILURE:
+          pickResult = PickResult.withError(stateInfo.getStatus());
+          break;
+        default:
+          throw new IllegalArgumentException("Unsupported state:" + currentState);
+      }
+
+      helper.updateBalancingState(currentState, new Picker(pickResult));
     }
 
     @Override
     public void shutdown() {
-      InterimTransport<T> savedInterimTransport;
-      synchronized (lock) {
-        if (closed) {
-          return;
-        }
-        closed = true;
-        addresses = null;
-        savedInterimTransport = interimTransport;
-        interimTransport = null;
-      }
-      if (savedInterimTransport != null) {
-        savedInterimTransport.closeWithError(SHUTDOWN_STATUS);
+      if (subchannel != null) {
+        subchannel.shutdown();
       }
     }
 
     /**
-     * Converts list of ResolvedServerInfoGroup objects into one EquivalentAddressGroup object.
+     * Flattens list of EquivalentAddressGroup objects into one EquivalentAddressGroup object.
      */
-    private static EquivalentAddressGroup resolvedServerInfoGroupsToEquivalentAddressGroup(
-        List<ResolvedServerInfoGroup> groupList) {
-      List<SocketAddress> addrs = new ArrayList<SocketAddress>(groupList.size());
-      for (ResolvedServerInfoGroup group : groupList) {
-        for (ResolvedServerInfo srv : group.getResolvedServerInfoList()) {
-          addrs.add(srv.getAddress());
-        }
+    private static EquivalentAddressGroup flattenEquivalentAddressGroup(
+        List<EquivalentAddressGroup> groupList) {
+      List<SocketAddress> addrs = new ArrayList<SocketAddress>();
+      for (EquivalentAddressGroup group : groupList) {
+        addrs.addAll(group.getAddresses());
       }
       return new EquivalentAddressGroup(addrs);
+    }
+  }
+
+  /**
+   * No-op picker which doesn't add any custom picking logic. It just passes already known result
+   * received in constructor.
+   */
+  @VisibleForTesting
+  static final class Picker extends SubchannelPicker {
+    private final PickResult result;
+
+    Picker(PickResult result) {
+      this.result = checkNotNull(result, "result");
+    }
+
+    @Override
+    public PickResult pickSubchannel(PickSubchannelArgs args) {
+      return result;
+    }
+
+    @Override
+    public void requestConnection() {
+      Subchannel subchannel = result.getSubchannel();
+      if (subchannel != null) {
+        subchannel.requestConnection();
+      }
     }
   }
 }

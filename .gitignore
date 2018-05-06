@@ -3,9 +3,18 @@ build
 gradle.properties
 .gradle
 local.properties
+out
 
 # Maven (examples)
 target
+
+# Bazel
+bazel-bin
+bazel-examples
+bazel-genfiles
+bazel-grpc-java
+bazel-out
+bazel-testlogs
 
 # IntelliJ IDEA
 .idea

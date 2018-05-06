@@ -1,58 +1,55 @@
 /*
- * Copyright 2016, Google Inc. All rights reserved.
+ * Copyright 2016 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.okhttp;
 
+import io.grpc.ServerStreamTracer;
 import io.grpc.internal.AccessProtectedHack;
 import io.grpc.internal.ClientTransportFactory;
+import io.grpc.internal.FakeClock;
 import io.grpc.internal.InternalServer;
 import io.grpc.internal.ManagedClientTransport;
+import io.grpc.internal.TransportTracer;
 import io.grpc.internal.testing.AbstractTransportTest;
 import io.grpc.netty.NettyServerBuilder;
-
+import java.net.InetSocketAddress;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
 import org.junit.After;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.net.InetSocketAddress;
-
 /** Unit tests for OkHttp transport. */
 @RunWith(JUnit4.class)
 public class OkHttpTransportTest extends AbstractTransportTest {
+  private final FakeClock fakeClock = new FakeClock();
+  private final TransportTracer.Factory fakeClockTransportTracer = new TransportTracer.Factory(
+      new TransportTracer.TimeProvider() {
+        @Override
+        public long currentTimeMillis() {
+          return fakeClock.currentTimeMillis();
+        }
+      });
   private ClientTransportFactory clientFactory = OkHttpChannelBuilder
       // Although specified here, address is ignored because we never call build.
-      .forAddress("127.0.0.1", 0)
+      .forAddress("localhost", 0)
       .negotiationType(NegotiationType.PLAINTEXT)
+      .setTransportTracerFactory(fakeClockTransportTracer)
       .buildTransportFactory();
 
   @After
@@ -61,29 +58,50 @@ public class OkHttpTransportTest extends AbstractTransportTest {
   }
 
   @Override
-  protected InternalServer newServer() {
+  protected InternalServer newServer(List<ServerStreamTracer.Factory> streamTracerFactories) {
     return AccessProtectedHack.serverBuilderBuildTransportServer(
         NettyServerBuilder
           .forPort(0)
-          .flowControlWindow(65 * 1024));
+          .flowControlWindow(65 * 1024),
+        streamTracerFactories,
+        fakeClockTransportTracer);
   }
 
   @Override
-  protected InternalServer newServer(InternalServer server) {
+  protected InternalServer newServer(
+      InternalServer server, List<ServerStreamTracer.Factory> streamTracerFactories) {
     int port = server.getPort();
     return AccessProtectedHack.serverBuilderBuildTransportServer(
         NettyServerBuilder
             .forPort(port)
-            .flowControlWindow(65 * 1024));
+            .flowControlWindow(65 * 1024),
+        streamTracerFactories,
+        fakeClockTransportTracer);
+  }
+
+  @Override
+  protected String testAuthority(InternalServer server) {
+    return "thebestauthority:" + server.getPort();
   }
 
   @Override
   protected ManagedClientTransport newClientTransport(InternalServer server) {
     int port = server.getPort();
     return clientFactory.newClientTransport(
-        new InetSocketAddress("127.0.0.1", port),
-        "127.0.0.1:" + port,
-        null /* agent */);
+        new InetSocketAddress("localhost", port),
+        testAuthority(server),
+        null /* agent */,
+        null /* proxy */);
+  }
+
+  @Override
+  protected void advanceClock(long offset, TimeUnit unit) {
+    fakeClock.forwardNanos(unit.toNanos(offset));
+  }
+
+  @Override
+  protected long currentTimeMillis() {
+    return fakeClock.currentTimeMillis();
   }
 
   // TODO(ejona): Flaky/Broken
@@ -91,4 +109,9 @@ public class OkHttpTransportTest extends AbstractTransportTest {
   @Ignore
   @Override
   public void flowControlPushBack() {}
+
+  @Override
+  protected boolean haveTransportTracer() {
+    return true;
+  }
 }

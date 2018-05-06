@@ -1,32 +1,17 @@
 /*
- * Copyright 2016, Google Inc. All rights reserved.
+ * Copyright 2016 The gRPC Authors
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *    * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- *    * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.grpc.benchmarks.driver;
@@ -34,11 +19,10 @@ package io.grpc.benchmarks.driver;
 import static java.util.concurrent.ForkJoinPool.defaultForkJoinWorkerThreadFactory;
 
 import com.google.common.util.concurrent.UncaughtExceptionHandlers;
-
 import com.sun.management.OperatingSystemMXBean;
-
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
+import io.grpc.MethodDescriptor.Marshaller;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import io.grpc.ServerCall;
@@ -50,13 +34,11 @@ import io.grpc.benchmarks.ByteBufOutputMarshaller;
 import io.grpc.benchmarks.Utils;
 import io.grpc.benchmarks.proto.BenchmarkServiceGrpc;
 import io.grpc.benchmarks.proto.Control;
-import io.grpc.benchmarks.proto.Messages;
 import io.grpc.benchmarks.proto.Stats;
-import io.grpc.stub.StreamObserver;
-import io.grpc.testing.TestUtils;
+import io.grpc.benchmarks.qps.AsyncServer;
+import io.grpc.internal.testing.TestUtils;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
-
 import java.io.File;
 import java.lang.management.ManagementFactory;
 import java.util.List;
@@ -73,32 +55,26 @@ import java.util.logging.Logger;
  */
 final class LoadServer {
 
+  private static final Marshaller<ByteBuf> marshaller = new ByteBufOutputMarshaller();
   /**
    * Generic version of the unary method call.
    */
   static final MethodDescriptor<ByteBuf, ByteBuf> GENERIC_UNARY_METHOD =
-      MethodDescriptor.create(
-          BenchmarkServiceGrpc.METHOD_UNARY_CALL.getType(),
-          BenchmarkServiceGrpc.METHOD_UNARY_CALL.getFullMethodName(),
-          new ByteBufOutputMarshaller(),
-          new ByteBufOutputMarshaller());
+      BenchmarkServiceGrpc.getUnaryCallMethod().toBuilder(marshaller, marshaller)
+          .build();
 
   /**
    * Generic version of the streaming ping-pong method call.
    */
   static final MethodDescriptor<ByteBuf, ByteBuf> GENERIC_STREAMING_PING_PONG_METHOD =
-      MethodDescriptor.create(
-          BenchmarkServiceGrpc.METHOD_STREAMING_CALL.getType(),
-          BenchmarkServiceGrpc.METHOD_STREAMING_CALL.getFullMethodName(),
-          new ByteBufOutputMarshaller(),
-          new ByteBufOutputMarshaller());
+      BenchmarkServiceGrpc.getStreamingCallMethod().toBuilder(marshaller, marshaller)
+          .build();
 
   private static final Logger log = Logger.getLogger(LoadServer.class.getName());
 
   private final Server server;
-  private final BenchmarkServiceImpl benchmarkService;
+  private final AsyncServer.BenchmarkServiceImpl benchmarkService;
   private final OperatingSystemMXBean osBean;
-  private volatile boolean shutdown;
   private final int port;
   private ByteBuf genericResponse;
   private long lastStatTime;
@@ -143,7 +119,7 @@ final class LoadServer {
       File key = TestUtils.loadCert("server1.key");
       serverBuilder.useTransportSecurity(cert, key);
     }
-    benchmarkService = new BenchmarkServiceImpl();
+    benchmarkService = new AsyncServer.BenchmarkServiceImpl();
     if (config.getServerType() == Control.ServerType.ASYNC_GENERIC_SERVER) {
       serverBuilder.addService(
           ServerServiceDefinition
@@ -214,43 +190,8 @@ final class LoadServer {
   }
 
   void shutdownNow() {
-    shutdown = true;
+    benchmarkService.shutdown();
     server.shutdownNow();
-  }
-
-  private class BenchmarkServiceImpl extends BenchmarkServiceGrpc.BenchmarkServiceImplBase {
-
-    @Override
-    public void unaryCall(Messages.SimpleRequest request,
-                          StreamObserver<Messages.SimpleResponse> responseObserver) {
-      responseObserver.onNext(Utils.makeResponse(request));
-      responseObserver.onCompleted();
-    }
-
-    @Override
-    public StreamObserver<Messages.SimpleRequest> streamingCall(
-        final StreamObserver<Messages.SimpleResponse> responseObserver) {
-      return new StreamObserver<Messages.SimpleRequest>() {
-        @Override
-        public void onNext(Messages.SimpleRequest value) {
-          if (!shutdown) {
-            responseObserver.onNext(Utils.makeResponse(value));
-          } else {
-            responseObserver.onCompleted();
-          }
-        }
-
-        @Override
-        public void onError(Throwable t) {
-          responseObserver.onError(t);
-        }
-
-        @Override
-        public void onCompleted() {
-          responseObserver.onCompleted();
-        }
-      };
-    }
   }
 
   private class GenericServiceCallHandler implements ServerCallHandler<ByteBuf, ByteBuf> {
