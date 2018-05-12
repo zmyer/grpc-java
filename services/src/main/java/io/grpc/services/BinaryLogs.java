@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The gRPC Authors
+ * Copyright 2018, gRPC Authors All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,18 +14,21 @@
  * limitations under the License.
  */
 
-package io.grpc;
+package io.grpc.services;
 
-/**
- * Accessor to internal methods of {@link ServerInterceptors}.
- */
-@Internal
-public final class InternalServerInterceptors {
-  public static <ReqT, RespT> ServerCallHandler<ReqT, RespT> interceptCallHandler(
-      ServerInterceptor interceptor, ServerCallHandler<ReqT, RespT> callHandler) {
-    return ServerInterceptors.InterceptCallHandler.create(interceptor, callHandler);
+import io.grpc.BinaryLog;
+import io.grpc.ExperimentalApi;
+import io.grpc.InternalBinaryLogs;
+
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/4017")
+public final class BinaryLogs {
+  public static BinaryLog createBinaryLog() {
+    return InternalBinaryLogs.createBinaryLog(new BinaryLogProviderImpl());
   }
 
-  private InternalServerInterceptors() {
+  public static BinaryLog createCensusBinaryLog() {
+    return InternalBinaryLogs.createBinaryLog(new CensusBinaryLogProvider());
   }
+
+  private BinaryLogs() {}
 }

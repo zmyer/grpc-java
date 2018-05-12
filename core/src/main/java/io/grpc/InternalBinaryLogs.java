@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The gRPC Authors
+ * Copyright 2018, gRPC Authors All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,21 +16,20 @@
 
 package io.grpc;
 
-import io.grpc.MethodDescriptor.Marshaller;
-
-/**
- * Accessor to internal methods of {@link ServerInterceptors}.
- */
 @Internal
-public class InternalClientInterceptors {
-  public static <WReqT, WRespT> ClientInterceptor wrapClientInterceptor(
-      final ClientInterceptor wrappedInterceptor,
-      final Marshaller<WReqT> reqMarshaller,
-      final Marshaller<WRespT> respMarshaller) {
-    return ClientInterceptors.wrapClientInterceptor(
-        wrappedInterceptor, reqMarshaller, respMarshaller);
+public final class InternalBinaryLogs {
+  public static <ReqT, RespT> ServerMethodDefinition<?, ?> wrapMethodDefinition(
+      BinaryLog binaryLog, ServerMethodDefinition<ReqT, RespT> oMethodDef) {
+    return binaryLog.surrogate.wrapMethodDefinition(oMethodDef);
   }
 
-  private InternalClientInterceptors() {
+  public static Channel wrapChannel(BinaryLog binaryLog, Channel channel) {
+    return binaryLog.surrogate.wrapChannel(channel);
   }
+
+  public static BinaryLog createBinaryLog(BinaryLogProvider surrogate) {
+    return new BinaryLog(surrogate);
+  }
+
+  private InternalBinaryLogs() {}
 }
