@@ -40,7 +40,7 @@ public final class JsonParser {
   private JsonParser() {}
 
   /**
-   * Parses a json string, returning either a {@code Map<String, Object>}, {@code List<Object>},
+   * Parses a json string, returning either a {@code Map<String, ?>}, {@code List<?>},
    * {@code String}, {@code Double}, {@code Boolean}, or {@code null}.
    */
   @SuppressWarnings("unchecked")
@@ -77,9 +77,9 @@ public final class JsonParser {
     }
   }
 
-  private static Map<String, Object> parseJsonObject(JsonReader jr) throws IOException {
+  private static Map<String, ?> parseJsonObject(JsonReader jr) throws IOException {
     jr.beginObject();
-    Map<String, Object> obj = new LinkedHashMap<String, Object>();
+    Map<String, Object> obj = new LinkedHashMap<>();
     while (jr.hasNext()) {
       String name = jr.nextName();
       Object value = parseRecursive(jr);
@@ -90,9 +90,9 @@ public final class JsonParser {
     return Collections.unmodifiableMap(obj);
   }
 
-  private static List<Object> parseJsonArray(JsonReader jr) throws IOException {
+  private static List<?> parseJsonArray(JsonReader jr) throws IOException {
     jr.beginArray();
-    List<Object> array = new ArrayList<Object>();
+    List<Object> array = new ArrayList<>();
     while (jr.hasNext()) {
       Object value = parseRecursive(jr);
       array.add(value);

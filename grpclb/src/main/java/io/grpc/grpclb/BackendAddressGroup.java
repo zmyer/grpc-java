@@ -39,4 +39,15 @@ final class BackendAddressGroup {
   String getToken() {
     return token;
   }
+
+  @Override
+  public String toString() {
+    // This is printed in logs.  Be concise.
+    StringBuilder buffer = new StringBuilder();
+    buffer.append(addresses);
+    if (token != null) {
+      buffer.append("(").append(token).append(")");
+    }
+    return buffer.toString();
+  }
 }

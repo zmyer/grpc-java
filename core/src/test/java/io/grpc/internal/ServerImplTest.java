@@ -17,7 +17,7 @@
 package io.grpc.internal;
 
 import static com.google.common.truth.Truth.assertThat;
-import static io.grpc.internal.Channelz.id;
+import static io.grpc.InternalChannelz.id;
 import static io.grpc.internal.GrpcUtil.MESSAGE_ENCODING_KEY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -28,13 +28,11 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.AdditionalAnswers.delegatesTo;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyString;
-import static org.mockito.Matchers.eq;
-import static org.mockito.Matchers.isA;
-import static org.mockito.Matchers.isNotNull;
-import static org.mockito.Matchers.notNull;
-import static org.mockito.Matchers.same;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isA;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -44,19 +42,24 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
 import io.grpc.Attributes;
-import io.grpc.BinaryLogProvider;
-import io.grpc.CallOptions;
-import io.grpc.ClientInterceptor;
+import io.grpc.BinaryLog;
+import io.grpc.Channel;
 import io.grpc.Compressor;
 import io.grpc.Context;
 import io.grpc.Grpc;
 import io.grpc.HandlerRegistry;
 import io.grpc.IntegerMarshaller;
-import io.grpc.InternalBinaryLogs;
+import io.grpc.InternalChannelz;
+import io.grpc.InternalChannelz.ServerSocketsList;
+import io.grpc.InternalChannelz.SocketStats;
+import io.grpc.InternalInstrumented;
+import io.grpc.InternalLogId;
+import io.grpc.InternalServerInterceptors;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
@@ -70,8 +73,6 @@ import io.grpc.ServerTransportFilter;
 import io.grpc.ServiceDescriptor;
 import io.grpc.Status;
 import io.grpc.StringMarshaller;
-import io.grpc.internal.Channelz.ServerSocketsList;
-import io.grpc.internal.Channelz.SocketStats;
 import io.grpc.internal.ServerImpl.JumpToApplicationThreadServerStreamListener;
 import io.grpc.internal.testing.SingleMessageProducer;
 import io.grpc.internal.testing.TestServerStreamTracer;
@@ -80,11 +81,13 @@ import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
@@ -102,8 +105,8 @@ import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Captor;
-import org.mockito.Matchers;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
@@ -143,7 +146,7 @@ public class ServerImplTest {
 
   private final FakeClock executor = new FakeClock();
   private final FakeClock timer = new FakeClock();
-  private final Channelz channelz = new Channelz();
+  private final InternalChannelz channelz = new InternalChannelz();
 
   @Mock
   private ServerStreamTracer.Factory streamTracerFactory;
@@ -206,6 +209,42 @@ public class ServerImplTest {
   public void noPendingTasks() {
     assertEquals(0, executor.numPendingTasks());
     assertEquals(0, timer.numPendingTasks());
+  }
+
+  @Test
+  public void multiport() throws Exception {
+    final CountDownLatch starts = new CountDownLatch(2);
+    final CountDownLatch shutdowns = new CountDownLatch(2);
+
+    final class Serv extends SimpleServer {
+      @Override
+      public void start(ServerListener listener) throws IOException {
+        super.start(listener);
+        starts.countDown();
+      }
+
+      @Override
+      public void shutdown() {
+        super.shutdown();
+        shutdowns.countDown();
+      }
+    }
+
+    SimpleServer transportServer1 = new Serv();
+    SimpleServer transportServer2 = new Serv();
+    assertNull(server);
+    builder.fallbackHandlerRegistry(fallbackRegistry);
+    builder.executorPool = executorPool;
+    server = new ServerImpl(
+        builder, ImmutableList.of(transportServer1, transportServer2), SERVER_CONTEXT);
+
+    server.start();
+    assertTrue(starts.await(1, TimeUnit.SECONDS));
+    assertEquals(2, shutdowns.getCount());
+
+    server.shutdown();
+    assertTrue(shutdowns.await(1, TimeUnit.SECONDS));
+    assertTrue(server.awaitTermination(1, TimeUnit.SECONDS));
   }
 
   @Test
@@ -464,8 +503,8 @@ public class ServerImplTest {
     final Metadata.Key<String> metadataKey
         = Metadata.Key.of("inception", Metadata.ASCII_STRING_MARSHALLER);
     final AtomicReference<ServerCall<String, Integer>> callReference
-        = new AtomicReference<ServerCall<String, Integer>>();
-    final AtomicReference<Context> callContextReference = new AtomicReference<Context>();
+        = new AtomicReference<>();
+    final AtomicReference<Context> callContextReference = new AtomicReference<>();
     mutableFallbackRegistry.addService(ServerServiceDefinition.builder(
         new ServiceDescriptor("Waiter", method))
         .addMethod(
@@ -505,7 +544,7 @@ public class ServerImplTest {
     ServerCall<String, Integer> call = callReference.get();
     assertNotNull(call);
     assertEquals(
-        new ServerCallInfoImpl<String, Integer>(
+        new ServerCallInfoImpl<>(
             call.getMethodDescriptor(),
             call.getAttributes(),
             call.getAuthority()),
@@ -562,13 +601,13 @@ public class ServerImplTest {
   @Test
   public void transportFilters() throws Exception {
     final SocketAddress remoteAddr = mock(SocketAddress.class);
-    final Attributes.Key<String> key1 = Attributes.Key.of("test-key1");
-    final Attributes.Key<String> key2 = Attributes.Key.of("test-key2");
-    final Attributes.Key<String> key3 = Attributes.Key.of("test-key3");
+    final Attributes.Key<String> key1 = Attributes.Key.create("test-key1");
+    final Attributes.Key<String> key2 = Attributes.Key.create("test-key2");
+    final Attributes.Key<String> key3 = Attributes.Key.create("test-key3");
     final AtomicReference<Attributes> filter1TerminationCallbackArgument =
-        new AtomicReference<Attributes>();
+        new AtomicReference<>();
     final AtomicReference<Attributes> filter2TerminationCallbackArgument =
-        new AtomicReference<Attributes>();
+        new AtomicReference<>();
     final AtomicInteger readyCallbackCalled = new AtomicInteger(0);
     final AtomicInteger terminationCallbackCalled = new AtomicInteger(0);
     builder.addTransportFilter(new ServerTransportFilter() {
@@ -578,7 +617,7 @@ public class ServerImplTest {
               .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, remoteAddr)
               .build(), attrs);
           readyCallbackCalled.incrementAndGet();
-          return Attributes.newBuilder(attrs)
+          return attrs.toBuilder()
               .set(key1, "yalayala")
               .set(key2, "blabla")
               .build();
@@ -599,7 +638,7 @@ public class ServerImplTest {
               .set(key2, "blabla")
               .build(), attrs);
           readyCallbackCalled.incrementAndGet();
-          return Attributes.newBuilder(attrs)
+          return attrs.toBuilder()
               .set(key1, "ouch")
               .set(key3, "puff")
               .build();
@@ -637,11 +676,11 @@ public class ServerImplTest {
 
   @Test
   public void interceptors() throws Exception {
-    final LinkedList<Context> capturedContexts = new LinkedList<Context>();
+    final LinkedList<Context> capturedContexts = new LinkedList<>();
     final Context.Key<String> key1 = Context.key("key1");
     final Context.Key<String> key2 = Context.key("key2");
     final Context.Key<String> key3 = Context.key("key3");
-    ServerInterceptor intercepter1 = new ServerInterceptor() {
+    ServerInterceptor interceptor1 = new ServerInterceptor() {
         @Override
         public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
             ServerCall<ReqT, RespT> call,
@@ -657,7 +696,7 @@ public class ServerImplTest {
           }
         }
       };
-    ServerInterceptor intercepter2 = new ServerInterceptor() {
+    ServerInterceptor interceptor2 = new ServerInterceptor() {
         @Override
         public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
             ServerCall<ReqT, RespT> call,
@@ -686,8 +725,8 @@ public class ServerImplTest {
     mutableFallbackRegistry.addService(
         ServerServiceDefinition.builder(new ServiceDescriptor("Waiter", METHOD))
             .addMethod(METHOD, callHandler).build());
-    builder.intercept(intercepter2);
-    builder.intercept(intercepter1);
+    builder.intercept(interceptor2);
+    builder.intercept(interceptor1);
     createServer();
     server.start();
 
@@ -755,7 +794,7 @@ public class ServerImplTest {
 
     assertEquals(1, executor.runDueTasks());
     verify(fallbackRegistry).lookupMethod("Waiter/serve", AUTHORITY);
-    verify(stream).close(same(status), notNull(Metadata.class));
+    verify(stream).close(same(status), ArgumentMatchers.<Metadata>notNull());
     verify(stream, atLeast(1)).statsTraceContext();
   }
 
@@ -931,7 +970,7 @@ public class ServerImplTest {
     assertTrue(onCancelCalled.get());
 
     // Close should never be called if asserts in listener pass.
-    verify(stream, times(0)).close(isA(Status.class), isNotNull(Metadata.class));
+    verify(stream, times(0)).close(isA(Status.class), ArgumentMatchers.<Metadata>isNotNull());
   }
 
   private ServerStreamListener testClientClose_setup(
@@ -984,9 +1023,9 @@ public class ServerImplTest {
   @Test
   public void testClientClose_cancelTriggersImmediateCancellation() throws Exception {
     AtomicBoolean contextCancelled = new AtomicBoolean(false);
-    AtomicReference<Context> context = new AtomicReference<Context>();
+    AtomicReference<Context> context = new AtomicReference<>();
     AtomicReference<ServerCall<String, Integer>> callReference
-        = new AtomicReference<ServerCall<String, Integer>>();
+        = new AtomicReference<>();
 
     ServerStreamListener streamListener = testClientClose_setup(callReference,
         context, contextCancelled);
@@ -1007,9 +1046,9 @@ public class ServerImplTest {
   @Test
   public void testClientClose_OkTriggersDelayedCancellation() throws Exception {
     AtomicBoolean contextCancelled = new AtomicBoolean(false);
-    AtomicReference<Context> context = new AtomicReference<Context>();
+    AtomicReference<Context> context = new AtomicReference<>();
     AtomicReference<ServerCall<String, Integer>> callReference
-        = new AtomicReference<ServerCall<String, Integer>>();
+        = new AtomicReference<>();
 
     ServerStreamListener streamListener = testClientClose_setup(callReference,
         context, contextCancelled);
@@ -1030,15 +1069,16 @@ public class ServerImplTest {
 
   @Test
   public void getPort() throws Exception {
+    final InetSocketAddress addr = new InetSocketAddress(65535);
     transportServer = new SimpleServer() {
       @Override
-      public int getPort() {
-        return 65535;
+      public SocketAddress getListenSocketAddress() {
+        return addr;
       }
     };
     createAndStartServer();
 
-    assertThat(server.getPort()).isEqualTo(65535);
+    assertThat(server.getPort()).isEqualTo(addr.getPort());
   }
 
   @Test
@@ -1081,8 +1121,8 @@ public class ServerImplTest {
     // This call will be handled by callHandler from the internal registry
     transportListener.streamCreated(stream, "Waiter/serve", requestHeaders);
     assertEquals(1, executor.runDueTasks());
-    verify(callHandler).startCall(Matchers.<ServerCall<String, Integer>>anyObject(),
-        Matchers.<Metadata>anyObject());
+    verify(callHandler).startCall(ArgumentMatchers.<ServerCall<String, Integer>>any(),
+        ArgumentMatchers.<Metadata>any());
     // This call will be handled by the fallbackRegistry because it's not registred in the internal
     // registry.
     transportListener.streamCreated(stream, "Service1/Method2", requestHeaders);
@@ -1238,28 +1278,37 @@ public class ServerImplTest {
   @Test
   public void binaryLogInstalled() throws Exception {
     final SettableFuture<Boolean> intercepted = SettableFuture.create();
-    builder.binlog = InternalBinaryLogs.createBinaryLog(new BinaryLogProvider() {
-      @Nullable
+    final ServerInterceptor interceptor = new ServerInterceptor() {
       @Override
-      public ServerInterceptor getServerInterceptor(String fullMethodName) {
-        return new ServerInterceptor() {
-          @Override
-          public <ReqT, RespT> Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call,
-              Metadata headers,
-              ServerCallHandler<ReqT, RespT> next) {
-            intercepted.set(true);
-            return next.startCall(call, headers);
-          }
-        };
+      public <ReqT, RespT> Listener<ReqT> interceptCall(ServerCall<ReqT, RespT> call,
+          Metadata headers,
+          ServerCallHandler<ReqT, RespT> next) {
+        intercepted.set(true);
+        return next.startCall(call, headers);
+      }
+    };
+
+    builder.binlog = new BinaryLog() {
+      @Override
+      public void close() throws IOException {
+        // noop
       }
 
-      @Nullable
       @Override
-      public ClientInterceptor getClientInterceptor(
-          String fullMethodName, CallOptions callOptions) {
-        return null;
+      public <ReqT, RespT> ServerMethodDefinition<?, ?> wrapMethodDefinition(
+          ServerMethodDefinition<ReqT, RespT> oMethodDef) {
+        return ServerMethodDefinition.create(
+            oMethodDef.getMethodDescriptor(),
+            InternalServerInterceptors.interceptCallHandlerCreate(
+                interceptor,
+                oMethodDef.getServerCallHandler()));
       }
-    });
+
+      @Override
+      public Channel wrapChannel(Channel channel) {
+        return channel;
+      }
+    };
     createAndStartServer();
     basicExchangeHelper(METHOD, "Lots of pizza, please", 314, 50);
     assertTrue(intercepted.get());
@@ -1315,7 +1364,7 @@ public class ServerImplTest {
 
     builder.fallbackHandlerRegistry(fallbackRegistry);
     builder.executorPool = executorPool;
-    server = new ServerImpl(builder, transportServer, SERVER_CONTEXT);
+    server = new ServerImpl(builder, Collections.singletonList(transportServer), SERVER_CONTEXT);
   }
 
   private void verifyExecutorsAcquired() {
@@ -1348,13 +1397,13 @@ public class ServerImplTest {
     }
 
     @Override
-    public int getPort() {
-      return -1;
+    public SocketAddress getListenSocketAddress() {
+      return new InetSocketAddress(12345);
     }
 
     @Override
-    public List<Instrumented<SocketStats>> getListenSockets() {
-      return Collections.emptyList();
+    public InternalInstrumented<SocketStats> getListenSocketStats() {
+      return null;
     }
 
     @Override
@@ -1369,7 +1418,7 @@ public class ServerImplTest {
 
   private class SimpleServerTransport implements ServerTransport {
     ServerTransportListener listener;
-    LogId id = LogId.allocate(getClass().getName());
+    InternalLogId id = InternalLogId.allocate(getClass(), /*details=*/ null);
 
     @Override
     public void shutdown() {
@@ -1382,7 +1431,7 @@ public class ServerImplTest {
     }
 
     @Override
-    public LogId getLogId() {
+    public InternalLogId getLogId() {
       return id;
     }
 
@@ -1400,8 +1449,8 @@ public class ServerImplTest {
   }
 
   private static class Builder extends AbstractServerImplBuilder<Builder> {
-    @Override protected InternalServer buildTransportServer(
-        List<ServerStreamTracer.Factory> streamTracerFactories) {
+    @Override protected List<InternalServer> buildTransportServers(
+        List<? extends ServerStreamTracer.Factory> streamTracerFactories) {
       throw new UnsupportedOperationException();
     }
 

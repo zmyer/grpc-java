@@ -3,14 +3,10 @@ description = "gRPC: Testing Protos"
 // Add dependency on the protobuf plugin
 buildscript {
     repositories {
-        maven {
-            // The google mirror is less flaky than mavenCentral()
-            url "https://maven-central.storage-download.googleapis.com/repos/central/data/"
-        }
+        maven { // The google mirror is less flaky than mavenCentral()
+            url "https://maven-central.storage-download.googleapis.com/repos/central/data/" }
     }
-    dependencies {
-        classpath libraries.protobuf_plugin
-    }
+    dependencies { classpath libraries.protobuf_plugin }
 }
 
 dependencies {
@@ -18,6 +14,7 @@ dependencies {
             project(':grpc-stub')
     compileOnly libraries.javax_annotation
     testCompile libraries.truth
+    testRuntime libraries.javax_annotation
 }
 
 configureProtoCompilation()

@@ -45,7 +45,7 @@ public class JsonParserTest {
 
   @Test
   public void emptyArray() throws IOException {
-    assertEquals(new ArrayList<Object>(), JsonParser.parse("[]"));
+    assertEquals(new ArrayList<>(), JsonParser.parse("[]"));
   }
 
   @Test
@@ -117,7 +117,7 @@ public class JsonParserTest {
 
   @Test
   public void objectStringName() throws IOException {
-    LinkedHashMap<String, Object> expected = new LinkedHashMap<String, Object>();
+    LinkedHashMap<String, Object> expected = new LinkedHashMap<>();
     expected.put("hi", Double.valueOf("2"));
 
     assertEquals(expected, JsonParser.parse("{\"hi\": 2}"));

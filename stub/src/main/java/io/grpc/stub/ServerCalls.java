@@ -42,42 +42,42 @@ public final class ServerCalls {
   }
 
   /**
-   * Creates a {@code ServerCallHandler} for a unary call method of the service.
+   * Creates a {@link ServerCallHandler} for a unary call method of the service.
    *
    * @param method an adaptor to the actual method on the service implementation.
    */
   public static <ReqT, RespT> ServerCallHandler<ReqT, RespT> asyncUnaryCall(
-      final UnaryMethod<ReqT, RespT> method) {
+      UnaryMethod<ReqT, RespT> method) {
     return asyncUnaryRequestCall(method);
   }
 
   /**
-   * Creates a {@code ServerCallHandler} for a server streaming method of the service.
+   * Creates a {@link ServerCallHandler} for a server streaming method of the service.
    *
    * @param method an adaptor to the actual method on the service implementation.
    */
   public static <ReqT, RespT> ServerCallHandler<ReqT, RespT> asyncServerStreamingCall(
-      final ServerStreamingMethod<ReqT, RespT> method) {
+      ServerStreamingMethod<ReqT, RespT> method) {
     return asyncUnaryRequestCall(method);
   }
 
   /**
-   * Creates a {@code ServerCallHandler} for a client streaming method of the service.
+   * Creates a {@link ServerCallHandler} for a client streaming method of the service.
    *
    * @param method an adaptor to the actual method on the service implementation.
    */
   public static <ReqT, RespT> ServerCallHandler<ReqT, RespT> asyncClientStreamingCall(
-      final ClientStreamingMethod<ReqT, RespT> method) {
+      ClientStreamingMethod<ReqT, RespT> method) {
     return asyncStreamingRequestCall(method);
   }
 
   /**
-   * Creates a {@code ServerCallHandler} for a bidi streaming method of the service.
+   * Creates a {@link ServerCallHandler} for a bidi streaming method of the service.
    *
    * @param method an adaptor to the actual method on the service implementation.
    */
   public static <ReqT, RespT> ServerCallHandler<ReqT, RespT> asyncBidiStreamingCall(
-      final BidiStreamingMethod<ReqT, RespT> method) {
+      BidiStreamingMethod<ReqT, RespT> method) {
     return asyncStreamingRequestCall(method);
   }
 
@@ -97,7 +97,7 @@ public final class ServerCalls {
   public interface ClientStreamingMethod<ReqT, RespT> extends StreamingRequestMethod<ReqT, RespT> {}
 
   /**
-   * Adaptor to a bi-directional streaming method.
+   * Adaptor to a bidirectional streaming method.
    */
   public interface BidiStreamingMethod<ReqT, RespT> extends StreamingRequestMethod<ReqT, RespT> {}
 
@@ -117,7 +117,7 @@ public final class ServerCalls {
           call.getMethodDescriptor().getType().clientSendsOneMessage(),
           "asyncUnaryRequestCall is only for clientSendsOneMessage methods");
       ServerCallStreamObserverImpl<ReqT, RespT> responseObserver =
-          new ServerCallStreamObserverImpl<ReqT, RespT>(call);
+          new ServerCallStreamObserverImpl<>(call);
       // We expect only 1 request, but we ask for 2 requests here so that if a misbehaving client
       // sends more than 1 requests, ServerCall will catch it. Note that disabling auto
       // inbound flow control has no effect on unary calls.
@@ -195,13 +195,13 @@ public final class ServerCalls {
   }
 
   /**
-   * Creates a {@code ServerCallHandler} for a unary request call method of the service.
+   * Creates a {@link ServerCallHandler} for a unary request call method of the service.
    *
    * @param method an adaptor to the actual method on the service implementation.
    */
   private static <ReqT, RespT> ServerCallHandler<ReqT, RespT> asyncUnaryRequestCall(
       UnaryRequestMethod<ReqT, RespT> method) {
-    return new UnaryServerCallHandler<ReqT, RespT>(method);
+    return new UnaryServerCallHandler<>(method);
   }
 
   private static final class StreamingServerCallHandler<ReqT, RespT>
@@ -217,7 +217,7 @@ public final class ServerCalls {
     @Override
     public ServerCall.Listener<ReqT> startCall(ServerCall<ReqT, RespT> call, Metadata headers) {
       ServerCallStreamObserverImpl<ReqT, RespT> responseObserver =
-          new ServerCallStreamObserverImpl<ReqT, RespT>(call);
+          new ServerCallStreamObserverImpl<>(call);
       StreamObserver<ReqT> requestObserver = method.invoke(responseObserver);
       responseObserver.freeze();
       if (responseObserver.autoFlowControlEnabled) {
@@ -283,13 +283,13 @@ public final class ServerCalls {
   }
 
   /**
-   * Creates a {@code ServerCallHandler} for a streaming request call method of the service.
+   * Creates a {@link ServerCallHandler} for a streaming request call method of the service.
    *
    * @param method an adaptor to the actual method on the service implementation.
    */
   private static <ReqT, RespT> ServerCallHandler<ReqT, RespT> asyncStreamingRequestCall(
       StreamingRequestMethod<ReqT, RespT> method) {
-    return new StreamingServerCallHandler<ReqT, RespT>(method);
+    return new StreamingServerCallHandler<>(method);
   }
 
   private interface UnaryRequestMethod<ReqT, RespT> {
@@ -332,7 +332,10 @@ public final class ServerCalls {
     @Override
     public void onNext(RespT response) {
       if (cancelled) {
-        throw Status.CANCELLED.withDescription("call already cancelled").asRuntimeException();
+        if (onCancelHandler == null) {
+          throw Status.CANCELLED.withDescription("call already cancelled").asRuntimeException();
+        }
+        return;
       }
       if (!sentHeaders) {
         call.sendHeaders(new Metadata());
@@ -353,7 +356,9 @@ public final class ServerCalls {
     @Override
     public void onCompleted() {
       if (cancelled) {
-        throw Status.CANCELLED.withDescription("call already cancelled").asRuntimeException();
+        if (onCancelHandler == null) {
+          throw Status.CANCELLED.withDescription("call already cancelled").asRuntimeException();
+        }
       } else {
         call.close(Status.OK, new Metadata());
       }
@@ -399,8 +404,8 @@ public final class ServerCalls {
    * @param methodDescriptor of method for which error will be thrown.
    * @param responseObserver on which error will be set.
    */
-  public static void asyncUnimplementedUnaryCall(MethodDescriptor<?, ?> methodDescriptor,
-      StreamObserver<?> responseObserver) {
+  public static void asyncUnimplementedUnaryCall(
+      MethodDescriptor<?, ?> methodDescriptor, StreamObserver<?> responseObserver) {
     checkNotNull(methodDescriptor, "methodDescriptor");
     checkNotNull(responseObserver, "responseObserver");
     responseObserver.onError(Status.UNIMPLEMENTED
@@ -420,7 +425,7 @@ public final class ServerCalls {
     // NB: For streaming call we want to do the same as for unary call. Fail-fast by setting error
     // on responseObserver and then return no-op observer.
     asyncUnimplementedUnaryCall(methodDescriptor, responseObserver);
-    return new NoopStreamObserver<T>();
+    return new NoopStreamObserver<>();
   }
 
   /**

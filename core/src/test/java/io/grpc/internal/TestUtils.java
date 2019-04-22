@@ -16,12 +16,14 @@
 
 package io.grpc.internal;
 
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.grpc.CallOptions;
+import io.grpc.ChannelLogger;
+import io.grpc.InternalLogId;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import java.net.SocketAddress;
@@ -68,13 +70,14 @@ final class TestUtils {
   static BlockingQueue<MockClientTransportInfo> captureTransports(
       ClientTransportFactory mockTransportFactory, @Nullable final Runnable startRunnable) {
     final BlockingQueue<MockClientTransportInfo> captor =
-        new LinkedBlockingQueue<MockClientTransportInfo>();
+        new LinkedBlockingQueue<>();
 
     doAnswer(new Answer<ConnectionClientTransport>() {
       @Override
       public ConnectionClientTransport answer(InvocationOnMock invocation) throws Throwable {
         final ConnectionClientTransport mockTransport = mock(ConnectionClientTransport.class);
-        when(mockTransport.getLogId()).thenReturn(LogId.allocate("mocktransport"));
+        when(mockTransport.getLogId())
+            .thenReturn(InternalLogId.allocate("mocktransport", /*details=*/ null));
         when(mockTransport.newStream(
                 any(MethodDescriptor.class), any(Metadata.class), any(CallOptions.class)))
             .thenReturn(mock(ClientStream.class));
@@ -90,8 +93,10 @@ final class TestUtils {
         return mockTransport;
       }
     }).when(mockTransportFactory)
-        .newClientTransport(any(SocketAddress.class), any(String.class), any(String.class),
-            any(ProxyParameters.class));
+        .newClientTransport(
+            any(SocketAddress.class),
+            any(ClientTransportFactory.ClientTransportOptions.class),
+            any(ChannelLogger.class));
 
     return captor;
   }

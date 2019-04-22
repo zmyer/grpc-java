@@ -17,8 +17,11 @@
 package io.grpc.internal;
 
 import com.google.common.util.concurrent.ListenableFuture;
-import io.grpc.internal.Channelz.ServerStats;
-import io.grpc.internal.Channelz.SocketStats;
+import io.grpc.InternalChannelz;
+import io.grpc.InternalChannelz.ServerStats;
+import io.grpc.InternalChannelz.SocketStats;
+import io.grpc.InternalInstrumented;
+import io.grpc.InternalLogId;
 import java.util.concurrent.TimeUnit;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -38,15 +41,15 @@ public class ChannelzBenchmark {
   @Param({"10", "100", "1000", "10000"})
   public int preexisting;
 
-  public Channelz channelz = new Channelz();
+  public InternalChannelz channelz = new InternalChannelz();
 
-  public Instrumented<ServerStats> serverToRemove;
+  public InternalInstrumented<ServerStats> serverToRemove;
 
-  public Instrumented<ServerStats> serverToAdd;
+  public InternalInstrumented<ServerStats> serverToAdd;
 
-  public Instrumented<ServerStats> serverForServerSocket;
-  public Instrumented<SocketStats> serverSocketToAdd;
-  public Instrumented<SocketStats> serverSocketToRemove;
+  public InternalInstrumented<ServerStats> serverForServerSocket;
+  public InternalInstrumented<SocketStats> serverSocketToAdd;
+  public InternalInstrumented<SocketStats> serverSocketToRemove;
 
   /**
    * Javadoc.
@@ -73,11 +76,11 @@ public class ChannelzBenchmark {
   private void populate(int count) {
     for (int i = 0; i < count; i++) {
       // for addNavigable / removeNavigable
-      Instrumented<ServerStats> srv = create();
+      InternalInstrumented<ServerStats> srv = create();
       channelz.addServer(srv);
 
       // for add / remove
-      Instrumented<SocketStats> sock = create();
+      InternalInstrumented<SocketStats> sock = create();
       channelz.addClientSocket(sock);
 
       // for addServerSocket / removeServerSocket
@@ -127,9 +130,9 @@ public class ChannelzBenchmark {
     channelz.removeServerSocket(serverForServerSocket, serverSocketToRemove);
   }
 
-  private static <T> Instrumented<T> create() {
-    return new Instrumented<T>() {
-      final LogId id = LogId.allocate("fake-tag");
+  private static <T> InternalInstrumented<T> create() {
+    return new InternalInstrumented<T>() {
+      final InternalLogId id = InternalLogId.allocate(getClass(), "fake-tag");
 
       @Override
       public ListenableFuture<T> getStats() {
@@ -137,7 +140,7 @@ public class ChannelzBenchmark {
       }
 
       @Override
-      public LogId getLogId() {
+      public InternalLogId getLogId() {
         return id;
       }
     };

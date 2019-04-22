@@ -48,10 +48,8 @@ import io.grpc.stub.StreamObserver;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import org.HdrHistogram.Histogram;
 import org.HdrHistogram.HistogramIterationValue;
 
@@ -76,7 +74,7 @@ public class AsyncClient {
 
     SimpleRequest req = newRequest();
 
-    List<ManagedChannel> channels = new ArrayList<ManagedChannel>(config.channels);
+    List<ManagedChannel> channels = new ArrayList<>(config.channels);
     for (int i = 0; i < config.channels; i++) {
       channels.add(config.newChannel());
     }
@@ -124,7 +122,7 @@ public class AsyncClient {
                                       long endTime) throws Exception {
     // Initiate the concurrent calls
     List<Future<Histogram>> futures =
-        new ArrayList<Future<Histogram>>(config.outstandingRpcsPerChannel);
+        new ArrayList<>(config.outstandingRpcsPerChannel);
     for (int i = 0; i < config.channels; i++) {
       for (int j = 0; j < config.outstandingRpcsPerChannel; j++) {
         Channel channel = channels.get(i);
@@ -132,7 +130,7 @@ public class AsyncClient {
       }
     }
     // Wait for completion
-    List<Histogram> histograms = new ArrayList<Histogram>(futures.size());
+    List<Histogram> histograms = new ArrayList<>(futures.size());
     for (Future<Histogram> future : futures) {
       histograms.add(future.get());
     }
@@ -179,7 +177,7 @@ public class AsyncClient {
         histogram.recordValue((now - lastCall) / 1000);
         lastCall = now;
 
-        if (endTime > now) {
+        if (endTime - now > 0) {
           stub.unaryCall(request, this);
         } else {
           future.done();
@@ -236,7 +234,7 @@ public class AsyncClient {
       histogram.recordValue((now - lastCall) / 1000);
       lastCall = now;
 
-      if (endTime > now) {
+      if (endTime - now > 0) {
         requestObserver.onNext(request);
       } else {
         requestObserver.onCompleted();
@@ -352,7 +350,7 @@ public class AsyncClient {
     }
 
     @Override
-    public synchronized Histogram get() throws InterruptedException, ExecutionException {
+    public synchronized Histogram get() throws InterruptedException {
       while (!isDone() && !isCancelled()) {
         wait();
       }
@@ -365,9 +363,7 @@ public class AsyncClient {
     }
 
     @Override
-    public Histogram get(long timeout, TimeUnit unit) throws InterruptedException,
-        ExecutionException,
-        TimeoutException {
+    public Histogram get(long timeout, TimeUnit unit) {
       throw new UnsupportedOperationException();
     }
 

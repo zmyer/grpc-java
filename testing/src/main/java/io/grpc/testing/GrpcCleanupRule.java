@@ -47,7 +47,7 @@ import org.junit.runners.model.Statement;
 @NotThreadSafe
 public final class GrpcCleanupRule implements TestRule {
 
-  private final List<Resource> resources = new ArrayList<Resource>();
+  private final List<Resource> resources = new ArrayList<>();
   private long timeoutNanos = TimeUnit.SECONDS.toNanos(10L);
   private Stopwatch stopwatch = Stopwatch.createUnstarted();
 
@@ -74,7 +74,7 @@ public final class GrpcCleanupRule implements TestRule {
    *
    * @return this
    */
-  @SuppressWarnings("BetaApi") // Stopwatch.createUnstarted(Ticker ticker) is not Beta. Test only.
+  @SuppressWarnings("BetaApi") // Test only.
   @VisibleForTesting
   GrpcCleanupRule setTicker(Ticker ticker) {
     this.stopwatch = Stopwatch.createUnstarted(ticker);

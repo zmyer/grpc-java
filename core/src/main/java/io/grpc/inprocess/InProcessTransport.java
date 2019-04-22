@@ -30,16 +30,20 @@ import io.grpc.Deadline;
 import io.grpc.Decompressor;
 import io.grpc.DecompressorRegistry;
 import io.grpc.Grpc;
+import io.grpc.InternalChannelz.SocketStats;
+import io.grpc.InternalLogId;
+import io.grpc.InternalMetadata;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
+import io.grpc.SecurityLevel;
 import io.grpc.ServerStreamTracer;
 import io.grpc.Status;
-import io.grpc.internal.Channelz.SocketStats;
 import io.grpc.internal.ClientStream;
 import io.grpc.internal.ClientStreamListener;
 import io.grpc.internal.ConnectionClientTransport;
+import io.grpc.internal.GrpcAttributes;
 import io.grpc.internal.GrpcUtil;
-import io.grpc.internal.LogId;
+import io.grpc.internal.InUseStateAggregator;
 import io.grpc.internal.ManagedClientTransport;
 import io.grpc.internal.NoopClientStream;
 import io.grpc.internal.ObjectPool;
@@ -69,10 +73,12 @@ import javax.annotation.concurrent.ThreadSafe;
 final class InProcessTransport implements ServerTransport, ConnectionClientTransport {
   private static final Logger log = Logger.getLogger(InProcessTransport.class.getName());
 
-  private final LogId logId = LogId.allocate(getClass().getName());
+  private final InternalLogId logId;
   private final String name;
+  private final int clientMaxInboundMetadataSize;
   private final String authority;
   private final String userAgent;
+  private int serverMaxInboundMetadataSize;
   private ObjectPool<ScheduledExecutorService> serverSchedulerPool;
   private ScheduledExecutorService serverScheduler;
   private ServerTransportListener serverTransportListener;
@@ -85,14 +91,38 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
   @GuardedBy("this")
   private Status shutdownStatus;
   @GuardedBy("this")
-  private Set<InProcessStream> streams = new HashSet<InProcessStream>();
+  private Set<InProcessStream> streams = new HashSet<>();
   @GuardedBy("this")
   private List<ServerStreamTracer.Factory> serverStreamTracerFactories;
+  private final Attributes attributes;
 
-  public InProcessTransport(String name, String authority, String userAgent) {
+  @GuardedBy("this")
+  private final InUseStateAggregator<InProcessStream> inUseState =
+      new InUseStateAggregator<InProcessStream>() {
+        @Override
+        protected void handleInUse() {
+          clientTransportListener.transportInUse(true);
+        }
+
+        @Override
+        protected void handleNotInUse() {
+          clientTransportListener.transportInUse(false);
+        }
+      };
+
+  public InProcessTransport(
+      String name, int maxInboundMetadataSize, String authority, String userAgent,
+      Attributes eagAttrs) {
     this.name = name;
+    this.clientMaxInboundMetadataSize = maxInboundMetadataSize;
     this.authority = authority;
     this.userAgent = GrpcUtil.getGrpcUserAgent("inprocess", userAgent);
+    checkNotNull(eagAttrs, "eagAttrs");
+    this.attributes = Attributes.newBuilder()
+        .set(GrpcAttributes.ATTR_SECURITY_LEVEL, SecurityLevel.PRIVACY_AND_INTEGRITY)
+        .set(GrpcAttributes.ATTR_CLIENT_EAG_ATTRS, eagAttrs)
+        .build();
+    logId = InternalLogId.allocate(getClass(), name);
   }
 
   @CheckReturnValue
@@ -101,6 +131,7 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
     this.clientTransportListener = listener;
     InProcessServer server = InProcessServer.findServer(name);
     if (server != null) {
+      serverMaxInboundMetadataSize = server.getMaxInboundMetadataSize();
       serverSchedulerPool = server.getScheduledExecutorServicePool();
       serverScheduler = serverSchedulerPool.getObject();
       serverStreamTracerFactories = server.getStreamTracerFactories();
@@ -127,6 +158,7 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
         synchronized (InProcessTransport.this) {
           Attributes serverTransportAttrs = Attributes.newBuilder()
               .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, new InProcessSocketAddress(name))
+              .set(Grpc.TRANSPORT_ATTR_LOCAL_ADDR, new InProcessSocketAddress(name))
               .build();
           serverStreamAttributes = serverTransportListener.transportReady(serverTransportAttrs);
           clientTransportListener.transportReady();
@@ -139,20 +171,43 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
   public synchronized ClientStream newStream(
       final MethodDescriptor<?, ?> method, final Metadata headers, final CallOptions callOptions) {
     if (shutdownStatus != null) {
-      final Status capturedStatus = shutdownStatus;
-      final StatsTraceContext statsTraceCtx =
-          StatsTraceContext.newClientContext(callOptions, headers);
-      return new NoopClientStream() {
+      return failedClientStream(
+          StatsTraceContext.newClientContext(callOptions, attributes, headers), shutdownStatus);
+    }
+
+    headers.put(GrpcUtil.USER_AGENT_KEY, userAgent);
+
+    if (serverMaxInboundMetadataSize != Integer.MAX_VALUE) {
+      int metadataSize = metadataSize(headers);
+      if (metadataSize > serverMaxInboundMetadataSize) {
+        // Other transports would compute a status with:
+        //   GrpcUtil.httpStatusToGrpcStatus(431 /* Request Header Fields Too Large */);
+        // However, that isn't handled specially today, so we'd leak HTTP-isms even though we're
+        // in-process. We go ahead and make a Status, which may need to be updated if
+        // statuscodes.md is updated.
+        Status status = Status.RESOURCE_EXHAUSTED.withDescription(
+            String.format(
+                "Request metadata larger than %d: %d",
+                serverMaxInboundMetadataSize,
+                metadataSize));
+        return failedClientStream(
+            StatsTraceContext.newClientContext(callOptions, attributes, headers), status);
+      }
+    }
+
+    return new InProcessStream(method, headers, callOptions, authority).clientStream;
+  }
+
+  private ClientStream failedClientStream(
+      final StatsTraceContext statsTraceCtx, final Status status) {
+    return new NoopClientStream() {
         @Override
         public void start(ClientStreamListener listener) {
           statsTraceCtx.clientOutboundHeaders();
-          statsTraceCtx.streamClosed(capturedStatus);
-          listener.closed(capturedStatus, new Metadata());
+          statsTraceCtx.streamClosed(status);
+          listener.closed(status, new Metadata());
         }
       };
-    }
-    headers.put(GrpcUtil.USER_AGENT_KEY, userAgent);
-    return new InProcessStream(method, headers, callOptions, authority).clientStream;
   }
 
   @Override
@@ -202,7 +257,7 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
       if (terminated) {
         return;
       }
-      streamsCopy = new ArrayList<InProcessStream>(streams);
+      streamsCopy = new ArrayList<>(streams);
     }
     for (InProcessStream stream : streamsCopy) {
       stream.clientStream.cancel(reason);
@@ -218,13 +273,13 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
   }
 
   @Override
-  public LogId getLogId() {
+  public InternalLogId getLogId() {
     return logId;
   }
 
   @Override
   public Attributes getAttributes() {
-    return Attributes.EMPTY;
+    return attributes;
   }
 
   @Override
@@ -261,9 +316,25 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
     }
   }
 
+  private static int metadataSize(Metadata metadata) {
+    byte[][] serialized = InternalMetadata.serialize(metadata);
+    if (serialized == null) {
+      return 0;
+    }
+    // Calculate based on SETTINGS_MAX_HEADER_LIST_SIZE in RFC 7540 §6.5.2. We could use something
+    // different, but it's "sane."
+    long size = 0;
+    for (int i = 0; i < serialized.length; i += 2) {
+      size += 32 + serialized[i].length + serialized[i + 1].length;
+    }
+    size = Math.min(size, Integer.MAX_VALUE);
+    return (int) size;
+  }
+
   private class InProcessStream {
     private final InProcessClientStream clientStream;
     private final InProcessServerStream serverStream;
+    private final CallOptions callOptions;
     private final Metadata headers;
     private final MethodDescriptor<?, ?> method;
     private volatile String authority;
@@ -273,6 +344,7 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
         String authority) {
       this.method = checkNotNull(method, "method");
       this.headers = checkNotNull(headers, "headers");
+      this.callOptions = checkNotNull(callOptions, "callOptions");
       this.authority = authority;
       this.clientStream = new InProcessClientStream(callOptions, headers);
       this.serverStream = new InProcessServerStream(method, headers);
@@ -282,8 +354,10 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
     private void streamClosed() {
       synchronized (InProcessTransport.this) {
         boolean justRemovedAnElement = streams.remove(this);
+        if (GrpcUtil.shouldBeCountedForInUse(callOptions)) {
+          inUseState.updateObjectInUse(this, false);
+        }
         if (streams.isEmpty() && justRemovedAnElement) {
-          clientTransportListener.transportInUse(false);
           if (shutdown) {
             notifyTerminated();
           }
@@ -299,7 +373,7 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
       private int clientRequested;
       @GuardedBy("this")
       private ArrayDeque<StreamListener.MessageProducer> clientReceiveQueue =
-          new ArrayDeque<StreamListener.MessageProducer>();
+          new ArrayDeque<>();
       @GuardedBy("this")
       private Status clientNotifyStatus;
       @GuardedBy("this")
@@ -358,6 +432,7 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
         }
         if (clientReceiveQueue.isEmpty() && clientNotifyStatus != null) {
           closed = true;
+          clientStream.statsTraceCtx.clientInboundTrailers(clientNotifyTrailers);
           clientStream.statsTraceCtx.streamClosed(clientNotifyStatus);
           clientStreamListener.closed(clientNotifyStatus, clientNotifyTrailers);
         }
@@ -400,12 +475,32 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
       }
 
       @Override
-      public synchronized void writeHeaders(Metadata headers) {
-        if (closed) {
-          return;
+      public void writeHeaders(Metadata headers) {
+        if (clientMaxInboundMetadataSize != Integer.MAX_VALUE) {
+          int metadataSize = metadataSize(headers);
+          if (metadataSize > clientMaxInboundMetadataSize) {
+            Status serverStatus = Status.CANCELLED.withDescription("Client cancelled the RPC");
+            clientStream.serverClosed(serverStatus, serverStatus);
+            // Other transports provide very little information in this case. We go ahead and make a
+            // Status, which may need to be updated if statuscodes.md is updated.
+            Status failedStatus = Status.RESOURCE_EXHAUSTED.withDescription(
+                String.format(
+                    "Response header metadata larger than %d: %d",
+                    clientMaxInboundMetadataSize,
+                    metadataSize));
+            notifyClientClose(failedStatus, new Metadata());
+            return;
+          }
         }
-        clientStream.statsTraceCtx.clientInboundHeaders();
-        clientStreamListener.headersRead(headers);
+
+        synchronized (this) {
+          if (closed) {
+            return;
+          }
+
+          clientStream.statsTraceCtx.clientInboundHeaders();
+          clientStreamListener.headersRead(headers);
+        }
       }
 
       @Override
@@ -416,6 +511,30 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
         // calling internalCancel().
         clientStream.serverClosed(Status.OK, status);
 
+        if (clientMaxInboundMetadataSize != Integer.MAX_VALUE) {
+          int statusSize = status.getDescription() == null ? 0 : status.getDescription().length();
+          // Go ahead and throw in the status description's length, since that could be very long.
+          int metadataSize = metadataSize(trailers) + statusSize;
+          if (metadataSize > clientMaxInboundMetadataSize) {
+            // Override the status for the client, but not the server. Transports do not guarantee
+            // notifying the server of the failure.
+
+            // Other transports provide very little information in this case. We go ahead and make a
+            // Status, which may need to be updated if statuscodes.md is updated.
+            status = Status.RESOURCE_EXHAUSTED.withDescription(
+                String.format(
+                    "Response header metadata larger than %d: %d",
+                    clientMaxInboundMetadataSize,
+                    metadataSize));
+            trailers = new Metadata();
+          }
+        }
+
+        notifyClientClose(status, trailers);
+      }
+
+      /** clientStream.serverClosed() must be called before this method */
+      private void notifyClientClose(Status status, Metadata trailers) {
         Status clientStatus = stripCause(status);
         synchronized (this) {
           if (closed) {
@@ -423,6 +542,7 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
           }
           if (clientReceiveQueue.isEmpty()) {
             closed = true;
+            clientStream.statsTraceCtx.clientInboundTrailers(trailers);
             clientStream.statsTraceCtx.streamClosed(clientStatus);
             clientStreamListener.closed(clientStatus, trailers);
           } else {
@@ -492,13 +612,14 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
 
     private class InProcessClientStream implements ClientStream {
       final StatsTraceContext statsTraceCtx;
+      final CallOptions callOptions;
       @GuardedBy("this")
       private ServerStreamListener serverStreamListener;
       @GuardedBy("this")
       private int serverRequested;
       @GuardedBy("this")
       private ArrayDeque<StreamListener.MessageProducer> serverReceiveQueue =
-          new ArrayDeque<StreamListener.MessageProducer>();
+          new ArrayDeque<>();
       @GuardedBy("this")
       private boolean serverNotifyHalfClose;
       // Only is intended to prevent double-close when server closes.
@@ -508,7 +629,8 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
       private int outboundSeqNo;
 
       InProcessClientStream(CallOptions callOptions, Metadata headers) {
-        statsTraceCtx = StatsTraceContext.newClientContext(callOptions, headers);
+        this.callOptions = callOptions;
+        statsTraceCtx = StatsTraceContext.newClientContext(callOptions, attributes, headers);
       }
 
       private synchronized void setListener(ServerStreamListener listener) {
@@ -646,8 +768,8 @@ final class InProcessTransport implements ServerTransport, ConnectionClientTrans
         synchronized (InProcessTransport.this) {
           statsTraceCtx.clientOutboundHeaders();
           streams.add(InProcessTransport.InProcessStream.this);
-          if (streams.size() == 1) {
-            clientTransportListener.transportInUse(true);
+          if (GrpcUtil.shouldBeCountedForInUse(callOptions)) {
+            inUseState.updateObjectInUse(InProcessTransport.InProcessStream.this, true);
           }
           serverTransportListener.streamCreated(serverStream, method.getFullMethodName(), headers);
         }

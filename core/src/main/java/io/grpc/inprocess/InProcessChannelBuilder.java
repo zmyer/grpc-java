@@ -16,15 +16,16 @@
 
 package io.grpc.inprocess;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
+import io.grpc.ChannelLogger;
 import io.grpc.ExperimentalApi;
 import io.grpc.Internal;
 import io.grpc.internal.AbstractManagedChannelImplBuilder;
 import io.grpc.internal.ClientTransportFactory;
 import io.grpc.internal.ConnectionClientTransport;
 import io.grpc.internal.GrpcUtil;
-import io.grpc.internal.ProxyParameters;
 import io.grpc.internal.SharedResourceHolder;
 import java.net.SocketAddress;
 import java.util.concurrent.ScheduledExecutorService;
@@ -68,6 +69,7 @@ public final class InProcessChannelBuilder extends
 
   private final String name;
   private ScheduledExecutorService scheduledExecutorService;
+  private int maxInboundMetadataSize = Integer.MAX_VALUE;
 
   private InProcessChannelBuilder(String name) {
     super(new InProcessSocketAddress(name), "localhost");
@@ -146,10 +148,31 @@ public final class InProcessChannelBuilder extends
     return this;
   }
 
+  /**
+   * Sets the maximum size of metadata allowed to be received. {@code Integer.MAX_VALUE} disables
+   * the enforcement. Defaults to no limit ({@code Integer.MAX_VALUE}).
+   *
+   * <p>There is potential for performance penalty when this setting is enabled, as the Metadata
+   * must actually be serialized. Since the current implementation of Metadata pre-serializes, it's
+   * currently negligible. But Metadata is free to change its implementation.
+   *
+   * @param bytes the maximum size of received metadata
+   * @return this
+   * @throws IllegalArgumentException if bytes is non-positive
+   * @since 1.17.0
+   */
+  @Override
+  public InProcessChannelBuilder maxInboundMetadataSize(int bytes) {
+    checkArgument(bytes > 0, "maxInboundMetadataSize must be > 0");
+    this.maxInboundMetadataSize = bytes;
+    return this;
+  }
+
   @Override
   @Internal
   protected ClientTransportFactory buildTransportFactory() {
-    return new InProcessClientTransportFactory(name, scheduledExecutorService);
+    return new InProcessClientTransportFactory(
+        name, scheduledExecutorService, maxInboundMetadataSize);
   }
 
   /**
@@ -159,23 +182,30 @@ public final class InProcessChannelBuilder extends
     private final String name;
     private final ScheduledExecutorService timerService;
     private final boolean useSharedTimer;
+    private final int maxInboundMetadataSize;
     private boolean closed;
 
     private InProcessClientTransportFactory(
-        String name, @Nullable ScheduledExecutorService scheduledExecutorService) {
+        String name,
+        @Nullable ScheduledExecutorService scheduledExecutorService,
+        int maxInboundMetadataSize) {
       this.name = name;
       useSharedTimer = scheduledExecutorService == null;
       timerService = useSharedTimer
           ? SharedResourceHolder.get(GrpcUtil.TIMER_SERVICE) : scheduledExecutorService;
+      this.maxInboundMetadataSize = maxInboundMetadataSize;
     }
 
     @Override
     public ConnectionClientTransport newClientTransport(
-        SocketAddress addr, String authority, String userAgent, ProxyParameters proxy) {
+        SocketAddress addr, ClientTransportOptions options, ChannelLogger channelLogger) {
       if (closed) {
         throw new IllegalStateException("The transport factory is closed.");
       }
-      return new InProcessTransport(name, authority, userAgent);
+      // TODO(carl-mastrangelo): Pass channelLogger in.
+      return new InProcessTransport(
+          name, maxInboundMetadataSize, options.getAuthority(), options.getUserAgent(),
+          options.getEagAttributes());
     }
 
     @Override

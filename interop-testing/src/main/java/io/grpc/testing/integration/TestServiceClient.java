@@ -20,6 +20,8 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.io.Files;
 import io.grpc.ManagedChannel;
 import io.grpc.alts.AltsChannelBuilder;
+import io.grpc.alts.ComputeEngineChannelBuilder;
+import io.grpc.alts.GoogleDefaultChannelBuilder;
 import io.grpc.internal.AbstractManagedChannelImplBuilder;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.testing.TestUtils;
@@ -32,6 +34,7 @@ import io.netty.handler.ssl.SslContext;
 import java.io.File;
 import java.io.FileInputStream;
 import java.nio.charset.Charset;
+import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLSocketFactory;
 
 /**
@@ -54,6 +57,7 @@ public class TestServiceClient {
 
     Runtime.getRuntime().addShutdownHook(new Thread() {
       @Override
+      @SuppressWarnings("CatchAndPrintStackTrace")
       public void run() {
         System.out.println("Shutting down");
         try {
@@ -78,6 +82,8 @@ public class TestServiceClient {
   private String testCase = "empty_unary";
   private boolean useTls = true;
   private boolean useAlts = false;
+  private boolean useH2cUpgrade = false;
+  private String customCredentialsType;
   private boolean useTestCa;
   private boolean useOkHttp;
   private String defaultServiceAccount;
@@ -118,8 +124,12 @@ public class TestServiceClient {
         testCase = value;
       } else if ("use_tls".equals(key)) {
         useTls = Boolean.parseBoolean(value);
+      } else if ("use_upgrade".equals(key)) {
+        useH2cUpgrade = Boolean.parseBoolean(value);
       } else if ("use_alts".equals(key)) {
         useAlts = Boolean.parseBoolean(value);
+      } else if ("custom_credentials_type".equals(key)) {
+        customCredentialsType = value;
       } else if ("use_test_ca".equals(key)) {
         useTestCa = Boolean.parseBoolean(value);
       } else if ("use_okhttp".equals(key)) {
@@ -144,7 +154,7 @@ public class TestServiceClient {
         break;
       }
     }
-    if (useAlts) {
+    if (useAlts || useH2cUpgrade) {
       useTls = false;
     }
     if (usage) {
@@ -161,7 +171,12 @@ public class TestServiceClient {
           + validTestCasesHelpText()
           + "\n  --use_tls=true|false        Whether to use TLS. Default " + c.useTls
           + "\n  --use_alts=true|false       Whether to use ALTS. Enable ALTS will disable TLS."
-          + "\n                              Default " + c.useTls
+          + "\n                              Default " + c.useAlts
+          + "\n  --use_upgrade=true|false    Whether to use the h2c Upgrade mechanism."
+          + "\n                              Enabling h2c Upgrade will disable TLS."
+          + "\n                              Default " + c.useH2cUpgrade
+          + "\n  --custom_credentials_type   Custom credentials type to use. Default "
+            + c.customCredentialsType
           + "\n  --use_test_ca=true|false    Whether to trust our fake CA. Requires --use_tls=true "
           + "\n                              to have effect. Default " + c.useTestCa
           + "\n  --use_okhttp=true|false     Whether to use OkHttp instead of Netty. Default "
@@ -264,6 +279,20 @@ public class TestServiceClient {
         tester.computeEngineCreds(defaultServiceAccount, oauthScope);
         break;
 
+      case COMPUTE_ENGINE_CHANNEL_CREDENTIALS: {
+        ManagedChannel channel = ComputeEngineChannelBuilder
+            .forAddress(serverHost, serverPort).build();
+        try {
+          TestServiceGrpc.TestServiceBlockingStub computeEngineStub =
+              TestServiceGrpc.newBlockingStub(channel);
+          tester.computeEngineChannelCredentials(defaultServiceAccount, computeEngineStub);
+        } finally {
+          channel.shutdownNow();
+          channel.awaitTermination(5, TimeUnit.SECONDS);
+        }
+        break;
+      }
+
       case SERVICE_ACCOUNT_CREDS: {
         String jsonKey = Files.asCharSource(new File(serviceAccountKeyFile), UTF_8).read();
         FileInputStream credentialsStream = new FileInputStream(new File(serviceAccountKeyFile));
@@ -291,6 +320,19 @@ public class TestServiceClient {
         break;
       }
 
+      case GOOGLE_DEFAULT_CREDENTIALS: {
+        ManagedChannel channel = GoogleDefaultChannelBuilder.forAddress(
+            serverHost, serverPort).build();
+        try {
+          TestServiceGrpc.TestServiceBlockingStub googleDefaultStub =
+              TestServiceGrpc.newBlockingStub(channel);
+          tester.googleDefaultCredentials(defaultServiceAccount, googleDefaultStub);
+        } finally {
+          channel.shutdownNow();
+        }
+        break;
+      }
+
       case CUSTOM_METADATA: {
         tester.customMetadata();
         break;
@@ -300,6 +342,10 @@ public class TestServiceClient {
         tester.statusCodeAndMessage();
         break;
       }
+
+      case SPECIAL_STATUS_MESSAGE:
+        tester.specialStatusMessage();
+        break;
 
       case UNIMPLEMENTED_METHOD: {
         tester.unimplementedMethod();
@@ -326,6 +372,16 @@ public class TestServiceClient {
         break;
       }
 
+      case VERY_LARGE_REQUEST: {
+        tester.veryLargeRequest();
+        break;
+      }
+
+      case PICK_FIRST_UNARY: {
+        tester.pickFirstUnary();
+        break;
+      }
+
       default:
         throw new IllegalArgumentException("Unknown test case: " + testCase);
     }
@@ -334,6 +390,14 @@ public class TestServiceClient {
   private class Tester extends AbstractInteropTest {
     @Override
     protected ManagedChannel createChannel() {
+      if (customCredentialsType != null
+          && customCredentialsType.equals("google_default_credentials")) {
+        return GoogleDefaultChannelBuilder.forAddress(serverHost, serverPort).build();
+      }
+      if (customCredentialsType != null
+          && customCredentialsType.equals("compute_engine_channel_creds")) {
+        return ComputeEngineChannelBuilder.forAddress(serverHost, serverPort).build();
+      }
       if (useAlts) {
         return AltsChannelBuilder.forAddress(serverHost, serverPort).build();
       }
@@ -351,7 +415,8 @@ public class TestServiceClient {
         NettyChannelBuilder nettyBuilder =
             NettyChannelBuilder.forAddress(serverHost, serverPort)
                 .flowControlWindow(65 * 1024)
-                .negotiationType(useTls ? NegotiationType.TLS : NegotiationType.PLAINTEXT)
+                .negotiationType(useTls ? NegotiationType.TLS :
+                  (useH2cUpgrade ? NegotiationType.PLAINTEXT_UPGRADE : NegotiationType.PLAINTEXT))
                 .sslContext(sslContext);
         if (serverHostOverride != null) {
           nettyBuilder.overrideAuthority(serverHostOverride);

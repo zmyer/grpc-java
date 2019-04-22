@@ -16,9 +16,11 @@
 
 package io.grpc.internal;
 
-import io.grpc.internal.Channelz.SocketStats;
+import io.grpc.InternalChannelz.SocketStats;
+import io.grpc.InternalInstrumented;
 import java.io.IOException;
-import java.util.List;
+import java.net.SocketAddress;
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -45,13 +47,13 @@ public interface InternalServer {
   void shutdown();
 
   /**
-   * Returns what underlying port the server is listening on, or -1 if the port number is not
-   * available or does not make sense.
+   * Returns the listening socket address.  May change after {@link start(ServerListener)} is
+   * called.
    */
-  int getPort();
+  SocketAddress getListenSocketAddress();
 
   /**
-   * Returns the listen sockets of this server. May return an empty list but never returns null.
+   * Returns the listen socket stats of this server. May return {@code null}.
    */
-  List<Instrumented<SocketStats>> getListenSockets();
+  @Nullable InternalInstrumented<SocketStats> getListenSocketStats();
 }

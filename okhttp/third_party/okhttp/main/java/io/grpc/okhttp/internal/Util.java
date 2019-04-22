@@ -212,17 +212,17 @@ public final class Util {
 
   /** Returns an immutable copy of {@code list}. */
   public static <T> List<T> immutableList(List<T> list) {
-    return Collections.unmodifiableList(new ArrayList<T>(list));
+    return Collections.unmodifiableList(new ArrayList<>(list));
   }
 
   /** Returns an immutable list containing {@code elements}. */
-  public static <T> List<T> immutableList(T... elements) {
+  public static <T> List<T> immutableList(T[] elements) {
     return Collections.unmodifiableList(Arrays.asList(elements.clone()));
   }
 
   /** Returns an immutable copy of {@code map}. */
   public static <K, V> Map<K, V> immutableMap(Map<K, V> map) {
-    return Collections.unmodifiableMap(new LinkedHashMap<K, V>(map));
+    return Collections.unmodifiableMap(new LinkedHashMap<>(map));
   }
 
   public static ThreadFactory threadFactory(final String name, final boolean daemon) {
@@ -250,7 +250,7 @@ public final class Util {
    * {@code second}. The returned elements are in the same order as in {@code first}.
    */
   private static <T> List<T> intersect(T[] first, T[] second) {
-    List<T> result = new ArrayList<T>();
+    List<T> result = new ArrayList<>();
     for (T a : first) {
       for (T b : second) {
         if (a.equals(b)) {

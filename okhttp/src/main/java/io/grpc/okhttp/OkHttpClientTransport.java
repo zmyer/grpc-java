@@ -18,6 +18,7 @@ package io.grpc.okhttp;
 
 import static com.google.common.base.Preconditions.checkState;
 import static io.grpc.internal.GrpcUtil.TIMER_SERVICE;
+import static io.grpc.okhttp.Utils.DEFAULT_WINDOW_UPDATE_RATIO;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
@@ -33,26 +34,30 @@ import com.squareup.okhttp.internal.http.StatusLine;
 import io.grpc.Attributes;
 import io.grpc.CallOptions;
 import io.grpc.Grpc;
+import io.grpc.HttpConnectProxiedSocketAddress;
+import io.grpc.InternalChannelz;
+import io.grpc.InternalChannelz.SocketStats;
+import io.grpc.InternalLogId;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.MethodDescriptor.MethodType;
+import io.grpc.SecurityLevel;
 import io.grpc.Status;
 import io.grpc.Status.Code;
 import io.grpc.StatusException;
-import io.grpc.internal.Channelz;
-import io.grpc.internal.Channelz.SocketStats;
 import io.grpc.internal.ClientStreamListener.RpcProgress;
 import io.grpc.internal.ConnectionClientTransport;
+import io.grpc.internal.GrpcAttributes;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.Http2Ping;
+import io.grpc.internal.InUseStateAggregator;
 import io.grpc.internal.KeepAliveManager;
 import io.grpc.internal.KeepAliveManager.ClientKeepAlivePinger;
-import io.grpc.internal.LogId;
-import io.grpc.internal.ProxyParameters;
 import io.grpc.internal.SerializingExecutor;
 import io.grpc.internal.SharedResourceHolder;
 import io.grpc.internal.StatsTraceContext;
 import io.grpc.internal.TransportTracer;
+import io.grpc.okhttp.ExceptionHandlingFrameWriter.TransportExceptionHandler;
 import io.grpc.okhttp.internal.ConnectionSpec;
 import io.grpc.okhttp.internal.framed.ErrorCode;
 import io.grpc.okhttp.internal.framed.FrameReader;
@@ -75,12 +80,14 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
+import javax.net.SocketFactory;
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocket;
@@ -96,13 +103,13 @@ import okio.Timeout;
 /**
  * A okhttp-based {@link ConnectionClientTransport} implementation.
  */
-class OkHttpClientTransport implements ConnectionClientTransport {
+class OkHttpClientTransport implements ConnectionClientTransport, TransportExceptionHandler {
   private static final Map<ErrorCode, Status> ERROR_CODE_TO_STATUS = buildErrorCodeToStatusMap();
   private static final Logger log = Logger.getLogger(OkHttpClientTransport.class.getName());
   private static final OkHttpClientStream[] EMPTY_STREAM_ARRAY = new OkHttpClientStream[0];
 
   private static Map<ErrorCode, Status> buildErrorCodeToStatusMap() {
-    Map<ErrorCode, Status> errorToStatus = new EnumMap<ErrorCode, Status>(ErrorCode.class);
+    Map<ErrorCode, Status> errorToStatus = new EnumMap<>(ErrorCode.class);
     errorToStatus.put(ErrorCode.NO_ERROR,
         Status.INTERNAL.withDescription("No error: A GRPC status of OK should have been sent"));
     errorToStatus.put(ErrorCode.PROTOCOL_ERROR,
@@ -136,17 +143,19 @@ class OkHttpClientTransport implements ConnectionClientTransport {
   private final Random random = new Random();
   // Returns new unstarted stopwatches
   private final Supplier<Stopwatch> stopwatchFactory;
+  private final int initialWindowSize;
   private Listener listener;
   private FrameReader testFrameReader;
-  private AsyncFrameWriter frameWriter;
+  private OkHttpFrameLogger testFrameLogger;
+  @GuardedBy("lock")
+  private ExceptionHandlingFrameWriter frameWriter;
   private OutboundFlowController outboundFlow;
   private final Object lock = new Object();
-  private final LogId logId = LogId.allocate(getClass().getName());
+  private final InternalLogId logId;
   @GuardedBy("lock")
   private int nextStreamId;
   @GuardedBy("lock")
-  private final Map<Integer, OkHttpClientStream> streams =
-      new HashMap<Integer, OkHttpClientStream>();
+  private final Map<Integer, OkHttpClientStream> streams = new HashMap<>();
   private final Executor executor;
   // Wrap on executor, to guarantee some operations be executed serially.
   private final SerializingExecutor serializingExecutor;
@@ -154,7 +163,7 @@ class OkHttpClientTransport implements ConnectionClientTransport {
   private int connectionUnacknowledgedBytesRead;
   private ClientFrameHandler clientFrameHandler;
   // Caution: Not synchronized, new value can only be safely read after the connection is complete.
-  private Attributes attributes = Attributes.EMPTY;
+  private Attributes attributes;
   /**
    * Indicates the transport is in go-away state: no new streams will be processed, but existing
    * streams may continue.
@@ -168,7 +177,8 @@ class OkHttpClientTransport implements ConnectionClientTransport {
   @GuardedBy("lock")
   private boolean stopped;
   @GuardedBy("lock")
-  private boolean inUse;
+  private boolean hasStream;
+  private final SocketFactory socketFactory;
   private SSLSocketFactory sslSocketFactory;
   private HostnameVerifier hostnameVerifier;
   private Socket socket;
@@ -176,7 +186,7 @@ class OkHttpClientTransport implements ConnectionClientTransport {
   private int maxConcurrentStreams = 0;
   @SuppressWarnings("JdkObsolete") // Usage is bursty; want low memory usage when empty
   @GuardedBy("lock")
-  private LinkedList<OkHttpClientStream> pendingStreams = new LinkedList<OkHttpClientStream>();
+  private final LinkedList<OkHttpClientStream> pendingStreams = new LinkedList<>();
   private final ConnectionSpec connectionSpec;
   private FrameWriter testFrameWriter;
   private ScheduledExecutorService scheduler;
@@ -186,42 +196,72 @@ class OkHttpClientTransport implements ConnectionClientTransport {
   private long keepAliveTimeoutNanos;
   private boolean keepAliveWithoutCalls;
   private final Runnable tooManyPingsRunnable;
+  private final int maxInboundMetadataSize;
   @GuardedBy("lock")
   private final TransportTracer transportTracer;
   @GuardedBy("lock")
-  private Channelz.Security securityInfo;
+  private final InUseStateAggregator<OkHttpClientStream> inUseState =
+      new InUseStateAggregator<OkHttpClientStream>() {
+        @Override
+        protected void handleInUse() {
+          listener.transportInUse(true);
+        }
+
+        @Override
+        protected void handleNotInUse() {
+          listener.transportInUse(false);
+        }
+      };
+  @GuardedBy("lock")
+  private InternalChannelz.Security securityInfo;
 
   @VisibleForTesting
   @Nullable
-  final ProxyParameters proxy;
+  final HttpConnectProxiedSocketAddress proxiedAddr;
 
   // The following fields should only be used for test.
   Runnable connectingCallback;
   SettableFuture<Void> connectedFuture;
 
-
-  OkHttpClientTransport(InetSocketAddress address, String authority, @Nullable String userAgent,
-      Executor executor, @Nullable SSLSocketFactory sslSocketFactory,
-      @Nullable HostnameVerifier hostnameVerifier, ConnectionSpec connectionSpec,
-      int maxMessageSize, @Nullable ProxyParameters proxy, Runnable tooManyPingsRunnable,
+  OkHttpClientTransport(
+      InetSocketAddress address,
+      String authority,
+      @Nullable String userAgent,
+      Attributes eagAttrs,
+      Executor executor,
+      @Nullable SocketFactory socketFactory,
+      @Nullable SSLSocketFactory sslSocketFactory,
+      @Nullable HostnameVerifier hostnameVerifier,
+      ConnectionSpec connectionSpec,
+      int maxMessageSize,
+      int initialWindowSize,
+      @Nullable HttpConnectProxiedSocketAddress proxiedAddr,
+      Runnable tooManyPingsRunnable,
+      int maxInboundMetadataSize,
       TransportTracer transportTracer) {
     this.address = Preconditions.checkNotNull(address, "address");
     this.defaultAuthority = authority;
     this.maxMessageSize = maxMessageSize;
+    this.initialWindowSize = initialWindowSize;
     this.executor = Preconditions.checkNotNull(executor, "executor");
     serializingExecutor = new SerializingExecutor(executor);
     // Client initiated streams are odd, server initiated ones are even. Server should not need to
     // use it. We start clients at 3 to avoid conflicting with HTTP negotiation.
     nextStreamId = 3;
+    this.socketFactory = socketFactory == null ? SocketFactory.getDefault() : socketFactory;
     this.sslSocketFactory = sslSocketFactory;
     this.hostnameVerifier = hostnameVerifier;
     this.connectionSpec = Preconditions.checkNotNull(connectionSpec, "connectionSpec");
     this.stopwatchFactory = GrpcUtil.STOPWATCH_SUPPLIER;
     this.userAgent = GrpcUtil.getGrpcUserAgent("okhttp", userAgent);
-    this.proxy = proxy;
+    this.proxiedAddr = proxiedAddr;
     this.tooManyPingsRunnable =
         Preconditions.checkNotNull(tooManyPingsRunnable, "tooManyPingsRunnable");
+    this.maxInboundMetadataSize = maxInboundMetadataSize;
     this.transportTracer = Preconditions.checkNotNull(transportTracer);
+    this.logId = InternalLogId.allocate(getClass(), address.toString());
+    this.attributes = Attributes.newBuilder()
+        .set(GrpcAttributes.ATTR_CLIENT_EAG_ATTRS, eagAttrs).build();
     initTransportTracer();
   }
 
@@ -234,32 +274,39 @@ class OkHttpClientTransport implements ConnectionClientTransport {
       Executor executor,
       FrameReader frameReader,
       FrameWriter testFrameWriter,
+      OkHttpFrameLogger testFrameLogger,
       int nextStreamId,
       Socket socket,
       Supplier<Stopwatch> stopwatchFactory,
       @Nullable Runnable connectingCallback,
       SettableFuture<Void> connectedFuture,
       int maxMessageSize,
+      int initialWindowSize,
       Runnable tooManyPingsRunnable,
       TransportTracer transportTracer) {
     address = null;
     this.maxMessageSize = maxMessageSize;
+    this.initialWindowSize = initialWindowSize;
     defaultAuthority = "notarealauthority:80";
     this.userAgent = GrpcUtil.getGrpcUserAgent("okhttp", userAgent);
     this.executor = Preconditions.checkNotNull(executor, "executor");
     serializingExecutor = new SerializingExecutor(executor);
+    this.socketFactory = SocketFactory.getDefault();
     this.testFrameReader = Preconditions.checkNotNull(frameReader, "frameReader");
     this.testFrameWriter = Preconditions.checkNotNull(testFrameWriter, "testFrameWriter");
+    this.testFrameLogger = Preconditions.checkNotNull(testFrameLogger, "testFrameLogger");
     this.socket = Preconditions.checkNotNull(socket, "socket");
     this.nextStreamId = nextStreamId;
     this.stopwatchFactory = stopwatchFactory;
     this.connectionSpec = null;
     this.connectingCallback = connectingCallback;
     this.connectedFuture = Preconditions.checkNotNull(connectedFuture, "connectedFuture");
-    this.proxy = null;
+    this.proxiedAddr = null;
     this.tooManyPingsRunnable =
         Preconditions.checkNotNull(tooManyPingsRunnable, "tooManyPingsRunnable");
+    this.maxInboundMetadataSize = Integer.MAX_VALUE;
     this.transportTracer = Preconditions.checkNotNull(transportTracer, "transportTracer");
+    this.logId = InternalLogId.allocate(getClass(), String.valueOf(socket.getInetAddress()));
     initTransportTracer();
   }
 
@@ -295,11 +342,11 @@ class OkHttpClientTransport implements ConnectionClientTransport {
 
   @Override
   public void ping(final PingCallback callback, Executor executor) {
-    checkState(frameWriter != null);
     long data = 0;
     Http2Ping p;
     boolean writePing;
     synchronized (lock) {
+      checkState(frameWriter != null);
       if (stopped) {
         Http2Ping.notifyFailed(callback, executor, getPingFailure());
         return;
@@ -318,9 +365,9 @@ class OkHttpClientTransport implements ConnectionClientTransport {
         writePing = true;
         transportTracer.reportKeepAliveSent();
       }
-    }
-    if (writePing) {
-      frameWriter.ping(false, (int) (data >>> 32), (int) data);
+      if (writePing) {
+        frameWriter.ping(false, (int) (data >>> 32), (int) data);
+      }
     }
     // If transport concurrently failed/stopped since we released the lock above, this could
     // immediately invoke callback (which we shouldn't do while holding a lock)
@@ -332,32 +379,37 @@ class OkHttpClientTransport implements ConnectionClientTransport {
       final Metadata headers, CallOptions callOptions) {
     Preconditions.checkNotNull(method, "method");
     Preconditions.checkNotNull(headers, "headers");
-    StatsTraceContext statsTraceCtx = StatsTraceContext.newClientContext(callOptions, headers);
-    return new OkHttpClientStream(
-        method,
-        headers,
-        frameWriter,
-        OkHttpClientTransport.this,
-        outboundFlow,
-        lock,
-        maxMessageSize,
-        defaultAuthority,
-        userAgent,
-        statsTraceCtx,
-        transportTracer);
+    StatsTraceContext statsTraceCtx =
+        StatsTraceContext.newClientContext(callOptions, attributes, headers);
+    // FIXME: it is likely wrong to pass the transportTracer here as it'll exit the lock's scope
+    synchronized (lock) { // to make @GuardedBy linter happy
+      return new OkHttpClientStream(
+          method,
+          headers,
+          frameWriter,
+          OkHttpClientTransport.this,
+          outboundFlow,
+          lock,
+          maxMessageSize,
+          initialWindowSize,
+          defaultAuthority,
+          userAgent,
+          statsTraceCtx,
+          transportTracer,
+          callOptions);
+    }
   }
 
   @GuardedBy("lock")
   void streamReadyToStart(OkHttpClientStream clientStream) {
-    synchronized (lock) {
-      if (goAwayStatus != null) {
-        clientStream.transportState().transportReportStatus(goAwayStatus, true, new Metadata());
-      } else if (streams.size() >= maxConcurrentStreams) {
-        pendingStreams.add(clientStream);
-        setInUse();
-      } else {
-        startStream(clientStream);
-      }
+    if (goAwayStatus != null) {
+      clientStream.transportState().transportReportStatus(
+          goAwayStatus, RpcProgress.REFUSED, true, new Metadata());
+    } else if (streams.size() >= maxConcurrentStreams) {
+      pendingStreams.add(clientStream);
+      setInUse(clientStream);
+    } else {
+      startStream(clientStream);
     }
   }
 
@@ -366,7 +418,7 @@ class OkHttpClientTransport implements ConnectionClientTransport {
     Preconditions.checkState(
         stream.id() == OkHttpClientStream.ABSENT_ID, "StreamId already assigned");
     streams.put(nextStreamId, stream);
-    setInUse();
+    setInUse(stream);
     stream.transportState().start(nextStreamId);
     // For unary and server streaming, there will be a data frame soon, no need to flush the header.
     if ((stream.getType() != MethodType.UNARY && stream.getType() != MethodType.SERVER_STREAMING)
@@ -404,7 +456,7 @@ class OkHttpClientTransport implements ConnectionClientTransport {
   @GuardedBy("lock")
   void removePendingStream(OkHttpClientStream pendingStream) {
     pendingStreams.remove(pendingStream);
-    maybeClearInUse();
+    maybeClearInUse(pendingStream);
   }
 
   @Override
@@ -418,29 +470,54 @@ class OkHttpClientTransport implements ConnectionClientTransport {
           keepAliveWithoutCalls);
       keepAliveManager.onTransportStarted();
     }
-
-    frameWriter = new AsyncFrameWriter(this, serializingExecutor);
-    outboundFlow = new OutboundFlowController(this, frameWriter);
-    // Connecting in the serializingExecutor, so that some stream operations like synStream
-    // will be executed after connected.
-    serializingExecutor.execute(new Runnable() {
-      @Override
-      public void run() {
-        if (isForTest()) {
+    if (isForTest()) {
+      synchronized (lock) {
+        frameWriter = new ExceptionHandlingFrameWriter(OkHttpClientTransport.this, testFrameWriter,
+            testFrameLogger);
+        outboundFlow =
+            new OutboundFlowController(OkHttpClientTransport.this, frameWriter, initialWindowSize);
+      }
+      serializingExecutor.execute(new Runnable() {
+        @Override
+        public void run() {
           if (connectingCallback != null) {
             connectingCallback.run();
           }
-          clientFrameHandler = new ClientFrameHandler(testFrameReader);
+          clientFrameHandler = new ClientFrameHandler(testFrameReader, testFrameLogger);
           executor.execute(clientFrameHandler);
           synchronized (lock) {
             maxConcurrentStreams = Integer.MAX_VALUE;
             startPendingStreams();
           }
-          frameWriter.becomeConnected(testFrameWriter, socket);
           connectedFuture.set(null);
-          return;
         }
+      });
+      return null;
+    }
 
+    final AsyncSink asyncSink = AsyncSink.sink(serializingExecutor, this);
+    final Variant variant = new Http2();
+    FrameWriter rawFrameWriter = variant.newWriter(Okio.buffer(asyncSink), true);
+
+    synchronized (lock) {
+      frameWriter = new ExceptionHandlingFrameWriter(this, rawFrameWriter);
+      outboundFlow = new OutboundFlowController(this, frameWriter, initialWindowSize);
+    }
+    final CountDownLatch latch = new CountDownLatch(1);
+    // Connecting in the serializingExecutor, so that some stream operations like synStream
+    // will be executed after connected.
+    serializingExecutor.execute(new Runnable() {
+      @Override
+      public void run() {
+        // This is a hack to make sure the connection preface and initial settings to be sent out
+        // without blocking the start. By doing this essentially prevents potential deadlock when
+        // network is not available during startup while another thread holding lock to send the
+        // initial preface.
+        try {
+          latch.await();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
         // Use closed source on failure so that the reader immediately shuts down.
         BufferedSource source = Okio.buffer(new Source() {
           @Override
@@ -454,20 +531,28 @@ class OkHttpClientTransport implements ConnectionClientTransport {
           }
 
           @Override
-          public void close() {}
+          public void close() {
+          }
         });
-        Variant variant = new Http2();
-        BufferedSink sink;
         Socket sock;
         SSLSession sslSession = null;
         try {
-          if (proxy == null) {
-            sock = new Socket(address.getAddress(), address.getPort());
+          if (proxiedAddr == null) {
+            sock = socketFactory.createSocket(address.getAddress(), address.getPort());
           } else {
-            sock = createHttpProxySocket(
-                address, proxy.proxyAddress, proxy.username, proxy.password);
+            if (proxiedAddr.getProxyAddress() instanceof InetSocketAddress) {
+              sock = createHttpProxySocket(
+                  proxiedAddr.getTargetAddress(),
+                  (InetSocketAddress) proxiedAddr.getProxyAddress(),
+                  proxiedAddr.getUsername(),
+                  proxiedAddr.getPassword()
+              );
+            } else {
+              throw Status.INTERNAL.withDescription(
+                  "Unsupported SocketAddress implementation "
+                  + proxiedAddr.getProxyAddress().getClass()).asException();
+            }
           }
-
           if (sslSocketFactory != null) {
             SSLSocket sslSocket = OkHttpTlsUpgrader.upgrade(
                 sslSocketFactory, hostnameVerifier, sock, getOverridenHost(), getOverridenPort(),
@@ -477,13 +562,15 @@ class OkHttpClientTransport implements ConnectionClientTransport {
           }
           sock.setTcpNoDelay(true);
           source = Okio.buffer(Okio.source(sock));
-          sink = Okio.buffer(Okio.sink(sock));
-          // TODO(zhangkun83): fill channel security attributes
+          asyncSink.becomeConnected(Okio.sink(sock), sock);
+
           // The return value of OkHttpTlsUpgrader.upgrade is an SSLSocket that has this info
-          attributes = Attributes
-              .newBuilder()
+          attributes = attributes.toBuilder()
               .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, sock.getRemoteSocketAddress())
+              .set(Grpc.TRANSPORT_ATTR_LOCAL_ADDR, sock.getLocalSocketAddress())
               .set(Grpc.TRANSPORT_ATTR_SSL_SESSION, sslSession)
+              .set(GrpcAttributes.ATTR_SECURITY_LEVEL,
+                  sslSession == null ? SecurityLevel.NONE : SecurityLevel.PRIVACY_AND_INTEGRITY)
               .build();
         } catch (StatusException e) {
           startGoAway(0, ErrorCode.INTERNAL_ERROR, e.getStatus());
@@ -493,31 +580,35 @@ class OkHttpClientTransport implements ConnectionClientTransport {
           return;
         } finally {
           clientFrameHandler = new ClientFrameHandler(variant.newReader(source, true));
-          executor.execute(clientFrameHandler);
         }
-
-        FrameWriter rawFrameWriter;
         synchronized (lock) {
           socket = Preconditions.checkNotNull(sock, "socket");
-          maxConcurrentStreams = Integer.MAX_VALUE;
-          startPendingStreams();
           if (sslSession != null) {
-            securityInfo = new Channelz.Security(new Channelz.Tls(sslSession));
+            securityInfo = new InternalChannelz.Security(new InternalChannelz.Tls(sslSession));
           }
         }
+      }
+    });
+    // Schedule to send connection preface & settings before any other write.
+    try {
+      synchronized (lock) {
+        frameWriter.connectionPreface();
+        Settings settings = new Settings();
+        frameWriter.settings(settings);
+      }
+    } finally {
+      latch.countDown();
+    }
 
-        rawFrameWriter = variant.newWriter(sink, true);
-        frameWriter.becomeConnected(rawFrameWriter, socket);
-
-        try {
-          // Do these with the raw FrameWriter, so that they will be done in this thread,
-          // and before any possible pending stream operations.
-          rawFrameWriter.connectionPreface();
-          Settings settings = new Settings();
-          rawFrameWriter.settings(settings);
-        } catch (Exception e) {
-          onException(e);
-          return;
+    serializingExecutor.execute(new Runnable() {
+      @Override
+      public void run() {
+        // ClientFrameHandler need to be started after connectionPreface / settings, otherwise it
+        // may send goAway immediately.
+        executor.execute(clientFrameHandler);
+        synchronized (lock) {
+          maxConcurrentStreams = Integer.MAX_VALUE;
+          startPendingStreams();
         }
       }
     });
@@ -525,14 +616,15 @@ class OkHttpClientTransport implements ConnectionClientTransport {
   }
 
   private Socket createHttpProxySocket(InetSocketAddress address, InetSocketAddress proxyAddress,
-      String proxyUsername, String proxyPassword) throws IOException, StatusException {
+      String proxyUsername, String proxyPassword) throws StatusException {
     try {
       Socket sock;
       // The proxy address may not be resolved
       if (proxyAddress.getAddress() != null) {
-        sock = new Socket(proxyAddress.getAddress(), proxyAddress.getPort());
+        sock = socketFactory.createSocket(proxyAddress.getAddress(), proxyAddress.getPort());
       } else {
-        sock = new Socket(proxyAddress.getHostName(), proxyAddress.getPort());
+        sock =
+            socketFactory.createSocket(proxyAddress.getHostName(), proxyAddress.getPort());
       }
       sock.setTcpNoDelay(true);
 
@@ -626,7 +718,7 @@ class OkHttpClientTransport implements ConnectionClientTransport {
   }
 
   @Override
-  public LogId getLogId() {
+  public InternalLogId getLogId() {
     return logId;
   }
 
@@ -685,13 +777,14 @@ class OkHttpClientTransport implements ConnectionClientTransport {
         Map.Entry<Integer, OkHttpClientStream> entry = it.next();
         it.remove();
         entry.getValue().transportState().transportReportStatus(reason, false, new Metadata());
+        maybeClearInUse(entry.getValue());
       }
 
       for (OkHttpClientStream stream : pendingStreams) {
         stream.transportState().transportReportStatus(reason, true, new Metadata());
+        maybeClearInUse(stream);
       }
       pendingStreams.clear();
-      maybeClearInUse();
 
       stopIfNecessary();
     }
@@ -717,6 +810,11 @@ class OkHttpClientTransport implements ConnectionClientTransport {
   }
 
   @VisibleForTesting
+  SocketFactory getSocketFactory() {
+    return socketFactory;
+  }
+
+  @VisibleForTesting
   int getPendingStreamSize() {
     synchronized (lock) {
       return pendingStreams.size();
@@ -726,7 +824,8 @@ class OkHttpClientTransport implements ConnectionClientTransport {
   /**
    * Finish all active streams due to an IOException, then close the transport.
    */
-  void onException(Throwable failureCause) {
+  @Override
+  public void onException(Throwable failureCause) {
     Preconditions.checkNotNull(failureCause, "failureCause");
     Status status = Status.UNAVAILABLE.withCause(failureCause);
     startGoAway(0, ErrorCode.INTERNAL_ERROR, status);
@@ -759,15 +858,16 @@ class OkHttpClientTransport implements ConnectionClientTransport {
           it.remove();
           entry.getValue().transportState().transportReportStatus(
               status, RpcProgress.REFUSED, false, new Metadata());
+          maybeClearInUse(entry.getValue());
         }
       }
 
       for (OkHttpClientStream stream : pendingStreams) {
         stream.transportState().transportReportStatus(
             status, RpcProgress.REFUSED, true, new Metadata());
+        maybeClearInUse(stream);
       }
       pendingStreams.clear();
-      maybeClearInUse();
 
       stopIfNecessary();
     }
@@ -812,7 +912,7 @@ class OkHttpClientTransport implements ConnectionClientTransport {
         }
         if (!startPendingStreams()) {
           stopIfNecessary();
-          maybeClearInUse();
+          maybeClearInUse(stream);
         }
       }
     }
@@ -855,11 +955,10 @@ class OkHttpClientTransport implements ConnectionClientTransport {
   }
 
   @GuardedBy("lock")
-  private void maybeClearInUse() {
-    if (inUse) {
+  private void maybeClearInUse(OkHttpClientStream stream) {
+    if (hasStream) {
       if (pendingStreams.isEmpty() && streams.isEmpty()) {
-        inUse = false;
-        listener.transportInUse(false);
+        hasStream = false;
         if (keepAliveManager != null) {
           // We don't have any active streams. No need to do keepalives any more.
           // Again, we have to call this inside the lock to avoid the race between onTransportIdle
@@ -868,13 +967,15 @@ class OkHttpClientTransport implements ConnectionClientTransport {
         }
       }
     }
+    if (stream.shouldBeCountedForInUse()) {
+      inUseState.updateObjectInUse(stream, false);
+    }
   }
 
   @GuardedBy("lock")
-  private void setInUse() {
-    if (!inUse) {
-      inUse = true;
-      listener.transportInUse(true);
+  private void setInUse(OkHttpClientStream stream) {
+    if (!hasStream) {
+      hasStream = true;
       if (keepAliveManager != null) {
         // We have a new stream. We might need to do keepalives now.
         // Note that we have to do this inside the lock to avoid calling
@@ -882,6 +983,9 @@ class OkHttpClientTransport implements ConnectionClientTransport {
         // order.
         keepAliveManager.onTransportActive();
       }
+    }
+    if (stream.shouldBeCountedForInUse()) {
+      inUseState.updateObjectInUse(stream, true);
     }
   }
 
@@ -926,7 +1030,7 @@ class OkHttpClientTransport implements ConnectionClientTransport {
             transportTracer.getStats(),
             /*local=*/ null,
             /*remote=*/ null,
-            new Channelz.SocketOptions.Builder().build(),
+            new InternalChannelz.SocketOptions.Builder().build(),
             /*security=*/ null));
       } else {
         ret.set(new SocketStats(
@@ -945,11 +1049,19 @@ class OkHttpClientTransport implements ConnectionClientTransport {
    */
   @VisibleForTesting
   class ClientFrameHandler implements FrameReader.Handler, Runnable {
+
+    private final OkHttpFrameLogger logger;
     FrameReader frameReader;
     boolean firstSettings = true;
 
     ClientFrameHandler(FrameReader frameReader) {
+      this(frameReader, new OkHttpFrameLogger(Level.FINE, OkHttpClientTransport.class));
+    }
+
+    @VisibleForTesting
+    ClientFrameHandler(FrameReader frameReader, OkHttpFrameLogger frameLogger) {
       this.frameReader = frameReader;
+      logger = frameLogger;
     }
 
     @Override
@@ -973,9 +1085,9 @@ class OkHttpClientTransport implements ConnectionClientTransport {
       } catch (Throwable t) {
         // TODO(madongfly): Send the exception message to the server.
         startGoAway(
-            0, 
-            ErrorCode.PROTOCOL_ERROR, 
-            Status.UNAVAILABLE.withDescription("error in frame handler").withCause(t));
+            0,
+            ErrorCode.PROTOCOL_ERROR,
+            Status.INTERNAL.withDescription("error in frame handler").withCause(t));
       } finally {
         try {
           frameReader.close();
@@ -996,10 +1108,14 @@ class OkHttpClientTransport implements ConnectionClientTransport {
     @Override
     public void data(boolean inFinished, int streamId, BufferedSource in, int length)
         throws IOException {
+      logger.logData(OkHttpFrameLogger.Direction.INBOUND,
+          streamId, in.buffer(), length, inFinished);
       OkHttpClientStream stream = getStream(streamId);
       if (stream == null) {
         if (mayHaveCreatedStream(streamId)) {
-          frameWriter.rstStream(streamId, ErrorCode.INVALID_STREAM);
+          synchronized (lock) {
+            frameWriter.rstStream(streamId, ErrorCode.INVALID_STREAM);
+          }
           in.skip(length);
         } else {
           onError(ErrorCode.PROTOCOL_ERROR, "Received data for unknown stream: " + streamId);
@@ -1018,8 +1134,10 @@ class OkHttpClientTransport implements ConnectionClientTransport {
 
       // connection window update
       connectionUnacknowledgedBytesRead += length;
-      if (connectionUnacknowledgedBytesRead >= Utils.DEFAULT_WINDOW_SIZE / 2) {
-        frameWriter.windowUpdate(0, connectionUnacknowledgedBytesRead);
+      if (connectionUnacknowledgedBytesRead >= initialWindowSize * DEFAULT_WINDOW_UPDATE_RATIO) {
+        synchronized (lock) {
+          frameWriter.windowUpdate(0, connectionUnacknowledgedBytesRead);
+        }
         connectionUnacknowledgedBytesRead = 0;
       }
     }
@@ -1034,7 +1152,20 @@ class OkHttpClientTransport implements ConnectionClientTransport {
         int associatedStreamId,
         List<Header> headerBlock,
         HeadersMode headersMode) {
+      logger.logHeaders(OkHttpFrameLogger.Direction.INBOUND, streamId, headerBlock, inFinished);
       boolean unknownStream = false;
+      Status failedStatus = null;
+      if (maxInboundMetadataSize != Integer.MAX_VALUE) {
+        int metadataSize = headerBlockSize(headerBlock);
+        if (metadataSize > maxInboundMetadataSize) {
+          failedStatus = Status.RESOURCE_EXHAUSTED.withDescription(
+              String.format(
+                  "Response %s metadata larger than %d: %d",
+                  inFinished ? "trailer" : "header",
+                  maxInboundMetadataSize,
+                  metadataSize));
+        }
+      }
       synchronized (lock) {
         OkHttpClientStream stream = streams.get(streamId);
         if (stream == null) {
@@ -1044,7 +1175,14 @@ class OkHttpClientTransport implements ConnectionClientTransport {
             unknownStream = true;
           }
         } else {
-          stream.transportState().transportHeadersReceived(headerBlock, inFinished);
+          if (failedStatus == null) {
+            stream.transportState().transportHeadersReceived(headerBlock, inFinished);
+          } else {
+            if (!inFinished) {
+              frameWriter.rstStream(streamId, ErrorCode.CANCEL);
+            }
+            stream.transportState().transportReportStatus(failedStatus, false, new Metadata());
+          }
         }
       }
       if (unknownStream) {
@@ -1053,8 +1191,20 @@ class OkHttpClientTransport implements ConnectionClientTransport {
       }
     }
 
+    private int headerBlockSize(List<Header> headerBlock) {
+      // Calculate as defined for SETTINGS_MAX_HEADER_LIST_SIZE in RFC 7540 §6.5.2.
+      long size = 0;
+      for (int i = 0; i < headerBlock.size(); i++) {
+        Header header = headerBlock.get(i);
+        size += 32 + header.name.size() + header.value.size();
+      }
+      size = Math.min(size, Integer.MAX_VALUE);
+      return (int) size;
+    }
+
     @Override
     public void rstStream(int streamId, ErrorCode errorCode) {
+      logger.logRstStream(OkHttpFrameLogger.Direction.INBOUND, streamId, errorCode);
       Status status = toGrpcStatus(errorCode).augmentDescription("Rst Stream");
       boolean stopDelivery =
           (status.getCode() == Code.CANCELLED || status.getCode() == Code.DEADLINE_EXCEEDED);
@@ -1066,6 +1216,8 @@ class OkHttpClientTransport implements ConnectionClientTransport {
 
     @Override
     public void settings(boolean clearPrevious, Settings settings) {
+      logger.logSettings(OkHttpFrameLogger.Direction.INBOUND, settings);
+      boolean outboundWindowSizeIncreased = false;
       synchronized (lock) {
         if (OkHttpSettingsUtil.isSet(settings, OkHttpSettingsUtil.MAX_CONCURRENT_STREAMS)) {
           int receivedMaxConcurrentStreams = OkHttpSettingsUtil.get(
@@ -1076,25 +1228,36 @@ class OkHttpClientTransport implements ConnectionClientTransport {
         if (OkHttpSettingsUtil.isSet(settings, OkHttpSettingsUtil.INITIAL_WINDOW_SIZE)) {
           int initialWindowSize = OkHttpSettingsUtil.get(
               settings, OkHttpSettingsUtil.INITIAL_WINDOW_SIZE);
-          outboundFlow.initialOutboundWindowSize(initialWindowSize);
+          outboundWindowSizeIncreased = outboundFlow.initialOutboundWindowSize(initialWindowSize);
         }
         if (firstSettings) {
           listener.transportReady();
           firstSettings = false;
         }
+
+        // The changed settings are not finalized until SETTINGS acknowledgment frame is sent. Any
+        // writes due to update in settings must be sent after SETTINGS acknowledgment frame,
+        // otherwise it will cause a stream error (RST_STREAM).
+        frameWriter.ackSettings(settings);
+
+        // send any pending bytes / streams
+        if (outboundWindowSizeIncreased) {
+          outboundFlow.writeStreams();
+        }
         startPendingStreams();
       }
-
-      frameWriter.ackSettings(settings);
     }
 
     @Override
     public void ping(boolean ack, int payload1, int payload2) {
+      long ackPayload = (((long) payload1) << 32) | (payload2 & 0xffffffffL);
+      logger.logPing(OkHttpFrameLogger.Direction.INBOUND, ackPayload);
       if (!ack) {
-        frameWriter.ping(true, payload1, payload2);
+        synchronized (lock) {
+          frameWriter.ping(true, payload1, payload2);
+        }
       } else {
         Http2Ping p = null;
-        long ackPayload = (((long) payload1) << 32) | (payload2 & 0xffffffffL);
         synchronized (lock) {
           if (ping != null) {
             if (ping.payload() == ackPayload) {
@@ -1122,6 +1285,7 @@ class OkHttpClientTransport implements ConnectionClientTransport {
 
     @Override
     public void goAway(int lastGoodStreamId, ErrorCode errorCode, ByteString debugData) {
+      logger.logGoAway(OkHttpFrameLogger.Direction.INBOUND, lastGoodStreamId, errorCode, debugData);
       if (errorCode == ErrorCode.ENHANCE_YOUR_CALM) {
         String data = debugData.utf8();
         log.log(Level.WARNING, String.format(
@@ -1142,12 +1306,17 @@ class OkHttpClientTransport implements ConnectionClientTransport {
     @Override
     public void pushPromise(int streamId, int promisedStreamId, List<Header> requestHeaders)
         throws IOException {
+      logger.logPushPromise(OkHttpFrameLogger.Direction.INBOUND,
+          streamId, promisedStreamId, requestHeaders);
       // We don't accept server initiated stream.
-      frameWriter.rstStream(streamId, ErrorCode.PROTOCOL_ERROR);
+      synchronized (lock) {
+        frameWriter.rstStream(streamId, ErrorCode.PROTOCOL_ERROR);
+      }
     }
 
     @Override
     public void windowUpdate(int streamId, long delta) {
+      logger.logWindowsUpdate(OkHttpFrameLogger.Direction.INBOUND, streamId, delta);
       if (delta == 0) {
         String errorMsg = "Received 0 flow control window increment.";
         if (streamId == 0) {

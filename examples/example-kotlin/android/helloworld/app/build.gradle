@@ -15,9 +15,7 @@ android {
         versionName "1.0"
     }
     buildTypes {
-        debug {
-            minifyEnabled false
-        }
+        debug { minifyEnabled false }
         release {
             minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
@@ -31,7 +29,7 @@ android {
     // Android Studio 3.1 does not automatically pick up '<src_set>/kotlin' as source input
     sourceSets {
         main.java.srcDirs += 'src/main/kotlin'
-        main.java.srcDirs += 'src/test/kotlin'
+        test.java.srcDirs += 'src/test/kotlin'
         androidTest.java.srcDirs += 'src/androidTest/kotlin'
     }
 
@@ -51,41 +49,32 @@ android {
 }
 
 protobuf {
-    protoc {
-        artifact = 'com.google.protobuf:protoc:3.5.1-1'
-    }
+    protoc { artifact = 'com.google.protobuf:protoc:3.7.1' }
     plugins {
-        javalite {
-            artifact = "com.google.protobuf:protoc-gen-javalite:3.0.0"
-        }
-        grpc {
-            artifact = 'io.grpc:protoc-gen-grpc-java:1.13.0-SNAPSHOT' // CURRENT_GRPC_VERSION
+        javalite { artifact = "com.google.protobuf:protoc-gen-javalite:3.0.0" }
+        grpc { artifact = 'io.grpc:protoc-gen-grpc-java:1.21.0-SNAPSHOT' // CURRENT_GRPC_VERSION
         }
     }
     generateProtoTasks {
         all().each { task ->
             task.plugins {
                 javalite {}
-                grpc {
-                    // Options added to --grpc_out
-                    option 'lite'
-                }
+                grpc { // Options added to --grpc_out
+                    option 'lite' }
             }
         }
     }
 }
 
 dependencies {
-    compile 'com.android.support:appcompat-v7:27.0.2'
-    compile 'javax.annotation:javax.annotation-api:1.2'
-    compile "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
+    implementation 'com.android.support:appcompat-v7:27.0.2'
+    implementation 'javax.annotation:javax.annotation-api:1.2'
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
 
     // You need to build grpc-java to obtain these libraries below.
-    compile 'io.grpc:grpc-okhttp:1.13.0-SNAPSHOT' // CURRENT_GRPC_VERSION
-    compile 'io.grpc:grpc-protobuf-lite:1.13.0-SNAPSHOT' // CURRENT_GRPC_VERSION
-    compile 'io.grpc:grpc-stub:1.13.0-SNAPSHOT' // CURRENT_GRPC_VERSION
+    implementation 'io.grpc:grpc-okhttp:1.21.0-SNAPSHOT' // CURRENT_GRPC_VERSION
+    implementation 'io.grpc:grpc-protobuf-lite:1.21.0-SNAPSHOT' // CURRENT_GRPC_VERSION
+    implementation 'io.grpc:grpc-stub:1.21.0-SNAPSHOT' // CURRENT_GRPC_VERSION
 }
 
-repositories {
-    mavenCentral()
-}
+repositories { mavenCentral() }

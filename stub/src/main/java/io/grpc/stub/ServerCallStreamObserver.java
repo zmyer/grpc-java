@@ -16,7 +16,6 @@
 
 package io.grpc.stub;
 
-import com.google.errorprone.annotations.DoNotMock;
 import io.grpc.ExperimentalApi;
 
 /**
@@ -25,9 +24,11 @@ import io.grpc.ExperimentalApi;
  *
  * <p>Like {@code StreamObserver}, implementations are not required to be thread-safe; if multiple
  * threads will be writing to an instance concurrently, the application must synchronize its calls.
+ *
+ * <p>DO NOT MOCK: The API is too complex to reliably mock. Use InProcessChannelBuilder to create
+ * "real" RPCs suitable for testing and interact with the server using a normal client stub.
  */
 @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1788")
-@DoNotMock
 public abstract class ServerCallStreamObserver<V> extends CallStreamObserver<V> {
 
   /**
@@ -38,22 +39,29 @@ public abstract class ServerCallStreamObserver<V> extends CallStreamObserver<V> 
   public abstract boolean isCancelled();
 
   /**
-   * Set a {@link Runnable} that will be called if the calls  {@link #isCancelled()} state
+   * Set a {@link Runnable} that will be called if the calls {@link #isCancelled()} state
    * changes from {@code false} to {@code true}. It is guaranteed that execution of the
    * {@link Runnable} are serialized with calls to the 'inbound' {@link StreamObserver}.
    *
-   * <p>Note that the handler may be called some time after {@link #isCancelled} has transitioned to
-   * {@code true} as other callbacks may still be executing in the 'inbound' observer.
+   * <p>Note that the handler may be called some time after {@link #isCancelled()} has transitioned
+   * to {@code true} as other callbacks may still be executing in the 'inbound' observer.
+   *
+   * <p>Setting the onCancelHandler will suppress the on-cancel exception thrown by
+   * {@link #onNext}.
    *
    * @param onCancelHandler to call when client has cancelled the call.
    */
   public abstract void setOnCancelHandler(Runnable onCancelHandler);
 
   /**
-   * Sets the compression algorithm to use for the call.  May only be called before sending any
-   * messages.
+   * Sets the compression algorithm to use for the call. May only be called before sending any
+   * messages. Default gRPC servers support the "gzip" compressor.
+   *
+   * <p>It is safe to call this even if the client does not support the compression format chosen.
+   * The implementation will handle negotiation with the client and may fall back to no compression.
    *
    * @param compression the compression algorithm to use.
+   * @throws IllegalArgumentException if the compressor name can not be found.
    */
   public abstract void setCompression(String compression);
 }

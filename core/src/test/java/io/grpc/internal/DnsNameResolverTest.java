@@ -18,26 +18,42 @@ package io.grpc.internal;
 
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
-import com.google.common.base.MoreObjects;
+import com.google.common.base.Stopwatch;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
-import io.grpc.Attributes;
+import com.google.common.net.InetAddresses;
+import com.google.common.testing.FakeTicker;
 import io.grpc.EquivalentAddressGroup;
+import io.grpc.HttpConnectProxiedSocketAddress;
 import io.grpc.NameResolver;
-import io.grpc.internal.DnsNameResolver.DelegateResolver;
+import io.grpc.NameResolver.ConfigOrError;
+import io.grpc.NameResolver.ResolutionResult;
+import io.grpc.ProxyDetector;
+import io.grpc.Status;
+import io.grpc.Status.Code;
+import io.grpc.SynchronizationContext;
+import io.grpc.internal.DnsNameResolver.AddressResolver;
 import io.grpc.internal.DnsNameResolver.ResolutionResults;
+import io.grpc.internal.DnsNameResolver.ResourceResolver;
+import io.grpc.internal.DnsNameResolver.ResourceResolverFactory;
+import io.grpc.internal.JndiResourceResolverFactory.JndiResourceResolver;
+import io.grpc.internal.JndiResourceResolverFactory.RecordFetcher;
 import io.grpc.internal.SharedResourceHolder.Resource;
+import java.io.IOException;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -47,86 +63,158 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
 import java.util.Random;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import javax.annotation.Nullable;
 import org.junit.After;
-import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.DisableOnDebug;
 import org.junit.rules.ExpectedException;
+import org.junit.rules.TestRule;
 import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Captor;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 /** Unit tests for {@link DnsNameResolver}. */
 @RunWith(JUnit4.class)
 public class DnsNameResolverTest {
 
-  @Rule public final Timeout globalTimeout = Timeout.seconds(10);
+  @Rule public final TestRule globalTimeout = new DisableOnDebug(Timeout.seconds(10));
+  @Rule public final MockitoRule mocks = MockitoJUnit.rule();
+  @Rule public final ExpectedException thrown = ExpectedException.none();
 
-  @Rule
-  public final ExpectedException thrown = ExpectedException.none();
-
-  private final Map<String, Object> serviceConfig = new LinkedHashMap<String, Object>();
+  private final Map<String, ?> serviceConfig = new LinkedHashMap<>();
 
   private static final int DEFAULT_PORT = 887;
-  private static final Attributes NAME_RESOLVER_PARAMS =
-      Attributes.newBuilder().set(NameResolver.Factory.PARAMS_DEFAULT_PORT, DEFAULT_PORT).build();
+  private final SynchronizationContext syncContext = new SynchronizationContext(
+      new Thread.UncaughtExceptionHandler() {
+        @Override
+        public void uncaughtException(Thread t, Throwable e) {
+          throw new AssertionError(e);
+        }
+      });
+  private final NameResolver.Helper helper = new NameResolver.Helper() {
+      @Override
+      public int getDefaultPort() {
+        return DEFAULT_PORT;
+      }
+
+      @Override
+      public ProxyDetector getProxyDetector() {
+        return GrpcUtil.getDefaultProxyDetector();
+      }
+
+      @Override
+      public SynchronizationContext getSynchronizationContext() {
+        return syncContext;
+      }
+    };
 
   private final DnsNameResolverProvider provider = new DnsNameResolverProvider();
   private final FakeClock fakeClock = new FakeClock();
   private final FakeClock fakeExecutor = new FakeClock();
-  private MockResolver mockResolver = new MockResolver();
 
-  private final Resource<ExecutorService> fakeExecutorResource =
-      new Resource<ExecutorService>() {
+  private final Resource<Executor> fakeExecutorResource =
+      new Resource<Executor>() {
         @Override
-        public ExecutorService create() {
+        public Executor create() {
           return fakeExecutor.getScheduledExecutorService();
         }
 
         @Override
-        public void close(ExecutorService instance) {
+        public void close(Executor instance) {
         }
       };
 
   @Mock
-  private NameResolver.Listener mockListener;
+  private NameResolver.Observer mockObserver;
   @Captor
-  private ArgumentCaptor<List<EquivalentAddressGroup>> resultCaptor;
+  private ArgumentCaptor<ResolutionResult> resultCaptor;
+  @Nullable
+  private String networkaddressCacheTtlPropertyValue;
+  @Mock
+  private RecordFetcher recordFetcher;
 
-  private DnsNameResolver newResolver(String name, int port) {
-    return newResolver(name, port, mockResolver, GrpcUtil.NOOP_PROXY_DETECTOR);
+  private DnsNameResolver newResolver(String name, int defaultPort) {
+    return newResolver(
+        name, defaultPort, GrpcUtil.NOOP_PROXY_DETECTOR, Stopwatch.createUnstarted());
+  }
+
+  private DnsNameResolver newResolver(String name, int defaultPort, boolean isAndroid) {
+    return newResolver(
+        name, defaultPort, GrpcUtil.NOOP_PROXY_DETECTOR, Stopwatch.createUnstarted(), isAndroid);
   }
 
   private DnsNameResolver newResolver(
       String name,
-      int port,
-      DelegateResolver delegateResolver,
-      ProxyDetector proxyDetector) {
+      int defaultPort,
+      ProxyDetector proxyDetector,
+      Stopwatch stopwatch) {
+    return newResolver(name, defaultPort, proxyDetector, stopwatch, false);
+  }
+
+  private DnsNameResolver newResolver(
+      String name,
+      final int defaultPort,
+      final ProxyDetector proxyDetector,
+      Stopwatch stopwatch,
+      boolean isAndroid) {
     DnsNameResolver dnsResolver = new DnsNameResolver(
         null,
         name,
-        Attributes.newBuilder().set(NameResolver.Factory.PARAMS_DEFAULT_PORT, port).build(),
+        new NameResolver.Helper() {
+          @Override
+          public int getDefaultPort() {
+            return defaultPort;
+          }
+
+          @Override
+          public ProxyDetector getProxyDetector() {
+            return proxyDetector;
+          }
+
+          @Override
+          public SynchronizationContext getSynchronizationContext() {
+            return syncContext;
+          }
+        },
         fakeExecutorResource,
-        proxyDetector);
-    dnsResolver.setDelegateResolver(delegateResolver);
+        stopwatch,
+        isAndroid);
+    // By default, using the mocked ResourceResolver to avoid I/O
+    dnsResolver.setResourceResolver(new JndiResourceResolver(recordFetcher));
     return dnsResolver;
   }
 
   @Before
   public void setUp() {
-    MockitoAnnotations.initMocks(this);
     DnsNameResolver.enableJndi = true;
+    networkaddressCacheTtlPropertyValue =
+        System.getProperty(DnsNameResolver.NETWORKADDRESS_CACHE_TTL_PROPERTY);
+  }
+
+  @After
+  public void restoreSystemProperty() {
+    if (networkaddressCacheTtlPropertyValue == null) {
+      System.clearProperty(DnsNameResolver.NETWORKADDRESS_CACHE_TTL_PROPERTY);
+    } else {
+      System.setProperty(
+          DnsNameResolver.NETWORKADDRESS_CACHE_TTL_PROPERTY,
+          networkaddressCacheTtlPropertyValue);
+    }
   }
 
   @After
@@ -158,142 +246,411 @@ public class DnsNameResolverTest {
   }
 
   @Test
-  public void resolve() throws Exception {
-    List<InetAddress> answer1 = createAddressList(2);
-    List<InetAddress> answer2 = createAddressList(1);
+  public void nullDnsName() {
+    try {
+      newResolver(null, DEFAULT_PORT);
+      fail("Expected NullPointerException");
+    } catch (NullPointerException e) {
+      // expected
+    }
+  }
+
+  @Test
+  public void invalidDnsName_containsUnderscore() {
+    try {
+      newResolver("host_1", DEFAULT_PORT);
+      fail("Expected IllegalArgumentException");
+    } catch (IllegalArgumentException e) {
+      // expected
+    }
+  }
+
+  @Test
+  public void resolve_androidIgnoresPropertyValue() throws Exception {
+    System.setProperty(DnsNameResolver.NETWORKADDRESS_CACHE_TTL_PROPERTY, Long.toString(2));
+    resolveNeverCache(true);
+  }
+
+  @Test
+  public void resolve_androidIgnoresPropertyValueCacheForever() throws Exception {
+    System.setProperty(DnsNameResolver.NETWORKADDRESS_CACHE_TTL_PROPERTY, Long.toString(-1));
+    resolveNeverCache(true);
+  }
+
+  @Test
+  public void resolve_neverCache() throws Exception {
+    System.setProperty(DnsNameResolver.NETWORKADDRESS_CACHE_TTL_PROPERTY, "0");
+    resolveNeverCache(false);
+  }
+
+  private void resolveNeverCache(boolean isAndroid) throws Exception {
+    final List<InetAddress> answer1 = createAddressList(2);
+    final List<InetAddress> answer2 = createAddressList(1);
     String name = "foo.googleapis.com";
 
-    DnsNameResolver resolver = newResolver(name, 81);
-    mockResolver.addAnswer(answer1).addAnswer(answer2);
-    resolver.start(mockListener);
+    DnsNameResolver resolver = newResolver(name, 81, isAndroid);
+    AddressResolver mockResolver = mock(AddressResolver.class);
+    when(mockResolver.resolveAddress(anyString())).thenReturn(answer1).thenReturn(answer2);
+    resolver.setAddressResolver(mockResolver);
+
+    resolver.start(mockObserver);
     assertEquals(1, fakeExecutor.runDueTasks());
-    verify(mockListener).onAddresses(resultCaptor.capture(), any(Attributes.class));
-    assertEquals(name, mockResolver.invocations.poll());
+    verify(mockObserver).onResult(resultCaptor.capture());
     assertAnswerMatches(answer1, 81, resultCaptor.getValue());
     assertEquals(0, fakeClock.numPendingTasks());
 
     resolver.refresh();
     assertEquals(1, fakeExecutor.runDueTasks());
-    verify(mockListener, times(2)).onAddresses(resultCaptor.capture(), any(Attributes.class));
-    assertEquals(name, mockResolver.invocations.poll());
+    verify(mockObserver, times(2)).onResult(resultCaptor.capture());
     assertAnswerMatches(answer2, 81, resultCaptor.getValue());
     assertEquals(0, fakeClock.numPendingTasks());
 
     resolver.shutdown();
+
+    verify(mockResolver, times(2)).resolveAddress(anyString());
   }
 
   @Test
-  public void jdkResolverWorks() throws Exception {
-    DnsNameResolver.DelegateResolver resolver = new DnsNameResolver.JdkResolver();
+  public void resolveAll_failsOnEmptyResult() {
+    DnsNameResolver nr = newResolver("dns:///addr.fake:1234", 443);
+    nr.setAddressResolver(new AddressResolver() {
+      @Override
+      public List<InetAddress> resolveAddress(String host) throws Exception {
+        return Collections.emptyList();
+      }
+    });
 
-    ResolutionResults results = resolver.resolve("localhost");
-    // Just check that *something* came back.
-    assertThat(results.addresses).isNotEmpty();
-    assertThat(results.txtRecords).isNotNull();
+    nr.start(mockObserver);
+    assertThat(fakeExecutor.runDueTasks()).isEqualTo(1);
+
+    ArgumentCaptor<Status> ac = ArgumentCaptor.forClass(Status.class);
+    verify(mockObserver).onError(ac.capture());
+    verifyNoMoreInteractions(mockObserver);
+    assertThat(ac.getValue().getCode()).isEqualTo(Code.UNAVAILABLE);
+    assertThat(ac.getValue().getDescription()).contains("No DNS backend or balancer addresses");
   }
 
   @Test
-  public void jndiResolverWorks() throws Exception {
-    Assume.assumeTrue(DnsNameResolver.jndiAvailable());
-    DnsNameResolver.DelegateResolver resolver = new DnsNameResolver.JndiResolver();
-    ResolutionResults results = null;
-    try {
-      results = resolver.resolve("localhost");
-    } catch (javax.naming.CommunicationException e) {
-      Assume.assumeNoException(e);
-    } catch (javax.naming.NameNotFoundException e) {
-      Assume.assumeNoException(e);
-    }
+  public void resolve_cacheForever() throws Exception {
+    System.setProperty(DnsNameResolver.NETWORKADDRESS_CACHE_TTL_PROPERTY, "-1");
+    final List<InetAddress> answer1 = createAddressList(2);
+    String name = "foo.googleapis.com";
+    FakeTicker fakeTicker = new FakeTicker();
 
-    assertThat(results.addresses).isEmpty();
-    assertThat(results.txtRecords).isNotNull();
+    DnsNameResolver resolver =
+        newResolver(name, 81, GrpcUtil.NOOP_PROXY_DETECTOR, Stopwatch.createUnstarted(fakeTicker));
+    AddressResolver mockResolver = mock(AddressResolver.class);
+    when(mockResolver.resolveAddress(anyString()))
+        .thenReturn(answer1)
+        .thenThrow(new AssertionError("should not called twice"));
+    resolver.setAddressResolver(mockResolver);
+
+    resolver.start(mockObserver);
+    assertEquals(1, fakeExecutor.runDueTasks());
+    verify(mockObserver).onResult(resultCaptor.capture());
+    assertAnswerMatches(answer1, 81, resultCaptor.getValue());
+    assertEquals(0, fakeClock.numPendingTasks());
+
+    fakeTicker.advance(1, TimeUnit.DAYS);
+    resolver.refresh();
+    assertEquals(0, fakeExecutor.runDueTasks());
+    assertEquals(0, fakeClock.numPendingTasks());
+    verifyNoMoreInteractions(mockObserver);
+
+    resolver.shutdown();
+
+    verify(mockResolver).resolveAddress(anyString());
   }
 
   @Test
-  public void compositeResolverPrefersJdkAddressJndiTxt() throws Exception {
-    MockResolver jdkDelegate = new MockResolver();
-    MockResolver jndiDelegate = new MockResolver();
-    DelegateResolver resolver = new DnsNameResolver.CompositeResolver(jdkDelegate, jndiDelegate);
+  public void resolve_usingCache() throws Exception {
+    long ttl = 60;
+    System.setProperty(DnsNameResolver.NETWORKADDRESS_CACHE_TTL_PROPERTY, Long.toString(ttl));
+    final List<InetAddress> answer = createAddressList(2);
+    String name = "foo.googleapis.com";
+    FakeTicker fakeTicker = new FakeTicker();
 
-    List<InetAddress> jdkAnswer = createAddressList(2);
-    jdkDelegate.addAnswer(
-        jdkAnswer,
-        Arrays.asList("jdktxt"),
-        Collections.<EquivalentAddressGroup>emptyList());
+    DnsNameResolver resolver =
+        newResolver(name, 81, GrpcUtil.NOOP_PROXY_DETECTOR, Stopwatch.createUnstarted(fakeTicker));
+    AddressResolver mockResolver = mock(AddressResolver.class);
+    when(mockResolver.resolveAddress(anyString()))
+        .thenReturn(answer)
+        .thenThrow(new AssertionError("should not reach here."));
+    resolver.setAddressResolver(mockResolver);
 
-    List<InetAddress> jdniAnswer = createAddressList(2);
-    jndiDelegate.addAnswer(
-        jdniAnswer,
-        Arrays.asList("jnditxt"),
-        Collections.singletonList(
-            new EquivalentAddressGroup(
-                Collections.<SocketAddress>singletonList(new SocketAddress() {}),
-                Attributes.EMPTY)));
+    resolver.start(mockObserver);
+    assertEquals(1, fakeExecutor.runDueTasks());
+    verify(mockObserver).onResult(resultCaptor.capture());
+    assertAnswerMatches(answer, 81, resultCaptor.getValue());
+    assertEquals(0, fakeClock.numPendingTasks());
 
-    ResolutionResults results = resolver.resolve("abc");
+    // this refresh should return cached result
+    fakeTicker.advance(ttl - 1, TimeUnit.SECONDS);
+    resolver.refresh();
+    assertEquals(0, fakeExecutor.runDueTasks());
+    assertEquals(0, fakeClock.numPendingTasks());
+    verifyNoMoreInteractions(mockObserver);
 
-    assertThat(results.addresses).containsExactlyElementsIn(jdkAnswer).inOrder();
-    assertThat(results.txtRecords).containsExactly("jnditxt");
-    assertThat(results.balancerAddresses).hasSize(1);
+    resolver.shutdown();
+
+    verify(mockResolver).resolveAddress(anyString());
   }
 
   @Test
-  public void compositeResolverSkipsAbsentJndi() throws Exception {
-    MockResolver jdkDelegate = new MockResolver();
-    MockResolver jndiDelegate = null;
-    DelegateResolver resolver = new DnsNameResolver.CompositeResolver(jdkDelegate, jndiDelegate);
+  public void resolve_cacheExpired() throws Exception {
+    long ttl = 60;
+    System.setProperty(DnsNameResolver.NETWORKADDRESS_CACHE_TTL_PROPERTY, Long.toString(ttl));
+    final List<InetAddress> answer1 = createAddressList(2);
+    final List<InetAddress> answer2 = createAddressList(1);
+    String name = "foo.googleapis.com";
+    FakeTicker fakeTicker = new FakeTicker();
 
-    List<InetAddress> jdkAnswer = createAddressList(2);
-    jdkDelegate.addAnswer(jdkAnswer);
+    DnsNameResolver resolver =
+        newResolver(name, 81, GrpcUtil.NOOP_PROXY_DETECTOR, Stopwatch.createUnstarted(fakeTicker));
+    AddressResolver mockResolver = mock(AddressResolver.class);
+    when(mockResolver.resolveAddress(anyString())).thenReturn(answer1)
+        .thenReturn(answer2);
+    resolver.setAddressResolver(mockResolver);
 
-    ResolutionResults results = resolver.resolve("abc");
+    resolver.start(mockObserver);
+    assertEquals(1, fakeExecutor.runDueTasks());
+    verify(mockObserver).onResult(resultCaptor.capture());
+    assertAnswerMatches(answer1, 81, resultCaptor.getValue());
+    assertEquals(0, fakeClock.numPendingTasks());
 
-    assertThat(results.addresses).containsExactlyElementsIn(jdkAnswer).inOrder();
-    assertThat(results.txtRecords).isEmpty();
+    fakeTicker.advance(ttl + 1, TimeUnit.SECONDS);
+    resolver.refresh();
+    assertEquals(1, fakeExecutor.runDueTasks());
+    verify(mockObserver, times(2)).onResult(resultCaptor.capture());
+    assertAnswerMatches(answer2, 81, resultCaptor.getValue());
+    assertEquals(0, fakeClock.numPendingTasks());
+
+    resolver.shutdown();
+
+    verify(mockResolver, times(2)).resolveAddress(anyString());
+  }
+
+  @Test
+  public void resolve_invalidTtlPropertyValue() throws Exception {
+    System.setProperty(DnsNameResolver.NETWORKADDRESS_CACHE_TTL_PROPERTY, "not_a_number");
+    resolveDefaultValue();
+  }
+
+  @Test
+  public void resolve_noPropertyValue() throws Exception {
+    System.clearProperty(DnsNameResolver.NETWORKADDRESS_CACHE_TTL_PROPERTY);
+    resolveDefaultValue();
+  }
+
+  private void resolveDefaultValue() throws Exception {
+    final List<InetAddress> answer1 = createAddressList(2);
+    final List<InetAddress> answer2 = createAddressList(1);
+    String name = "foo.googleapis.com";
+    FakeTicker fakeTicker = new FakeTicker();
+
+    DnsNameResolver resolver =
+        newResolver(name, 81, GrpcUtil.NOOP_PROXY_DETECTOR, Stopwatch.createUnstarted(fakeTicker));
+    AddressResolver mockResolver = mock(AddressResolver.class);
+    when(mockResolver.resolveAddress(anyString())).thenReturn(answer1).thenReturn(answer2);
+    resolver.setAddressResolver(mockResolver);
+
+    resolver.start(mockObserver);
+    assertEquals(1, fakeExecutor.runDueTasks());
+    verify(mockObserver).onResult(resultCaptor.capture());
+    assertAnswerMatches(answer1, 81, resultCaptor.getValue());
+    assertEquals(0, fakeClock.numPendingTasks());
+
+    fakeTicker.advance(DnsNameResolver.DEFAULT_NETWORK_CACHE_TTL_SECONDS, TimeUnit.SECONDS);
+    resolver.refresh();
+    assertEquals(0, fakeExecutor.runDueTasks());
+    assertEquals(0, fakeClock.numPendingTasks());
+    verifyNoMoreInteractions(mockObserver);
+
+    fakeTicker.advance(1, TimeUnit.SECONDS);
+    resolver.refresh();
+    assertEquals(1, fakeExecutor.runDueTasks());
+    verify(mockObserver, times(2)).onResult(resultCaptor.capture());
+    assertAnswerMatches(answer2, 81, resultCaptor.getValue());
+    assertEquals(0, fakeClock.numPendingTasks());
+
+    resolver.shutdown();
+
+    verify(mockResolver, times(2)).resolveAddress(anyString());
+  }
+
+  @Test
+  public void resolveAll_nullResourceResolver() throws Exception {
+    final String hostname = "addr.fake";
+    final Inet4Address backendAddr = InetAddresses.fromInteger(0x7f000001);
+
+    AddressResolver mockResolver = mock(AddressResolver.class);
+    when(mockResolver.resolveAddress(anyString()))
+        .thenReturn(Collections.<InetAddress>singletonList(backendAddr));
+    ResourceResolver resourceResolver = null;
+    boolean resovleSrv = true;
+    boolean resolveTxt = true;
+
+    ResolutionResults res = DnsNameResolver.resolveAll(
+        mockResolver, resourceResolver, resovleSrv, resolveTxt, hostname);
+    assertThat(res.addresses).containsExactly(backendAddr);
+    assertThat(res.balancerAddresses).isEmpty();
+    assertThat(res.txtRecords).isEmpty();
+    verify(mockResolver).resolveAddress(hostname);
+  }
+
+  @Test
+  public void resolveAll_nullResourceResolver_addressFailure() throws Exception {
+    final String hostname = "addr.fake";
+
+    AddressResolver mockResolver = mock(AddressResolver.class);
+    when(mockResolver.resolveAddress(anyString()))
+        .thenThrow(new IOException("no addr"));
+    ResourceResolver resourceResolver = null;
+    boolean resovleSrv = true;
+    boolean resolveTxt = true;
+
+    thrown.expect(RuntimeException.class);
+    thrown.expectMessage("no addr");
+
+    DnsNameResolver.resolveAll(mockResolver, resourceResolver, resovleSrv, resolveTxt, hostname);
+  }
+
+  @Test
+  public void resolveAll_presentResourceResolver() throws Exception {
+    final String hostname = "addr.fake";
+    final Inet4Address backendAddr = InetAddresses.fromInteger(0x7f000001);
+    final EquivalentAddressGroup balancerAddr = new EquivalentAddressGroup(new SocketAddress() {});
+
+    AddressResolver mockAddressResolver = mock(AddressResolver.class);
+    when(mockAddressResolver.resolveAddress(anyString()))
+        .thenReturn(Collections.<InetAddress>singletonList(backendAddr));
+    ResourceResolver mockResourceResolver = mock(ResourceResolver.class);
+    when(mockResourceResolver.resolveTxt(anyString()))
+        .thenReturn(Collections.singletonList("service config"));
+    when(mockResourceResolver.resolveSrv(ArgumentMatchers.any(AddressResolver.class), anyString()))
+        .thenReturn(Collections.singletonList(balancerAddr));
+    boolean resovleSrv = true;
+    boolean resolveTxt = true;
+
+    ResolutionResults res = DnsNameResolver.resolveAll(
+        mockAddressResolver, mockResourceResolver, resovleSrv, resolveTxt, hostname);
+    assertThat(res.addresses).containsExactly(backendAddr);
+    assertThat(res.balancerAddresses).containsExactly(balancerAddr);
+    assertThat(res.txtRecords).containsExactly("service config");
+    verify(mockAddressResolver).resolveAddress(hostname);
+    verify(mockResourceResolver).resolveTxt("_grpc_config." + hostname);
+    verify(mockResourceResolver).resolveSrv(mockAddressResolver, "_grpclb._tcp." + hostname);
+  }
+
+  @Test
+  public void resolveAll_onlyBalancers() throws Exception {
+    String hostname = "addr.fake";
+    EquivalentAddressGroup balancerAddr = new EquivalentAddressGroup(new SocketAddress() {});
+
+    AddressResolver mockAddressResolver = mock(AddressResolver.class);
+    when(mockAddressResolver.resolveAddress(anyString()))
+        .thenThrow(new UnknownHostException("I really tried"));
+    ResourceResolver mockResourceResolver = mock(ResourceResolver.class);
+    when(mockResourceResolver.resolveTxt(anyString()))
+        .thenReturn(Collections.<String>emptyList());
+    when(mockResourceResolver.resolveSrv(ArgumentMatchers.any(AddressResolver.class), anyString()))
+        .thenReturn(Collections.singletonList(balancerAddr));
+    boolean resovleSrv = true;
+    boolean resolveTxt = true;
+
+    ResolutionResults res = DnsNameResolver.resolveAll(
+        mockAddressResolver, mockResourceResolver, resovleSrv, resolveTxt, hostname);
+    assertThat(res.addresses).isEmpty();
+    assertThat(res.balancerAddresses).containsExactly(balancerAddr);
+    assertThat(res.txtRecords).isEmpty();
+    verify(mockAddressResolver).resolveAddress(hostname);
+    verify(mockResourceResolver).resolveTxt("_grpc_config." + hostname);
+    verify(mockResourceResolver).resolveSrv(mockAddressResolver, "_grpclb._tcp." + hostname);
+  }
+
+  @Test
+  public void resolveAll_balancerLookupFails() throws Exception {
+    final String hostname = "addr.fake";
+    final Inet4Address backendAddr = InetAddresses.fromInteger(0x7f000001);
+    AddressResolver mockAddressResolver = mock(AddressResolver.class);
+    when(mockAddressResolver.resolveAddress(anyString()))
+        .thenReturn(Collections.<InetAddress>singletonList(backendAddr));
+    ResourceResolver mockResourceResolver = mock(ResourceResolver.class);
+    when(mockResourceResolver.resolveTxt(anyString()))
+        .thenReturn(Collections.singletonList("service config"));
+    when(mockResourceResolver.resolveSrv(ArgumentMatchers.any(AddressResolver.class), anyString()))
+        .thenThrow(new Exception("something like javax.naming.NamingException"));
+    boolean resovleSrv = true;
+    boolean resolveTxt = true;
+
+    ResolutionResults res = DnsNameResolver.resolveAll(
+        mockAddressResolver, mockResourceResolver, resovleSrv, resolveTxt, hostname);
+    assertThat(res.addresses).containsExactly(backendAddr);
+    assertThat(res.balancerAddresses).isEmpty();
+    assertThat(res.txtRecords).containsExactly("service config");
+    verify(mockAddressResolver).resolveAddress(hostname);
+    verify(mockResourceResolver).resolveTxt("_grpc_config." + hostname);
+    verify(mockResourceResolver).resolveSrv(mockAddressResolver, "_grpclb._tcp." + hostname);
+  }
+
+  @Test
+  public void skipMissingJndiResolverResolver() throws Exception {
+    ClassLoader cl = new ClassLoader() {
+      @Override
+      protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+        if ("io.grpc.internal.JndiResourceResolverFactory".equals(name)) {
+          throw new ClassNotFoundException();
+        }
+        return super.loadClass(name, resolve);
+      }
+    };
+
+    ResourceResolverFactory factory = DnsNameResolver.getResourceResolverFactory(cl);
+
+    assertThat(factory).isNull();
   }
 
   @Test
   public void doNotResolveWhenProxyDetected() throws Exception {
     final String name = "foo.googleapis.com";
     final int port = 81;
-    ProxyDetector alwaysDetectProxy = mock(ProxyDetector.class);
-    ProxyParameters proxyParameters = new ProxyParameters(
-        new InetSocketAddress(InetAddress.getByName("10.0.0.1"), 1000),
-        "username",
-        "password");
-    when(alwaysDetectProxy.proxyFor(any(SocketAddress.class)))
-        .thenReturn(proxyParameters);
-    DelegateResolver unusedResolver = mock(DelegateResolver.class);
-    DnsNameResolver resolver = newResolver(name, port, unusedResolver, alwaysDetectProxy);
-    resolver.start(mockListener);
+    final InetSocketAddress proxyAddress =
+        new InetSocketAddress(InetAddress.getByName("10.0.0.1"), 1000);
+    ProxyDetector alwaysDetectProxy = new ProxyDetector() {
+        @Override
+        public HttpConnectProxiedSocketAddress proxyFor(SocketAddress targetAddress) {
+          return HttpConnectProxiedSocketAddress.newBuilder()
+              .setTargetAddress((InetSocketAddress) targetAddress)
+              .setProxyAddress(proxyAddress)
+              .setUsername("username")
+              .setPassword("password").build();
+        }
+      };
+    DnsNameResolver resolver =
+        newResolver(name, port, alwaysDetectProxy, Stopwatch.createUnstarted());
+    AddressResolver mockAddressResolver = mock(AddressResolver.class);
+    when(mockAddressResolver.resolveAddress(anyString())).thenThrow(new AssertionError());
+    resolver.setAddressResolver(mockAddressResolver);
+    resolver.start(mockObserver);
     assertEquals(1, fakeExecutor.runDueTasks());
-    verify(unusedResolver, never()).resolve(any(String.class));
 
-    verify(mockListener).onAddresses(resultCaptor.capture(), any(Attributes.class));
-    List<EquivalentAddressGroup> result = resultCaptor.getValue();
+    verify(mockObserver).onResult(resultCaptor.capture());
+    List<EquivalentAddressGroup> result = resultCaptor.getValue().getAddresses();
     assertThat(result).hasSize(1);
     EquivalentAddressGroup eag = result.get(0);
     assertThat(eag.getAddresses()).hasSize(1);
 
-    PairSocketAddress socketAddress = (PairSocketAddress) eag.getAddresses().get(0);
-    assertSame(proxyParameters, socketAddress.getAttributes().get(ProxyDetector.PROXY_PARAMS_KEY));
-    assertTrue(((InetSocketAddress) socketAddress.getAddress()).isUnresolved());
-  }
-
-  @Test
-  public void unquoteRemovesJndiFormatting() {
-    assertEquals("blah", DnsNameResolver.unquote("blah"));
-    assertEquals("", DnsNameResolver.unquote("\"\""));
-    assertEquals("blahblah", DnsNameResolver.unquote("blah blah"));
-    assertEquals("blahfoo blah", DnsNameResolver.unquote("blah \"foo blah\""));
-    assertEquals("blah blah", DnsNameResolver.unquote("\"blah blah\""));
-    assertEquals("blah\"blah", DnsNameResolver.unquote("\"blah\\\"blah\""));
-    assertEquals("blah\\blah", DnsNameResolver.unquote("\"blah\\\\blah\""));
+    HttpConnectProxiedSocketAddress socketAddress =
+        (HttpConnectProxiedSocketAddress) eag.getAddresses().get(0);
+    assertSame(proxyAddress, socketAddress.getProxyAddress());
+    assertEquals("username", socketAddress.getUsername());
+    assertEquals("password", socketAddress.getPassword());
+    assertTrue(socketAddress.getTargetAddress().isUnresolved());
   }
 
   @Test
   public void maybeChooseServiceConfig_failsOnMisspelling() {
-    Map<String, Object> bad = new LinkedHashMap<String, Object>();
+    Map<String, Object> bad = new LinkedHashMap<>();
     bad.put("parcentage", 1.0);
     thrown.expectMessage("Bad key");
 
@@ -302,8 +659,8 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_clientLanguageMatchesJava() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
-    List<Object> langs = new ArrayList<Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
+    List<String> langs = new ArrayList<>();
     langs.add("java");
     choice.put("clientLanguage", langs);
     choice.put("serviceConfig", serviceConfig);
@@ -313,8 +670,8 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_clientLanguageDoesntMatchGo() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
-    List<Object> langs = new ArrayList<Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
+    List<String> langs = new ArrayList<>();
     langs.add("go");
     choice.put("clientLanguage", langs);
     choice.put("serviceConfig", serviceConfig);
@@ -324,8 +681,8 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_clientLanguageCaseInsensitive() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
-    List<Object> langs = new ArrayList<Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
+    List<String> langs = new ArrayList<>();
     langs.add("JAVA");
     choice.put("clientLanguage", langs);
     choice.put("serviceConfig", serviceConfig);
@@ -335,8 +692,8 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_clientLanguageMatchesEmtpy() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
-    List<Object> langs = new ArrayList<Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
+    List<String> langs = new ArrayList<>();
     choice.put("clientLanguage", langs);
     choice.put("serviceConfig", serviceConfig);
 
@@ -345,8 +702,8 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_clientLanguageMatchesMulti() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
-    List<Object> langs = new ArrayList<Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
+    List<String> langs = new ArrayList<>();
     langs.add("go");
     langs.add("java");
     choice.put("clientLanguage", langs);
@@ -357,7 +714,7 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_percentageZeroAlwaysFails() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
     choice.put("percentage", 0D);
     choice.put("serviceConfig", serviceConfig);
 
@@ -366,7 +723,7 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_percentageHundredAlwaysSucceeds() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
     choice.put("percentage", 100D);
     choice.put("serviceConfig", serviceConfig);
 
@@ -375,7 +732,7 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_percentageAboveMatches50() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
     choice.put("percentage", 50D);
     choice.put("serviceConfig", serviceConfig);
 
@@ -391,7 +748,7 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_percentageAtFails50() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
     choice.put("percentage", 50D);
     choice.put("serviceConfig", serviceConfig);
 
@@ -407,7 +764,7 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_percentageAboveMatches99() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
     choice.put("percentage", 99D);
     choice.put("serviceConfig", serviceConfig);
 
@@ -423,7 +780,7 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_percentageAtFails99() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
     choice.put("percentage", 99D);
     choice.put("serviceConfig", serviceConfig);
 
@@ -439,7 +796,7 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_percentageAboveMatches1() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
     choice.put("percentage", 1D);
     choice.put("serviceConfig", serviceConfig);
 
@@ -455,7 +812,7 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_percentageAtFails1() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
     choice.put("percentage", 1D);
     choice.put("serviceConfig", serviceConfig);
 
@@ -471,8 +828,8 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_hostnameMatches() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
-    List<Object> hosts = new ArrayList<Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
+    List<String> hosts = new ArrayList<>();
     hosts.add("localhost");
     choice.put("clientHostname", hosts);
     choice.put("serviceConfig", serviceConfig);
@@ -482,8 +839,8 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_hostnameDoesntMatch() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
-    List<Object> hosts = new ArrayList<Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
+    List<String> hosts = new ArrayList<>();
     hosts.add("localhorse");
     choice.put("clientHostname", hosts);
     choice.put("serviceConfig", serviceConfig);
@@ -493,8 +850,8 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_clientLanguageCaseSensitive() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
-    List<Object> hosts = new ArrayList<Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
+    List<String> hosts = new ArrayList<>();
     hosts.add("LOCALHOST");
     choice.put("clientHostname", hosts);
     choice.put("serviceConfig", serviceConfig);
@@ -504,8 +861,8 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_hostnameMatchesEmtpy() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
-    List<Object> hosts = new ArrayList<Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
+    List<String> hosts = new ArrayList<>();
     choice.put("clientHostname", hosts);
     choice.put("serviceConfig", serviceConfig);
 
@@ -514,8 +871,8 @@ public class DnsNameResolverTest {
 
   @Test
   public void maybeChooseServiceConfig_hostnameMatchesMulti() {
-    Map<String, Object> choice = new LinkedHashMap<String, Object>();
-    List<Object> hosts = new ArrayList<Object>();
+    Map<String, Object> choice = new LinkedHashMap<>();
+    List<String> hosts = new ArrayList<>();
     hosts.add("localhorse");
     hosts.add("localhost");
     choice.put("clientHostname", hosts);
@@ -524,9 +881,172 @@ public class DnsNameResolverTest {
     assertNotNull(DnsNameResolver.maybeChooseServiceConfig(choice, new Random(), "localhost"));
   }
 
+  @Test
+  public void parseTxtResults_misspelledName() throws Exception {
+    List<String> txtRecords = new ArrayList<>();
+    txtRecords.add("some_record");
+    txtRecords.add("_grpc_config=[]");
+
+    List<? extends Map<String, ?>> results = DnsNameResolver.parseTxtResults(txtRecords);
+
+    assertThat(results).isEmpty();
+  }
+
+  @Test
+  public void parseTxtResults_badTypeFails() throws Exception {
+    List<String> txtRecords = new ArrayList<>();
+    txtRecords.add("some_record");
+    txtRecords.add("grpc_config={}");
+
+    thrown.expect(ClassCastException.class);
+    thrown.expectMessage("wrong type");
+    DnsNameResolver.parseTxtResults(txtRecords);
+  }
+
+  @Test
+  public void parseTxtResults_badInnerTypeFails() throws Exception {
+    List<String> txtRecords = new ArrayList<>();
+    txtRecords.add("some_record");
+    txtRecords.add("grpc_config=[\"bogus\"]");
+
+    thrown.expect(ClassCastException.class);
+    thrown.expectMessage("not object");
+    DnsNameResolver.parseTxtResults(txtRecords);
+  }
+
+  @Test
+  public void parseTxtResults_combineAll() throws Exception {
+    Logger logger = Logger.getLogger(DnsNameResolver.class.getName());
+    Level level = logger.getLevel();
+    logger.setLevel(Level.SEVERE);
+    try {
+      List<String> txtRecords = new ArrayList<>();
+      txtRecords.add("some_record");
+      txtRecords.add("grpc_config=[{}, {}]"); // 2 records
+      txtRecords.add("grpc_config=[{\"\":{}}]"); // 1 record
+
+      List<? extends Map<String, ?>> results = DnsNameResolver.parseTxtResults(txtRecords);
+
+      assertThat(results).hasSize(2 + 1);
+    } finally {
+      logger.setLevel(level);
+    }
+  }
+
+  @Test
+  public void shouldUseJndi_alwaysFalseIfDisabled() {
+    boolean enableJndi = false;
+    boolean enableJndiLocalhost = true;
+    String host = "seemingly.valid.host";
+
+    assertFalse(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, host));
+  }
+
+  @Test
+  public void shouldUseJndi_falseIfDisabledForLocalhost() {
+    boolean enableJndi = true;
+    boolean enableJndiLocalhost = false;
+
+    assertFalse(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, "localhost"));
+    assertFalse(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, "LOCALHOST"));
+  }
+
+  @Test
+  public void shouldUseJndi_trueIfLocalhostOverriden() {
+    boolean enableJndi = true;
+    boolean enableJndiLocalhost = true;
+    String host = "localhost";
+
+    assertTrue(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, host));
+  }
+
+  @Test
+  public void shouldUseJndi_falseForIpv6() {
+    boolean enableJndi = true;
+    boolean enableJndiLocalhost = false;
+
+    assertFalse(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, "::"));
+    assertFalse(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, "::1"));
+    assertFalse(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, "2001:db8:1234::"));
+    assertFalse(DnsNameResolver.shouldUseJndi(
+        enableJndi, enableJndiLocalhost, "[2001:db8:1234::]"));
+    assertFalse(DnsNameResolver.shouldUseJndi(
+        enableJndi, enableJndiLocalhost, "2001:db8:1234::%3"));
+  }
+
+  @Test
+  public void shouldUseJndi_falseForIpv4() {
+    boolean enableJndi = true;
+    boolean enableJndiLocalhost = false;
+
+    assertFalse(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, "127.0.0.1"));
+    assertFalse(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, "192.168.0.1"));
+    assertFalse(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, "134744072"));
+  }
+
+  @Test
+  public void shouldUseJndi_falseForEmpty() {
+    boolean enableJndi = true;
+    boolean enableJndiLocalhost = false;
+
+    assertFalse(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, ""));
+  }
+
+  @Test
+  public void shouldUseJndi_trueIfItMightPossiblyBeValid() {
+    boolean enableJndi = true;
+    boolean enableJndiLocalhost = false;
+
+    assertTrue(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, "remotehost"));
+    assertTrue(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, "remotehost.gov"));
+    assertTrue(DnsNameResolver.shouldUseJndi(enableJndi, enableJndiLocalhost, "f.q.d.n."));
+    assertTrue(DnsNameResolver.shouldUseJndi(
+        enableJndi, enableJndiLocalhost, "8.8.8.8.in-addr.arpa."));
+    assertTrue(DnsNameResolver.shouldUseJndi(
+        enableJndi, enableJndiLocalhost, "2001-db8-1234--as3.ipv6-literal.net"));
+  }
+
+  @Test
+  public void parseServiceConfig_capturesParseError() {
+    ConfigOrError result = DnsNameResolver.parseServiceConfig(
+        Arrays.asList("grpc_config=bogus"), new Random(), "localhost");
+
+    assertThat(result).isNotNull();
+    assertThat(result.getError().getCode()).isEqualTo(Status.Code.UNKNOWN);
+    assertThat(result.getError().getDescription()).contains("failed to parse TXT records");
+  }
+
+  @Test
+  public void parseServiceConfig_capturesChoiceError() {
+    ConfigOrError result = DnsNameResolver.parseServiceConfig(
+        Arrays.asList("grpc_config=[{\"hi\":{}}]"), new Random(), "localhost");
+
+    assertThat(result).isNotNull();
+    assertThat(result.getError().getCode()).isEqualTo(Status.Code.UNKNOWN);
+    assertThat(result.getError().getDescription()).contains("failed to pick");
+  }
+
+  @Test
+  public void parseServiceConfig_noChoiceIsNull() {
+    ConfigOrError result = DnsNameResolver.parseServiceConfig(
+        Arrays.asList("grpc_config=[]"), new Random(), "localhost");
+
+    assertThat(result).isNull();
+  }
+
+  @Test
+  public void parseServiceConfig_matches() {
+    ConfigOrError result = DnsNameResolver.parseServiceConfig(
+        Arrays.asList("grpc_config=[{\"serviceConfig\":{}}]"), new Random(), "localhost");
+
+    assertThat(result).isNotNull();
+    assertThat(result.getError()).isNull();
+    assertThat(result.getConfig()).isEqualTo(ImmutableMap.of());
+  }
+
   private void testInvalidUri(URI uri) {
     try {
-      provider.newNameResolver(uri, NAME_RESOLVER_PARAMS);
+      provider.newNameResolver(uri, helper);
       fail("Should have failed");
     } catch (IllegalArgumentException e) {
       // expected
@@ -534,7 +1054,7 @@ public class DnsNameResolverTest {
   }
 
   private void testValidUri(URI uri, String exportedAuthority, int expectedPort) {
-    DnsNameResolver resolver = provider.newNameResolver(uri, NAME_RESOLVER_PARAMS);
+    DnsNameResolver resolver = provider.newNameResolver(uri, helper);
     assertNotNull(resolver);
     assertEquals(expectedPort, resolver.getPort());
     assertEquals(exportedAuthority, resolver.getServiceAuthority());
@@ -543,7 +1063,7 @@ public class DnsNameResolverTest {
   private byte lastByte = 0;
 
   private List<InetAddress> createAddressList(int n) throws UnknownHostException {
-    List<InetAddress> list = new ArrayList<InetAddress>(n);
+    List<InetAddress> list = new ArrayList<>(n);
     for (int i = 0; i < n; i++) {
       list.add(InetAddress.getByAddress(new byte[] {127, 0, 0, ++lastByte}));
     }
@@ -551,52 +1071,14 @@ public class DnsNameResolverTest {
   }
 
   private static void assertAnswerMatches(
-      List<InetAddress> addrs, int port, List<EquivalentAddressGroup> results) {
-    assertEquals(addrs.size(), results.size());
+      List<InetAddress> addrs, int port, ResolutionResult resolutionResult) {
+    assertEquals(addrs.size(), resolutionResult.getAddresses().size());
     for (int i = 0; i < addrs.size(); i++) {
-      EquivalentAddressGroup addrGroup = results.get(i);
+      EquivalentAddressGroup addrGroup = resolutionResult.getAddresses().get(i);
       InetSocketAddress socketAddr =
           (InetSocketAddress) Iterables.getOnlyElement(addrGroup.getAddresses());
       assertEquals("Addr " + i, port, socketAddr.getPort());
       assertEquals("Addr " + i, addrs.get(i), socketAddr.getAddress());
-    }
-  }
-
-  private static class MockResolver extends DnsNameResolver.DelegateResolver {
-    private final Queue<Object> answers = new LinkedList<Object>();
-    private final Queue<String> invocations = new LinkedList<String>();
-
-    MockResolver addAnswer(List<InetAddress> addresses) {
-      return addAnswer(addresses, null, null);
-    }
-
-    MockResolver addAnswer(
-        List<InetAddress> addresses,
-        List<String> txtRecords,
-        List<EquivalentAddressGroup> balancerAddresses) {
-      answers.add(
-          new ResolutionResults(
-              addresses,
-              MoreObjects.firstNonNull(txtRecords, Collections.<String>emptyList()),
-              MoreObjects.firstNonNull(
-                  balancerAddresses, Collections.<EquivalentAddressGroup>emptyList())));
-      return this;
-    }
-
-    MockResolver addAnswer(UnknownHostException ex) {
-      answers.add(ex);
-      return this;
-    }
-
-    @SuppressWarnings("unchecked") // explosions acceptable.
-    @Override
-    ResolutionResults resolve(String host) throws Exception {
-      invocations.add(host);
-      Object answer = answers.poll();
-      if (answer instanceof UnknownHostException) {
-        throw (UnknownHostException) answer;
-      }
-      return (ResolutionResults) answer;
     }
   }
 }

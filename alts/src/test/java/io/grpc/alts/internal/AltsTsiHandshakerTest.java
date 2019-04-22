@@ -26,15 +26,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.protobuf.ByteString;
-import io.grpc.alts.internal.Handshaker.HandshakerResult;
-import io.grpc.alts.internal.Handshaker.Identity;
-import io.grpc.alts.internal.TransportSecurityCommon.RpcProtocolVersions;
 import java.nio.ByteBuffer;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-import org.mockito.Matchers;
+import org.mockito.ArgumentMatchers;
 
 /** Unit tests for {@link AltsTsiHandshaker}. */
 @RunWith(JUnit4.class)
@@ -101,8 +98,8 @@ public class AltsTsiHandshakerTest {
   @Test
   public void processBytesFromPeerFalseStart() throws Exception {
     verify(mockClient, never()).startClientHandshake();
-    verify(mockClient, never()).startServerHandshake(Matchers.<ByteBuffer>any());
-    verify(mockClient, never()).next(Matchers.<ByteBuffer>any());
+    verify(mockClient, never()).startServerHandshake(ArgumentMatchers.<ByteBuffer>any());
+    verify(mockClient, never()).next(ArgumentMatchers.<ByteBuffer>any());
 
     ByteBuffer transportBuffer = ByteBuffer.allocate(TRANSPORT_BUFFER_SIZE);
     assertTrue(handshakerClient.processBytesFromPeer(transportBuffer));
@@ -113,7 +110,7 @@ public class AltsTsiHandshakerTest {
     ByteBuffer transportBuffer = ByteBuffer.allocate(TRANSPORT_BUFFER_SIZE);
     ByteBuffer outputFrame = ByteBuffer.allocate(OUT_FRAME_SIZE);
     verify(mockServer, never()).startClientHandshake();
-    verify(mockServer, never()).next(Matchers.<ByteBuffer>any());
+    verify(mockServer, never()).next(ArgumentMatchers.<ByteBuffer>any());
     // Mock transport buffer all consumed by processBytesFromPeer and there is an output frame.
     transportBuffer.position(transportBuffer.limit());
     when(mockServer.startServerHandshake(transportBuffer)).thenReturn(outputFrame);
@@ -127,7 +124,7 @@ public class AltsTsiHandshakerTest {
     ByteBuffer transportBuffer = ByteBuffer.allocate(TRANSPORT_BUFFER_SIZE);
     ByteBuffer emptyOutputFrame = ByteBuffer.allocate(0);
     verify(mockServer, never()).startClientHandshake();
-    verify(mockServer, never()).next(Matchers.<ByteBuffer>any());
+    verify(mockServer, never()).next(ArgumentMatchers.<ByteBuffer>any());
     // Mock transport buffer all consumed by processBytesFromPeer and output frame is empty.
     // Expect processBytesFromPeer return False, because more data are needed from the peer.
     transportBuffer.position(transportBuffer.limit());
@@ -142,7 +139,7 @@ public class AltsTsiHandshakerTest {
     ByteBuffer transportBuffer = ByteBuffer.allocate(TRANSPORT_BUFFER_SIZE);
     ByteBuffer outputFrame = ByteBuffer.allocate(OUT_FRAME_SIZE);
     verify(mockServer, never()).startClientHandshake();
-    verify(mockServer, never()).next(Matchers.<ByteBuffer>any());
+    verify(mockServer, never()).next(ArgumentMatchers.<ByteBuffer>any());
     // Mock handshake complete after processBytesFromPeer.
     when(mockServer.startServerHandshake(transportBuffer)).thenReturn(outputFrame);
     when(mockServer.isFinished()).thenReturn(true);
@@ -155,7 +152,7 @@ public class AltsTsiHandshakerTest {
     ByteBuffer transportBuffer = ByteBuffer.allocate(TRANSPORT_BUFFER_SIZE);
     ByteBuffer emptyOutputFrame = ByteBuffer.allocate(0);
     verify(mockServer, never()).startClientHandshake();
-    verify(mockServer, never()).next(Matchers.<ByteBuffer>any());
+    verify(mockServer, never()).next(ArgumentMatchers.<ByteBuffer>any());
     when(mockServer.startServerHandshake(transportBuffer)).thenReturn(emptyOutputFrame);
     when(mockServer.isFinished()).thenReturn(false);
 
@@ -171,7 +168,7 @@ public class AltsTsiHandshakerTest {
   public void processBytesFromPeerClientNext() throws Exception {
     ByteBuffer transportBuffer = ByteBuffer.allocate(TRANSPORT_BUFFER_SIZE);
     ByteBuffer outputFrame = ByteBuffer.allocate(OUT_FRAME_SIZE);
-    verify(mockClient, never()).startServerHandshake(Matchers.<ByteBuffer>any());
+    verify(mockClient, never()).startServerHandshake(ArgumentMatchers.<ByteBuffer>any());
     when(mockClient.startClientHandshake()).thenReturn(outputFrame);
     when(mockClient.next(transportBuffer)).thenReturn(outputFrame);
     when(mockClient.isFinished()).thenReturn(false);
@@ -185,7 +182,7 @@ public class AltsTsiHandshakerTest {
   public void processBytesFromPeerClientNextFinished() throws Exception {
     ByteBuffer transportBuffer = ByteBuffer.allocate(TRANSPORT_BUFFER_SIZE);
     ByteBuffer outputFrame = ByteBuffer.allocate(OUT_FRAME_SIZE);
-    verify(mockClient, never()).startServerHandshake(Matchers.<ByteBuffer>any());
+    verify(mockClient, never()).startServerHandshake(ArgumentMatchers.<ByteBuffer>any());
     when(mockClient.startClientHandshake()).thenReturn(outputFrame);
     when(mockClient.next(transportBuffer)).thenReturn(outputFrame);
     when(mockClient.isFinished()).thenReturn(true);
@@ -246,7 +243,8 @@ public class AltsTsiHandshakerTest {
   public void extractServerPeerSuccess() throws Exception {
     ByteBuffer outputFrame = ByteBuffer.allocate(OUT_FRAME_SIZE);
     ByteBuffer transportBuffer = ByteBuffer.allocate(TRANSPORT_BUFFER_SIZE);
-    when(mockServer.startServerHandshake(Matchers.<ByteBuffer>any())).thenReturn(outputFrame);
+    when(mockServer.startServerHandshake(ArgumentMatchers.<ByteBuffer>any()))
+        .thenReturn(outputFrame);
     when(mockServer.isFinished()).thenReturn(true);
     when(mockServer.getResult()).thenReturn(getHandshakerResult(/* isClient = */ false));
 

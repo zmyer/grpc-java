@@ -30,17 +30,27 @@ import com.google.common.base.Supplier;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import com.google.errorprone.annotations.ForOverride;
+import io.grpc.Attributes;
 import io.grpc.CallOptions;
+import io.grpc.ChannelLogger;
+import io.grpc.ChannelLogger.ChannelLogLevel;
 import io.grpc.ConnectivityState;
 import io.grpc.ConnectivityStateInfo;
 import io.grpc.EquivalentAddressGroup;
+import io.grpc.HttpConnectProxiedSocketAddress;
+import io.grpc.InternalChannelz;
+import io.grpc.InternalChannelz.ChannelStats;
+import io.grpc.InternalInstrumented;
+import io.grpc.InternalLogId;
+import io.grpc.InternalWithLogId;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
-import io.grpc.internal.Channelz.ChannelStats;
+import io.grpc.SynchronizationContext;
 import java.net.SocketAddress;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -55,18 +65,20 @@ import javax.annotation.concurrent.ThreadSafe;
  * Transports for a single {@link SocketAddress}.
  */
 @ThreadSafe
-final class InternalSubchannel implements Instrumented<ChannelStats> {
+final class InternalSubchannel implements InternalInstrumented<ChannelStats> {
   private static final Logger log = Logger.getLogger(InternalSubchannel.class.getName());
 
-  private final LogId logId = LogId.allocate(getClass().getName());
+  private final InternalLogId logId;
   private final String authority;
   private final String userAgent;
   private final BackoffPolicy.Provider backoffPolicyProvider;
   private final Callback callback;
   private final ClientTransportFactory transportFactory;
   private final ScheduledExecutorService scheduledExecutor;
-  private final Channelz channelz;
+  private final InternalChannelz channelz;
   private final CallTracer callsTracer;
+  private final ChannelTracer channelTracer;
+  private final ChannelLoggerImpl channelLogger;
 
   // File-specific convention: methods without GuardedBy("lock") MUST NOT be called under the lock.
   private final Object lock = new Object();
@@ -79,17 +91,14 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
   // 2. drain() MUST NOT be called under "lock".
   //
   // 3. Every synchronized("lock") must be inside a try-finally which calls drain() in "finally".
-  private final ChannelExecutor channelExecutor;
-
-  @GuardedBy("lock")
-  private EquivalentAddressGroup addressGroup;
+  private final SynchronizationContext syncContext;
 
   /**
-   * The index of the address corresponding to pendingTransport/activeTransport, or 0 if both are
-   * null.
+   * The index of the address corresponding to pendingTransport/activeTransport, or at beginning if
+   * both are null.
    */
   @GuardedBy("lock")
-  private int addressIndex;
+  private Index addressIndex;
 
   /**
    * The policy to control back off between reconnects. Non-{@code null} when a reconnect task is
@@ -117,19 +126,18 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
    * also be present.
    */
   @GuardedBy("lock")
-  private final Collection<ConnectionClientTransport> transports =
-      new ArrayList<ConnectionClientTransport>();
+  private final Collection<ConnectionClientTransport> transports = new ArrayList<>();
 
-  // Must only be used from channelExecutor
+  // Must only be used from syncContext
   private final InUseStateAggregator<ConnectionClientTransport> inUseStateAggregator =
       new InUseStateAggregator<ConnectionClientTransport>() {
         @Override
-        void handleInUse() {
+        protected void handleInUse() {
           callback.onInUse(InternalSubchannel.this);
         }
 
         @Override
-        void handleNotInUse() {
+        protected void handleNotInUse() {
           callback.onNotInUse(InternalSubchannel.this);
         }
       };
@@ -154,22 +162,34 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
   @GuardedBy("lock")
   private Status shutdownReason;
 
-  InternalSubchannel(EquivalentAddressGroup addressGroup, String authority, String userAgent,
+  InternalSubchannel(List<EquivalentAddressGroup> addressGroups, String authority, String userAgent,
       BackoffPolicy.Provider backoffPolicyProvider,
       ClientTransportFactory transportFactory, ScheduledExecutorService scheduledExecutor,
-      Supplier<Stopwatch> stopwatchSupplier, ChannelExecutor channelExecutor, Callback callback,
-      Channelz channelz, CallTracer callsTracer) {
-    this.addressGroup = Preconditions.checkNotNull(addressGroup, "addressGroup");
+      Supplier<Stopwatch> stopwatchSupplier, SynchronizationContext syncContext, Callback callback,
+      InternalChannelz channelz, CallTracer callsTracer, ChannelTracer channelTracer,
+      InternalLogId logId, TimeProvider timeProvider) {
+    Preconditions.checkNotNull(addressGroups, "addressGroups");
+    Preconditions.checkArgument(!addressGroups.isEmpty(), "addressGroups is empty");
+    checkListHasNoNulls(addressGroups, "addressGroups contains null entry");
+    this.addressIndex = new Index(
+        Collections.unmodifiableList(new ArrayList<>(addressGroups)));
     this.authority = authority;
     this.userAgent = userAgent;
     this.backoffPolicyProvider = backoffPolicyProvider;
     this.transportFactory = transportFactory;
     this.scheduledExecutor = scheduledExecutor;
     this.connectingTimer = stopwatchSupplier.get();
-    this.channelExecutor = channelExecutor;
+    this.syncContext = syncContext;
     this.callback = callback;
     this.channelz = channelz;
     this.callsTracer = callsTracer;
+    this.channelTracer = Preconditions.checkNotNull(channelTracer, "channelTracer");
+    this.logId = InternalLogId.allocate("Subchannel", authority);
+    this.channelLogger = new ChannelLoggerImpl(channelTracer, timeProvider);
+  }
+
+  ChannelLogger getChannelLogger() {
+    return channelLogger;
   }
 
   /**
@@ -191,47 +211,68 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
           return savedTransport;
         }
         if (state.getState() == IDLE) {
+          channelLogger.log(ChannelLogLevel.INFO, "CONNECTING as requested");
           gotoNonErrorState(CONNECTING);
           startNewTransport();
         }
       }
     } finally {
-      channelExecutor.drain();
+      syncContext.drain();
     }
     return null;
+  }
+
+  /**
+   * Returns a READY transport if there is any, without trying to connect.
+   */
+  @Nullable
+  ClientTransport getTransport() {
+    return activeTransport;
+  }
+
+  /**
+   * Returns the authority string associated with this Subchannel.
+   */
+  String getAuthority() {
+    return authority;
   }
 
   @GuardedBy("lock")
   private void startNewTransport() {
     Preconditions.checkState(reconnectTask == null, "Should have no reconnectTask scheduled");
 
-    if (addressIndex == 0) {
+    if (addressIndex.isAtBeginning()) {
       connectingTimer.reset().start();
     }
-    List<SocketAddress> addrs = addressGroup.getAddresses();
-    SocketAddress address = addrs.get(addressIndex);
+    SocketAddress address = addressIndex.getCurrentAddress();
 
-    ProxyParameters proxy = null;
-    if (address instanceof PairSocketAddress) {
-      proxy = ((PairSocketAddress) address).getAttributes().get(ProxyDetector.PROXY_PARAMS_KEY);
-      address = ((PairSocketAddress) address).getAddress();
+    HttpConnectProxiedSocketAddress proxiedAddr = null;
+    if (address instanceof HttpConnectProxiedSocketAddress) {
+      proxiedAddr = (HttpConnectProxiedSocketAddress) address;
+      address = proxiedAddr.getTargetAddress();
     }
 
+    ClientTransportFactory.ClientTransportOptions options =
+        new ClientTransportFactory.ClientTransportOptions()
+          .setAuthority(authority)
+          .setEagAttributes(addressIndex.getCurrentEagAttributes())
+          .setUserAgent(userAgent)
+          .setHttpConnectProxiedSocketAddress(proxiedAddr);
+    TransportLogger transportLogger = new TransportLogger();
+    // In case the transport logs in the constructor, use the subchannel logId
+    transportLogger.logId = getLogId();
     ConnectionClientTransport transport =
         new CallTracingTransport(
-            transportFactory.newClientTransport(address, authority, userAgent, proxy),
-            callsTracer);
+            transportFactory.newClientTransport(address, options, transportLogger), callsTracer);
+    transportLogger.logId = transport.getLogId();
     channelz.addClientSocket(transport);
-    if (log.isLoggable(Level.FINE)) {
-      log.log(Level.FINE, "[{0}] Created {1} for {2}",
-          new Object[] {logId, transport.getLogId(), address});
-    }
     pendingTransport = transport;
     transports.add(transport);
     Runnable runnable = transport.start(new TransportListener(transport, address));
     if (runnable != null) {
-      channelExecutor.executeLater(runnable);
+      syncContext.executeLater(runnable);
     }
+    channelLogger.log(ChannelLogLevel.INFO, "Started transport {0}", transportLogger.logId);
   }
 
   /**
@@ -252,13 +293,16 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
               // started when it's being canceled.
               return;
             }
+            channelLogger.log(ChannelLogLevel.INFO, "CONNECTING after backoff");
             gotoNonErrorState(CONNECTING);
             startNewTransport();
           }
         } catch (Throwable t) {
+          // TODO(zhangkun): we may consider using SynchronizationContext to schedule the reconnect
+          // timer, so that we don't need this catch, since SynchronizationContext would catch it.
           log.log(Level.WARNING, "Exception handling end of backoff", t);
         } finally {
-          channelExecutor.drain();
+          syncContext.drain();
         }
       }
     }
@@ -269,9 +313,10 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
     }
     long delayNanos =
         reconnectPolicy.nextBackoffNanos() - connectingTimer.elapsed(TimeUnit.NANOSECONDS);
-    if (log.isLoggable(Level.FINE)) {
-      log.log(Level.FINE, "[{0}] Scheduling backoff for {1} ns", new Object[]{logId, delayNanos});
-    }
+    channelLogger.log(
+        ChannelLogLevel.INFO,
+        "TRANSIENT_FAILURE ({0}). Will reconnect after {1} ns",
+        printShortStatus(status), delayNanos);
     Preconditions.checkState(reconnectTask == null, "previous reconnectTask is not done");
     reconnectCanceled = false;
     reconnectTask = scheduledExecutor.schedule(
@@ -291,11 +336,12 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
           return;
         }
         cancelReconnectTask();
+        channelLogger.log(ChannelLogLevel.INFO, "CONNECTING; backoff interrupted");
         gotoNonErrorState(CONNECTING);
         startNewTransport();
       }
     } finally {
-      channelExecutor.drain();
+      syncContext.drain();
     }
   }
 
@@ -310,7 +356,7 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
       Preconditions.checkState(state.getState() != SHUTDOWN,
           "Cannot transition out of SHUTDOWN to " + newState);
       state = newState;
-      channelExecutor.executeLater(new Runnable() {
+      syncContext.executeLater(new Runnable() {
           @Override
           public void run() {
             callback.onStateChange(InternalSubchannel.this, newState);
@@ -320,35 +366,36 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
   }
 
   /** Replaces the existing addresses, avoiding unnecessary reconnects. */
-  public void updateAddresses(EquivalentAddressGroup newAddressGroup) {
+  public void updateAddresses(List<EquivalentAddressGroup> newAddressGroups) {
+    Preconditions.checkNotNull(newAddressGroups, "newAddressGroups");
+    checkListHasNoNulls(newAddressGroups, "newAddressGroups contains null entry");
+    Preconditions.checkArgument(!newAddressGroups.isEmpty(), "newAddressGroups is empty");
+    newAddressGroups =
+        Collections.unmodifiableList(new ArrayList<>(newAddressGroups));
     ManagedClientTransport savedTransport = null;
     try {
       synchronized (lock) {
-        EquivalentAddressGroup oldAddressGroup = addressGroup;
-        addressGroup = newAddressGroup;
+        SocketAddress previousAddress = addressIndex.getCurrentAddress();
+        addressIndex.updateGroups(newAddressGroups);
         if (state.getState() == READY || state.getState() == CONNECTING) {
-          SocketAddress address = oldAddressGroup.getAddresses().get(addressIndex);
-          int newIndex = newAddressGroup.getAddresses().indexOf(address);
-          if (newIndex != -1) {
-            addressIndex = newIndex;
-          } else {
+          if (!addressIndex.seekTo(previousAddress)) {
             // Forced to drop the connection
             if (state.getState() == READY) {
               savedTransport = activeTransport;
               activeTransport = null;
-              addressIndex = 0;
+              addressIndex.reset();
               gotoNonErrorState(IDLE);
             } else {
               savedTransport = pendingTransport;
               pendingTransport = null;
-              addressIndex = 0;
+              addressIndex.reset();
               startNewTransport();
             }
           }
         }
       }
     } finally {
-      channelExecutor.drain();
+      syncContext.drain();
     }
     if (savedTransport != null) {
       savedTransport.shutdown(
@@ -371,17 +418,14 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
         savedPendingTransport = pendingTransport;
         activeTransport = null;
         pendingTransport = null;
-        addressIndex = 0;
+        addressIndex.reset();
         if (transports.isEmpty()) {
           handleTermination();
-          if (log.isLoggable(Level.FINE)) {
-            log.log(Level.FINE, "[{0}] Terminated in shutdown()", logId);
-          }
         }  // else: the callback will be run once all transports have been terminated
         cancelReconnectTask();
       }
     } finally {
-      channelExecutor.drain();
+      syncContext.drain();
     }
     if (savedActiveTransport != null) {
       savedActiveTransport.shutdown(reason);
@@ -393,21 +437,22 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
 
   @Override
   public String toString() {
-    // addressGroupCopy being a little stale is fine, just avoid calling toString with the lock
+    // addressGroupsCopy being a little stale is fine, just avoid calling toString with the lock
     // since there may be many addresses.
-    Object addressGroupCopy;
+    Object addressGroupsCopy;
     synchronized (lock) {
-      addressGroupCopy = addressGroup;
+      addressGroupsCopy = addressIndex.getGroups();
     }
     return MoreObjects.toStringHelper(this)
           .add("logId", logId.getId())
-          .add("addressGroup", addressGroupCopy)
+          .add("addressGroups", addressGroupsCopy)
           .toString();
   }
 
   @GuardedBy("lock")
   private void handleTermination() {
-    channelExecutor.executeLater(new Runnable() {
+    channelLogger.log(ChannelLogLevel.INFO, "Terminated");
+    syncContext.executeLater(new Runnable() {
         @Override
         public void run() {
           callback.onTerminated(InternalSubchannel.this);
@@ -417,12 +462,12 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
 
   private void handleTransportInUseState(
       final ConnectionClientTransport transport, final boolean inUse) {
-    channelExecutor.executeLater(new Runnable() {
+    syncContext.execute(new Runnable() {
         @Override
         public void run() {
           inUseStateAggregator.updateObjectInUse(transport, inUse);
         }
-      }).drain();
+      });
   }
 
   void shutdownNow(Status reason) {
@@ -433,20 +478,20 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
         transportsCopy = new ArrayList<ManagedClientTransport>(transports);
       }
     } finally {
-      channelExecutor.drain();
+      syncContext.drain();
     }
     for (ManagedClientTransport transport : transportsCopy) {
       transport.shutdownNow(reason);
     }
   }
 
-  EquivalentAddressGroup getAddressGroup() {
+  List<EquivalentAddressGroup> getAddressGroups() {
     try {
       synchronized (lock) {
-        return addressGroup;
+        return addressIndex.getGroups();
       }
     } finally {
-      channelExecutor.drain();
+      syncContext.drain();
     }
   }
 
@@ -461,20 +506,26 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
   }
 
   @Override
-  public LogId getLogId() {
+  public InternalLogId getLogId() {
     return logId;
   }
-
 
   @Override
   public ListenableFuture<ChannelStats> getStats() {
     SettableFuture<ChannelStats> ret = SettableFuture.create();
     ChannelStats.Builder builder = new ChannelStats.Builder();
+
+    List<EquivalentAddressGroup> addressGroupsSnapshot;
+    List<InternalWithLogId> transportsSnapshot;
     synchronized (lock) {
-      builder.setTarget(addressGroup.toString()).setState(getState());
-      builder.setSockets(new ArrayList<WithLogId>(transports));
+      addressGroupsSnapshot = addressIndex.getGroups();
+      transportsSnapshot = new ArrayList<InternalWithLogId>(transports);
     }
+
+    builder.setTarget(addressGroupsSnapshot.toString()).setState(getState());
+    builder.setSockets(transportsSnapshot);
     callsTracer.updateBuilder(builder);
+    channelTracer.updateBuilder(builder);
     ret.set(builder.build());
     return ret;
   }
@@ -486,7 +537,13 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
         return state.getState();
       }
     } finally {
-      channelExecutor.drain();
+      syncContext.drain();
+    }
+  }
+
+  private static void checkListHasNoNulls(List<?> list, String msg) {
+    for (Object item : list) {
+      Preconditions.checkNotNull(item, msg);
     }
   }
 
@@ -502,10 +559,7 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
 
     @Override
     public void transportReady() {
-      if (log.isLoggable(Level.FINE)) {
-        log.log(Level.FINE, "[{0}] {1} for {2} is ready",
-            new Object[] {logId, transport.getLogId(), address});
-      }
+      channelLogger.log(ChannelLogLevel.INFO, "READY");
       Status savedShutdownReason;
       try {
         synchronized (lock) {
@@ -522,7 +576,7 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
           }
         }
       } finally {
-        channelExecutor.drain();
+        syncContext.drain();
       }
       if (savedShutdownReason != null) {
         transport.shutdown(savedShutdownReason);
@@ -536,10 +590,8 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
 
     @Override
     public void transportShutdown(Status s) {
-      if (log.isLoggable(Level.FINE)) {
-        log.log(Level.FINE, "[{0}] {1} for {2} is being shutdown with status {3}",
-            new Object[] {logId, transport.getLogId(), address, s});
-      }
+      channelLogger.log(
+          ChannelLogLevel.INFO, "{0} SHUTDOWN with {1}", transport.getLogId(), printShortStatus(s));
       try {
         synchronized (lock) {
           if (state.getState() == SHUTDOWN) {
@@ -548,15 +600,15 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
           if (activeTransport == transport) {
             gotoNonErrorState(IDLE);
             activeTransport = null;
-            addressIndex = 0;
+            addressIndex.reset();
           } else if (pendingTransport == transport) {
             Preconditions.checkState(state.getState() == CONNECTING,
                 "Expected state is CONNECTING, actual state is %s", state.getState());
-            addressIndex++;
+            addressIndex.increment();
             // Continue reconnect if there are still addresses to try.
-            if (addressIndex >= addressGroup.getAddresses().size()) {
+            if (!addressIndex.isValid()) {
               pendingTransport = null;
-              addressIndex = 0;
+              addressIndex.reset();
               // Initiate backoff
               // Transition to TRANSIENT_FAILURE
               scheduleBackoff(s);
@@ -566,30 +618,24 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
           }
         }
       } finally {
-        channelExecutor.drain();
+        syncContext.drain();
       }
     }
 
     @Override
     public void transportTerminated() {
-      if (log.isLoggable(Level.FINE)) {
-        log.log(Level.FINE, "[{0}] {1} for {2} is terminated",
-            new Object[] {logId, transport.getLogId(), address});
-      }
+      channelLogger.log(ChannelLogLevel.INFO, "{0} Terminated", transport.getLogId());
       channelz.removeClientSocket(transport);
       handleTransportInUseState(transport, false);
       try {
         synchronized (lock) {
           transports.remove(transport);
           if (state.getState() == SHUTDOWN && transports.isEmpty()) {
-            if (log.isLoggable(Level.FINE)) {
-              log.log(Level.FINE, "[{0}] Terminated in transportTerminated()", logId);
-            }
             handleTermination();
           }
         }
       } finally {
-        channelExecutor.drain();
+        syncContext.drain();
       }
       Preconditions.checkState(activeTransport != transport,
           "activeTransport still points to this transport. "
@@ -597,7 +643,7 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
     }
   }
 
-  // All methods are called in channelExecutor, which is a serializing executor.
+  // All methods are called in syncContext
   abstract static class Callback {
     /**
      * Called when the subchannel is terminated, which means it's shut down and all transports
@@ -676,6 +722,99 @@ final class InternalSubchannel implements Instrumented<ChannelStats> {
           });
         }
       };
+    }
+  }
+
+  /** Index as in 'i', the pointer to an entry. Not a "search index." */
+  @VisibleForTesting
+  static final class Index {
+    private List<EquivalentAddressGroup> addressGroups;
+    private int groupIndex;
+    private int addressIndex;
+
+    public Index(List<EquivalentAddressGroup> groups) {
+      this.addressGroups = groups;
+    }
+
+    public boolean isValid() {
+      // addressIndex will never be invalid
+      return groupIndex < addressGroups.size();
+    }
+
+    public boolean isAtBeginning() {
+      return groupIndex == 0 && addressIndex == 0;
+    }
+
+    public void increment() {
+      EquivalentAddressGroup group = addressGroups.get(groupIndex);
+      addressIndex++;
+      if (addressIndex >= group.getAddresses().size()) {
+        groupIndex++;
+        addressIndex = 0;
+      }
+    }
+
+    public void reset() {
+      groupIndex = 0;
+      addressIndex = 0;
+    }
+
+    public SocketAddress getCurrentAddress() {
+      return addressGroups.get(groupIndex).getAddresses().get(addressIndex);
+    }
+
+    public Attributes getCurrentEagAttributes() {
+      return addressGroups.get(groupIndex).getAttributes();
+    }
+
+    public List<EquivalentAddressGroup> getGroups() {
+      return addressGroups;
+    }
+
+    /** Update to new groups, resetting the current index. */
+    public void updateGroups(List<EquivalentAddressGroup> newGroups) {
+      addressGroups = newGroups;
+      reset();
+    }
+
+    /** Returns false if the needle was not found and the current index was left unchanged. */
+    public boolean seekTo(SocketAddress needle) {
+      for (int i = 0; i < addressGroups.size(); i++) {
+        EquivalentAddressGroup group = addressGroups.get(i);
+        int j = group.getAddresses().indexOf(needle);
+        if (j == -1) {
+          continue;
+        }
+        this.groupIndex = i;
+        this.addressIndex = j;
+        return true;
+      }
+      return false;
+    }
+  }
+
+  private String printShortStatus(Status status) {
+    StringBuilder buffer = new StringBuilder();
+    buffer.append(status.getCode());
+    if (status.getDescription() != null) {
+      buffer.append("(").append(status.getDescription()).append(")");
+    }
+    return buffer.toString();
+  }
+
+  @VisibleForTesting
+  static final class TransportLogger extends ChannelLogger {
+    // Changed just after construction to break a cyclic dependency.
+    InternalLogId logId;
+
+    @Override
+    public void log(ChannelLogLevel level, String message) {
+      ChannelLoggerImpl.logOnly(logId, level, message);
+    }
+
+    @Override
+    public void log(ChannelLogLevel level, String messageFormat, Object... args) {
+      ChannelLoggerImpl.logOnly(logId, level, messageFormat, args);
     }
   }
 }

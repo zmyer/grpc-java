@@ -9,10 +9,13 @@ You may want to read through the
 [Quick Start Guide](https://grpc.io/docs/quickstart/java.html)
 before trying out the examples.
 
-To build the examples, run in this directory:
+To build the examples,
 
+1. **[Install gRPC Java library SNAPSHOT locally, including code generation plugin](../../COMPILING.md) (Only need this step for non-released versions, e.g. master HEAD).**
+
+2. Run in this directory:
 ```
-$ ./gradlew installDist
+$ ../gradlew installDist
 ```
 
 This creates the scripts `hello-world-server`, `hello-world-client`,
@@ -55,5 +58,5 @@ with a mock/fake service implementation.
 For testing a gRPC server, create the server as an InProcessServer,
 and test it against a real client stub with an InProcessChannel.
 
-The gRPC-java library also provides a JUnit rule, GrpcServerRule.java, to do the starting
-up and shutting down boilerplate for you.
+The gRPC-java library also provides a JUnit rule, GrpcCleanupRule.java, to do the graceful shutdown
+boilerplate for you.

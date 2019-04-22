@@ -11,21 +11,21 @@ BASE_DIR="$(pwd)"
 cd "$BASE_DIR/github/grpc-java"
 
 export GRADLE_OPTS=-Xmx512m
-export PROTOBUF_VERSION=3.5.1
 export LDFLAGS=-L/tmp/protobuf/lib
 export CXXFLAGS=-I/tmp/protobuf/include
 export LD_LIBRARY_PATH=/tmp/protobuf/lib
 export OS_NAME=$(uname)
 
+echo y | ${ANDROID_HOME}/tools/bin/sdkmanager "build-tools;28.0.3"
+
 # Proto deps
 buildscripts/make_dependencies.sh
 
-./gradlew install
+./gradlew publishToMavenLocal
 
 # Build grpc-cronet
 
 pushd cronet
-./cronet_deps.sh
 ../gradlew build
 popd
 
@@ -35,17 +35,22 @@ pushd android
 ../gradlew build
 popd
 
+# Build android-interop-testing
+pushd android-interop-testing
+../gradlew build
+popd
+
 # Build examples
 
 cd ./examples/android/clientcache
-./gradlew build
+../../gradlew build
 cd ../routeguide
-./gradlew build
+../../gradlew build
 cd ../helloworld
-./gradlew build
+../../gradlew build
 
-cd $BASE_DIR/github/grpc-java/examples/example-kotlin/android/helloworld/
-./gradlew build
+cd "$BASE_DIR/github/grpc-java/examples/example-kotlin/android/helloworld/"
+../../../gradlew build
 
 # Skip APK size and dex count comparisons for non-PR builds
 
@@ -53,7 +58,6 @@ if [[ -z "${KOKORO_GITHUB_PULL_REQUEST_COMMIT:-}" ]]; then
     echo "Skipping APK size and dex count"
     exit 0
 fi
-
 
 # Save a copy of set_github_status.py (it may differ from the base commit)
 
@@ -63,23 +67,28 @@ cp "$BASE_DIR/github/grpc-java/buildscripts/set_github_status.py" "$SET_GITHUB_S
 
 # Collect APK size and dex count stats for the helloworld example
 
+HELLO_WORLD_OUTPUT_DIR="$BASE_DIR/github/grpc-java/examples/android/helloworld/app/build/outputs"
+
 read -r ignored new_dex_count < \
-  <("${ANDROID_HOME}/tools/bin/apkanalyzer" dex references app/build/outputs/apk/release/app-release-unsigned.apk)
+  <("${ANDROID_HOME}/tools/bin/apkanalyzer" dex references \
+  "$HELLO_WORLD_OUTPUT_DIR/apk/release/app-release-unsigned.apk")
 
 set +x
-all_new_methods=`"${ANDROID_HOME}/tools/bin/apkanalyzer" dex packages --proguard-mapping app/build/outputs/mapping/release/mapping.txt app/build/outputs/apk/release/app-release-unsigned.apk | grep ^M | cut -f4 | sort`
+all_new_methods=`"${ANDROID_HOME}/tools/bin/apkanalyzer" dex packages \
+  --proguard-mapping "$HELLO_WORLD_OUTPUT_DIR/mapping/release/mapping.txt" \
+  "$HELLO_WORLD_OUTPUT_DIR/apk/release/app-release-unsigned.apk" | grep ^M | cut -f4 | sort`
 set -x
 
-new_apk_size="$(stat --printf=%s app/build/outputs/apk/release/app-release-unsigned.apk)"
+new_apk_size="$(stat --printf=%s $HELLO_WORLD_OUTPUT_DIR/apk/release/app-release-unsigned.apk)"
 
 
 # Get the APK size and dex count stats using the pull request base commit
 
 cd $BASE_DIR/github/grpc-java
 git checkout HEAD^
-./gradlew install
+./gradlew publishToMavenLocal
 cd examples/android/helloworld/
-./gradlew build
+../../gradlew build
 
 read -r ignored old_dex_count < \
   <("${ANDROID_HOME}/tools/bin/apkanalyzer" dex references app/build/outputs/apk/release/app-release-unsigned.apk)

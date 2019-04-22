@@ -17,18 +17,15 @@
 package io.grpc.netty;
 
 import io.grpc.ServerStreamTracer;
+import io.grpc.internal.AbstractTransportTest;
 import io.grpc.internal.ClientTransportFactory;
 import io.grpc.internal.FakeClock;
 import io.grpc.internal.InternalServer;
 import io.grpc.internal.ManagedClientTransport;
-import io.grpc.internal.TransportTracer;
-import io.grpc.internal.testing.AbstractTransportTest;
 import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.junit.After;
-import org.junit.Ignore;
-import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
@@ -36,13 +33,6 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class NettyTransportTest extends AbstractTransportTest {
   private final FakeClock fakeClock = new FakeClock();
-  private final TransportTracer.Factory fakeClockTransportTracer = new TransportTracer.Factory(
-      new TransportTracer.TimeProvider() {
-        @Override
-        public long currentTimeMillis() {
-          return fakeClock.currentTimeMillis();
-        }
-      });
   // Avoid LocalChannel for testing because LocalChannel can fail with
   // io.netty.channel.ChannelException instead of java.net.ConnectException which breaks
   // serverNotListening test.
@@ -65,28 +55,28 @@ public class NettyTransportTest extends AbstractTransportTest {
   }
 
   @Override
-  protected InternalServer newServer(List<ServerStreamTracer.Factory> streamTracerFactories) {
+  protected List<? extends InternalServer> newServer(
+      List<ServerStreamTracer.Factory> streamTracerFactories) {
     return NettyServerBuilder
-        .forPort(0)
+        .forAddress(new InetSocketAddress("localhost", 0))
         .flowControlWindow(65 * 1024)
         .setTransportTracerFactory(fakeClockTransportTracer)
-        .buildTransportServer(streamTracerFactories);
+        .buildTransportServers(streamTracerFactories);
   }
 
   @Override
-  protected InternalServer newServer(
-      InternalServer server, List<ServerStreamTracer.Factory> streamTracerFactories) {
-    int port = server.getPort();
+  protected List<? extends InternalServer> newServer(
+      int port, List<ServerStreamTracer.Factory> streamTracerFactories) {
     return NettyServerBuilder
-        .forPort(port)
+        .forAddress(new InetSocketAddress("localhost", port))
         .flowControlWindow(65 * 1024)
         .setTransportTracerFactory(fakeClockTransportTracer)
-        .buildTransportServer(streamTracerFactories);
+        .buildTransportServers(streamTracerFactories);
   }
 
   @Override
   protected String testAuthority(InternalServer server) {
-    return "localhost:" + server.getPort();
+    return "localhost:" + server.getListenSocketAddress();
   }
 
   @Override
@@ -95,22 +85,25 @@ public class NettyTransportTest extends AbstractTransportTest {
   }
 
   @Override
-  protected long currentTimeMillis() {
-    return fakeClock.currentTimeMillis();
+  protected long fakeCurrentTimeNanos() {
+    return fakeClock.getTicker().read();
   }
 
   @Override
   protected ManagedClientTransport newClientTransport(InternalServer server) {
-    int port = server.getPort();
+
     return clientFactory.newClientTransport(
-        new InetSocketAddress("localhost", port),
-        testAuthority(server),
-        null /* agent */,
-        null /* proxy */);
+        server.getListenSocketAddress(),
+        new ClientTransportFactory.ClientTransportOptions()
+            .setAuthority(testAuthority(server))
+            .setEagAttributes(eagAttrs()),
+        transportLogger());
   }
 
-  @Test
-  @Ignore("flaky")
+  @org.junit.Ignore
+  @org.junit.Test
   @Override
-  public void flowControlPushBack() {}
+  public void clientChecksInboundMetadataSize_trailer() throws Exception {
+    // Server-side is flaky due to https://github.com/netty/netty/pull/8332
+  }
 }

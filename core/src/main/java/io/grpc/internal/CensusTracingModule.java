@@ -20,7 +20,6 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static io.opencensus.trace.unsafe.ContextUtils.CONTEXT_SPAN_KEY;
 
 import com.google.common.annotations.VisibleForTesting;
-import io.grpc.BinaryLogProvider;
 import io.grpc.CallOptions;
 import io.grpc.Channel;
 import io.grpc.ClientCall;
@@ -33,8 +32,10 @@ import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerStreamTracer;
 import io.grpc.StreamTracer;
+import io.opencensus.trace.BlankSpan;
 import io.opencensus.trace.EndSpanOptions;
-import io.opencensus.trace.NetworkEvent;
+import io.opencensus.trace.MessageEvent;
+import io.opencensus.trace.MessageEvent.Type;
 import io.opencensus.trace.Span;
 import io.opencensus.trace.SpanContext;
 import io.opencensus.trace.Status;
@@ -208,17 +209,17 @@ final class CensusTracingModule {
         .build();
   }
 
-  private static void recordNetworkEvent(
-      Span span, NetworkEvent.Type type,
+  private static void recordMessageEvent(
+      Span span, MessageEvent.Type type,
       int seqNo, long optionalWireSize, long optionalUncompressedSize) {
-    NetworkEvent.Builder eventBuilder = NetworkEvent.builder(type, seqNo);
+    MessageEvent.Builder eventBuilder = MessageEvent.builder(type, seqNo);
     if (optionalUncompressedSize != -1) {
       eventBuilder.setUncompressedMessageSize(optionalUncompressedSize);
     }
     if (optionalWireSize != -1) {
       eventBuilder.setCompressedMessageSize(optionalWireSize);
     }
-    span.addNetworkEvent(eventBuilder.build());
+    span.addMessageEvent(eventBuilder.build());
   }
 
   @VisibleForTesting
@@ -241,9 +242,12 @@ final class CensusTracingModule {
     }
 
     @Override
-    public ClientStreamTracer newClientStreamTracer(CallOptions callOptions, Metadata headers) {
-      headers.discardAll(tracingHeader);
-      headers.put(tracingHeader, span.getContext());
+    public ClientStreamTracer newClientStreamTracer(
+        ClientStreamTracer.StreamInfo info, Metadata headers) {
+      if (span != BlankSpan.INSTANCE) {
+        headers.discardAll(tracingHeader);
+        headers.put(tracingHeader, span.getContext());
+      }
       return new ClientTracer(span);
     }
 
@@ -278,15 +282,15 @@ final class CensusTracingModule {
     @Override
     public void outboundMessageSent(
         int seqNo, long optionalWireSize, long optionalUncompressedSize) {
-      recordNetworkEvent(
-          span, NetworkEvent.Type.SENT, seqNo, optionalWireSize, optionalUncompressedSize);
+      recordMessageEvent(
+          span, Type.SENT, seqNo, optionalWireSize, optionalUncompressedSize);
     }
 
     @Override
     public void inboundMessageRead(
         int seqNo, long optionalWireSize, long optionalUncompressedSize) {
-      recordNetworkEvent(
-          span, NetworkEvent.Type.RECV, seqNo, optionalWireSize, optionalUncompressedSize);
+      recordMessageEvent(
+          span, Type.RECEIVED, seqNo, optionalWireSize, optionalUncompressedSize);
     }
   }
 
@@ -344,15 +348,15 @@ final class CensusTracingModule {
     @Override
     public void outboundMessageSent(
         int seqNo, long optionalWireSize, long optionalUncompressedSize) {
-      recordNetworkEvent(
-          span, NetworkEvent.Type.SENT, seqNo, optionalWireSize, optionalUncompressedSize);
+      recordMessageEvent(
+          span, Type.SENT, seqNo, optionalWireSize, optionalUncompressedSize);
     }
 
     @Override
     public void inboundMessageRead(
         int seqNo, long optionalWireSize, long optionalUncompressedSize) {
-      recordNetworkEvent(
-          span, NetworkEvent.Type.RECV, seqNo, optionalWireSize, optionalUncompressedSize);
+      recordMessageEvent(
+          span, Type.RECEIVED, seqNo, optionalWireSize, optionalUncompressedSize);
     }
   }
 
@@ -382,10 +386,7 @@ final class CensusTracingModule {
       ClientCall<ReqT, RespT> call =
           next.newCall(
               method,
-              callOptions.withStreamTracerFactory(tracerFactory)
-                  .withOption(
-                      BinaryLogProvider.CLIENT_CALL_ID_CALLOPTION_KEY,
-                      BinaryLogProvider.CallId.fromCensusSpan(tracerFactory.span)));
+              callOptions.withStreamTracerFactory(tracerFactory));
       return new SimpleForwardingClientCall<ReqT, RespT>(call) {
         @Override
         public void start(Listener<RespT> responseListener, Metadata headers) {

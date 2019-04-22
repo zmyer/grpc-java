@@ -21,8 +21,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.same;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -43,6 +43,7 @@ import io.grpc.MethodDescriptor;
 import io.grpc.MethodDescriptor.MethodType;
 import io.grpc.Status;
 import io.grpc.StringMarshaller;
+import io.grpc.SynchronizationContext;
 import io.grpc.internal.ClientStreamListener.RpcProgress;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executor;
@@ -50,6 +51,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -57,8 +59,9 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.mockito.stubbing.Answer;
 
 /**
@@ -66,6 +69,9 @@ import org.mockito.stubbing.Answer;
  */
 @RunWith(JUnit4.class)
 public class DelayedClientTransportTest {
+  @Rule
+  public final MockitoRule mocks = MockitoJUnit.rule();
+
   @Mock private ManagedClientTransport.Listener transportListener;
   @Mock private SubchannelPicker mockPicker;
   @Mock private AbstractSubchannel mockSubchannel;
@@ -78,7 +84,8 @@ public class DelayedClientTransportTest {
   @Captor private ArgumentCaptor<Status> statusCaptor;
   @Captor private ArgumentCaptor<ClientStreamListener> listenerCaptor;
 
-  private static final CallOptions.Key<Integer> SHARD_ID = CallOptions.Key.of("shard-id", -1);
+  private static final CallOptions.Key<Integer> SHARD_ID
+      = CallOptions.Key.createWithDefault("shard-id", -1);
   private static final Status SHUTDOWN_STATUS =
       Status.UNAVAILABLE.withDescription("shutdown called");
 
@@ -100,10 +107,16 @@ public class DelayedClientTransportTest {
   private final FakeClock fakeExecutor = new FakeClock();
 
   private final DelayedClientTransport delayedTransport = new DelayedClientTransport(
-      fakeExecutor.getScheduledExecutorService(), new ChannelExecutor());
+      fakeExecutor.getScheduledExecutorService(),
+      new SynchronizationContext(
+          new Thread.UncaughtExceptionHandler() {
+            @Override
+            public void uncaughtException(Thread t, Throwable e) {
+              throw new AssertionError(e);
+            }
+          }));
 
   @Before public void setUp() {
-    MockitoAnnotations.initMocks(this);
     when(mockPicker.pickSubchannel(any(PickSubchannelArgs.class)))
         .thenReturn(PickResult.withSubchannel(mockSubchannel));
     when(mockSubchannel.obtainActiveTransport()).thenReturn(mockRealTransport);
@@ -478,6 +491,7 @@ public class DelayedClientTransportTest {
 
     doAnswer(new Answer<PickResult>() {
         @Override
+        @SuppressWarnings("CatchAndPrintStackTrace")
         public PickResult answer(InvocationOnMock invocation) throws Throwable {
           if (nextPickShouldWait.compareAndSet(true, false)) {
             try {

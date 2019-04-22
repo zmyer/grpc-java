@@ -17,6 +17,10 @@
 package io.grpc.internal;
 
 import io.grpc.Attributes;
+import io.grpc.EquivalentAddressGroup;
+import io.grpc.Grpc;
+import io.grpc.NameResolver;
+import io.grpc.SecurityLevel;
 import java.util.Map;
 
 /**
@@ -26,16 +30,42 @@ public final class GrpcAttributes {
   /**
    * Attribute key for service config.
    */
-  public static final Attributes.Key<Map<String, Object>> NAME_RESOLVER_SERVICE_CONFIG =
-      Attributes.Key.of("service-config");
+  @NameResolver.ResolutionResultAttr
+  public static final Attributes.Key<Map<String, ?>> NAME_RESOLVER_SERVICE_CONFIG =
+      Attributes.Key.create("service-config");
 
   /**
    * The naming authority of a gRPC LB server address.  It is an address-group-level attribute,
    * present when the address group is a LoadBalancer.
    */
+  @EquivalentAddressGroup.Attr
   public static final Attributes.Key<String> ATTR_LB_ADDR_AUTHORITY =
-      Attributes.Key.of("io.grpc.grpclb.lbAddrAuthority");
+      Attributes.Key.create("io.grpc.grpclb.lbAddrAuthority");
 
+  /**
+   * Whether this EquivalentAddressGroup was provided by a GRPCLB server. It would be rare for this
+   * value to be {@code false}; generally it would be better to not have the key present at all.
+   */
+  @EquivalentAddressGroup.Attr
+  public static final Attributes.Key<Boolean> ATTR_LB_PROVIDED_BACKEND =
+      Attributes.Key.create("io.grpc.grpclb.lbProvidedBackend");
+
+  /**
+   * The security level of the transport.  If it's not present, {@link SecurityLevel#NONE} should be
+   * assumed.
+   */
+  @Grpc.TransportAttr
+  public static final Attributes.Key<SecurityLevel> ATTR_SECURITY_LEVEL =
+      Attributes.Key.create("io.grpc.internal.GrpcAttributes.securityLevel");
+
+  /**
+   * Attribute key for the attributes of the {@link EquivalentAddressGroup} ({@link
+   * EquivalentAddressGroup#getAttributes}) that the transport's server address is from.  This is a
+   * client-side-only transport attribute, and available right after the transport is started.
+   */
+  @Grpc.TransportAttr
+  public static final Attributes.Key<Attributes> ATTR_CLIENT_EAG_ATTRS =
+      Attributes.Key.create("io.grpc.internal.GrpcAttributes.clientEagAttrs");
 
   private GrpcAttributes() {}
 }

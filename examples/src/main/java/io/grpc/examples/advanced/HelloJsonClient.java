@@ -27,8 +27,6 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.examples.helloworld.GreeterGrpc;
 import io.grpc.examples.helloworld.HelloReply;
 import io.grpc.examples.helloworld.HelloRequest;
-import io.grpc.examples.helloworld.HelloWorldClient;
-import io.grpc.protobuf.ProtoUtils;
 import io.grpc.stub.AbstractStub;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
@@ -44,7 +42,7 @@ import java.util.logging.Logger;
  * https://groups.google.com/forum/#!forum/grpc-io
  */
 public final class HelloJsonClient {
-  private static final Logger logger = Logger.getLogger(HelloWorldClient.class.getName());
+  private static final Logger logger = Logger.getLogger(HelloJsonClient.class.getName());
 
   private final ManagedChannel channel;
   private final HelloJsonStub blockingStub;
@@ -98,8 +96,8 @@ public final class HelloJsonClient {
     static final MethodDescriptor<HelloRequest, HelloReply> METHOD_SAY_HELLO =
         GreeterGrpc.getSayHelloMethod()
             .toBuilder(
-                ProtoUtils.jsonMarshaller(HelloRequest.getDefaultInstance()),
-                ProtoUtils.jsonMarshaller(HelloReply.getDefaultInstance()))
+                JsonMarshaller.jsonMarshaller(HelloRequest.getDefaultInstance()),
+                JsonMarshaller.jsonMarshaller(HelloReply.getDefaultInstance()))
             .build();
 
     protected HelloJsonStub(Channel channel) {

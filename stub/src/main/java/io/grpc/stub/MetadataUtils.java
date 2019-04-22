@@ -65,13 +65,13 @@ public final class MetadataUtils {
 
     // Non private to avoid synthetic class
     HeaderAttachingClientInterceptor(Metadata extraHeaders) {
-      this.extraHeaders = checkNotNull(extraHeaders, extraHeaders);
+      this.extraHeaders = checkNotNull(extraHeaders, "extraHeaders");
     }
 
     @Override
     public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
         MethodDescriptor<ReqT, RespT> method, CallOptions callOptions, Channel next) {
-      return new HeaderAttachingClientCall<ReqT, RespT>(next.newCall(method, callOptions));
+      return new HeaderAttachingClientCall<>(next.newCall(method, callOptions));
     }
 
     private final class HeaderAttachingClientCall<ReqT, RespT>
@@ -135,7 +135,7 @@ public final class MetadataUtils {
     @Override
     public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
         MethodDescriptor<ReqT, RespT> method, CallOptions callOptions, Channel next) {
-      return new MetadataCapturingClientCall<ReqT, RespT>(next.newCall(method, callOptions));
+      return new MetadataCapturingClientCall<>(next.newCall(method, callOptions));
     }
 
     private final class MetadataCapturingClientCall<ReqT, RespT>

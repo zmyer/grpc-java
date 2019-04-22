@@ -19,6 +19,7 @@ package io.grpc.netty;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static io.grpc.internal.GrpcUtil.SERVER_KEEPALIVE_TIME_NANOS_DISABLED;
+import static io.grpc.netty.NettyServerBuilder.MAX_CONNECTION_AGE_GRACE_NANOS_INFINITE;
 import static io.grpc.netty.NettyServerBuilder.MAX_CONNECTION_AGE_NANOS_DISABLED;
 import static io.grpc.netty.NettyServerBuilder.MAX_CONNECTION_IDLE_NANOS_DISABLED;
 import static io.grpc.netty.Utils.CONTENT_TYPE_HEADER;
@@ -31,12 +32,12 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import io.grpc.Attributes;
+import io.grpc.InternalChannelz;
 import io.grpc.InternalMetadata;
 import io.grpc.InternalStatus;
 import io.grpc.Metadata;
 import io.grpc.ServerStreamTracer;
 import io.grpc.Status;
-import io.grpc.internal.Channelz;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.KeepAliveManager;
 import io.grpc.internal.LogExceptionRunnable;
@@ -98,7 +99,8 @@ import javax.annotation.Nullable;
 class NettyServerHandler extends AbstractNettyHandler {
   private static final Logger logger = Logger.getLogger(NettyServerHandler.class.getName());
   private static final long KEEPALIVE_PING = 0xDEADL;
-  private static final long GRACEFUL_SHUTDOWN_PING = 0x97ACEF001L;
+  @VisibleForTesting
+  static final long GRACEFUL_SHUTDOWN_PING = 0x97ACEF001L;
   private static final long GRACEFUL_SHUTDOWN_PING_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(10);
 
   private final Http2Connection.PropertyKey streamKey;
@@ -108,12 +110,12 @@ class NettyServerHandler extends AbstractNettyHandler {
   private final long keepAliveTimeoutInNanos;
   private final long maxConnectionAgeInNanos;
   private final long maxConnectionAgeGraceInNanos;
-  private final List<ServerStreamTracer.Factory> streamTracerFactories;
+  private final List<? extends ServerStreamTracer.Factory> streamTracerFactories;
   private final TransportTracer transportTracer;
   private final KeepAliveEnforcer keepAliveEnforcer;
   /** Incomplete attributes produced by negotiator. */
   private Attributes negotiationAttributes;
-  private Channelz.Security securityInfo;
+  private InternalChannelz.Security securityInfo;
   /** Completed attributes produced by transportReady. */
   private Attributes attributes;
   private Throwable connectionError;
@@ -132,7 +134,7 @@ class NettyServerHandler extends AbstractNettyHandler {
   static NettyServerHandler newHandler(
       ServerTransportListener transportListener,
       ChannelPromise channelUnused,
-      List<ServerStreamTracer.Factory> streamTracerFactories,
+      List<? extends ServerStreamTracer.Factory> streamTracerFactories,
       TransportTracer transportTracer,
       int maxStreams,
       int flowControlWindow,
@@ -178,7 +180,7 @@ class NettyServerHandler extends AbstractNettyHandler {
       Http2FrameReader frameReader,
       Http2FrameWriter frameWriter,
       ServerTransportListener transportListener,
-      List<ServerStreamTracer.Factory> streamTracerFactories,
+      List<? extends ServerStreamTracer.Factory> streamTracerFactories,
       TransportTracer transportTracer,
       int maxStreams,
       int flowControlWindow,
@@ -236,7 +238,7 @@ class NettyServerHandler extends AbstractNettyHandler {
       ChannelPromise channelUnused,
       final Http2Connection connection,
       ServerTransportListener transportListener,
-      List<ServerStreamTracer.Factory> streamTracerFactories,
+      List<? extends ServerStreamTracer.Factory> streamTracerFactories,
       TransportTracer transportTracer,
       Http2ConnectionDecoder decoder,
       Http2ConnectionEncoder encoder,
@@ -365,7 +367,7 @@ class NettyServerHandler extends AbstractNettyHandler {
 
   private void onHeadersRead(ChannelHandlerContext ctx, int streamId, Http2Headers headers)
       throws Http2Exception {
-    if (!teWarningLogged && !TE_TRAILERS.equals(headers.get(TE_HEADER))) {
+    if (!teWarningLogged && !TE_TRAILERS.contentEquals(headers.get(TE_HEADER))) {
       logger.warning(String.format("Expected header TE: %s, but %s is received. This means "
               + "some intermediate proxy may not support trailers",
           TE_TRAILERS, headers.get(TE_HEADER)));
@@ -405,7 +407,7 @@ class NettyServerHandler extends AbstractNettyHandler {
         return;
       }
 
-      if (!HTTP_METHOD.equals(headers.method())) {
+      if (!HTTP_METHOD.contentEquals(headers.method())) {
         respondWithHttpError(ctx, streamId, 405, Status.Code.INTERNAL,
             String.format("Method '%s' is not supported", headers.method()));
         return;
@@ -507,12 +509,12 @@ class NettyServerHandler extends AbstractNettyHandler {
 
   @Override
   public void handleProtocolNegotiationCompleted(
-      Attributes attrs, Channelz.Security securityInfo) {
+      Attributes attrs, InternalChannelz.Security securityInfo) {
     negotiationAttributes = attrs;
     this.securityInfo = securityInfo;
   }
 
-  Channelz.Security getSecurityInfo() {
+  InternalChannelz.Security getSecurityInfo() {
     return securityInfo;
   }
 
@@ -586,6 +588,15 @@ class NettyServerHandler extends AbstractNettyHandler {
     }
   }
 
+  @Override
+  public void close(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception {
+    if (gracefulShutdown == null) {
+      gracefulShutdown = new GracefulShutdown("app_requested", null);
+      gracefulShutdown.start(ctx);
+      ctx.flush();
+    }
+  }
+
   /**
    * Returns the given processed bytes back to inbound flow control.
    */
@@ -648,7 +659,7 @@ class NettyServerHandler extends AbstractNettyHandler {
 
   private void forcefulClose(final ChannelHandlerContext ctx, final ForcefulCloseCommand msg,
       ChannelPromise promise) throws Exception {
-    close(ctx, promise);
+    super.close(ctx, promise);
     connection().forEachActiveStream(new Http2StreamVisitor() {
       @Override
       public boolean visit(Http2Stream stream) throws Http2Exception {
@@ -868,7 +879,6 @@ class NettyServerHandler extends AbstractNettyHandler {
           ByteBufUtil.writeAscii(ctx.alloc(), goAwayMessage),
           ctx.newPromise());
 
-      long gracefulShutdownPingTimeout = GRACEFUL_SHUTDOWN_PING_TIMEOUT_NANOS;
       pingFuture = ctx.executor().schedule(
           new Runnable() {
             @Override
@@ -901,18 +911,26 @@ class NettyServerHandler extends AbstractNettyHandler {
 
       // gracefully shutdown with specified grace time
       long savedGracefulShutdownTimeMillis = gracefulShutdownTimeoutMillis();
-      long gracefulShutdownTimeoutMillis = savedGracefulShutdownTimeMillis;
-      if (graceTimeInNanos != null) {
-        gracefulShutdownTimeoutMillis = TimeUnit.NANOSECONDS.toMillis(graceTimeInNanos);
-      }
+      long overriddenGraceTime = graceTimeOverrideMillis(savedGracefulShutdownTimeMillis);
       try {
-        gracefulShutdownTimeoutMillis(gracefulShutdownTimeoutMillis);
-        close(ctx, ctx.newPromise());
+        gracefulShutdownTimeoutMillis(overriddenGraceTime);
+        NettyServerHandler.super.close(ctx, ctx.newPromise());
       } catch (Exception e) {
         onError(ctx, /* outbound= */ true, e);
       } finally {
         gracefulShutdownTimeoutMillis(savedGracefulShutdownTimeMillis);
       }
+    }
+
+    private long graceTimeOverrideMillis(long originalMillis) {
+      if (graceTimeInNanos == null) {
+        return originalMillis;
+      }
+      if (graceTimeInNanos == MAX_CONNECTION_AGE_GRACE_NANOS_INFINITE) {
+        // netty treats -1 as "no timeout"
+        return -1L;
+      }
+      return TimeUnit.NANOSECONDS.toMillis(graceTimeInNanos);
     }
   }
 

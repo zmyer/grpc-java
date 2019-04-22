@@ -16,24 +16,25 @@
 
 package io.grpc.netty;
 
+import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.truth.TruthJUnit.assume;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 
 import com.google.common.base.MoreObjects;
-import com.google.common.truth.Truth;
+import io.grpc.InternalChannelz;
+import io.grpc.InternalChannelz.SocketOptions;
 import io.grpc.Metadata;
 import io.grpc.Status;
-import io.grpc.internal.Channelz;
-import io.grpc.internal.Channelz.SocketOptions;
 import io.grpc.internal.GrpcUtil;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ConnectTimeoutException;
+import io.netty.channel.EventLoopGroup;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.channel.socket.oio.OioSocketChannel;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
@@ -107,6 +108,7 @@ public class UtilsTest {
   }
 
   @Test
+  @SuppressWarnings("UndefinedEquals") // AsciiString.equals
   public void convertServerHeaders_sanitizes() {
     Metadata metaData = new Metadata();
 
@@ -131,13 +133,14 @@ public class UtilsTest {
   public void channelOptionsTest_noLinger() {
     Channel channel = new EmbeddedChannel();
     assertNull(channel.config().getOption(ChannelOption.SO_LINGER));
-    Channelz.SocketOptions socketOptions = Utils.getSocketOptions(channel);
+    InternalChannelz.SocketOptions socketOptions = Utils.getSocketOptions(channel);
     assertNull(socketOptions.lingerSeconds);
   }
 
   @Test
+  @SuppressWarnings("deprecation")
   public void channelOptionsTest_oio() {
-    Channel channel = new OioSocketChannel();
+    Channel channel = new io.netty.channel.socket.oio.OioSocketChannel();
     SocketOptions socketOptions = setAndValidateGeneric(channel);
     assertEquals(250, (int) socketOptions.soTimeoutMillis);
   }
@@ -149,7 +152,7 @@ public class UtilsTest {
     assertNull(socketOptions.soTimeoutMillis);
   }
 
-  private static Channelz.SocketOptions setAndValidateGeneric(Channel channel) {
+  private static InternalChannelz.SocketOptions setAndValidateGeneric(Channel channel) {
     channel.config().setOption(ChannelOption.SO_LINGER, 3);
     // only applicable for OIO channels:
     channel.config().setOption(ChannelOption.SO_TIMEOUT, 250);
@@ -158,7 +161,7 @@ public class UtilsTest {
     WriteBufferWaterMark writeBufWaterMark = new WriteBufferWaterMark(10, 20);
     channel.config().setOption(ChannelOption.WRITE_BUFFER_WATER_MARK, writeBufWaterMark);
 
-    Channelz.SocketOptions socketOptions = Utils.getSocketOptions(channel);
+    InternalChannelz.SocketOptions socketOptions = Utils.getSocketOptions(channel);
     assertEquals(3, (int) socketOptions.lingerSeconds);
     assertEquals("true", socketOptions.others.get("SO_KEEPALIVE"));
     assertEquals(
@@ -169,8 +172,51 @@ public class UtilsTest {
 
   private static void assertStatusEquals(Status expected, Status actual) {
     assertEquals(expected.getCode(), actual.getCode());
-    Truth.assertThat(MoreObjects.firstNonNull(actual.getDescription(), ""))
+    assertThat(MoreObjects.firstNonNull(actual.getDescription(), ""))
         .contains(MoreObjects.firstNonNull(expected.getDescription(), ""));
     assertEquals(expected.getCause(), actual.getCause());
+  }
+
+  @Test
+  public void defaultEventLoopGroup_whenEpollIsAvailable() {
+    assume().that(Utils.isEpollAvailable()).isTrue();
+
+    EventLoopGroup defaultBossGroup = Utils.DEFAULT_BOSS_EVENT_LOOP_GROUP.create();
+    EventLoopGroup defaultWorkerGroup = Utils.DEFAULT_WORKER_EVENT_LOOP_GROUP.create();
+
+    assertThat(defaultBossGroup.getClass().getName())
+        .isEqualTo("io.netty.channel.epoll.EpollEventLoopGroup");
+    assertThat(defaultWorkerGroup.getClass().getName())
+        .isEqualTo("io.netty.channel.epoll.EpollEventLoopGroup");
+
+    defaultBossGroup.shutdownGracefully();
+    defaultWorkerGroup.shutdownGracefully();
+  }
+
+  @Test
+  public void defaultClientChannelType_whenEpollIsAvailable() {
+    assume().that(Utils.isEpollAvailable()).isTrue();
+
+    Class<? extends Channel> clientChannelType = Utils.DEFAULT_CLIENT_CHANNEL_TYPE;
+
+    assertThat(clientChannelType.getName())
+        .isEqualTo("io.netty.channel.epoll.EpollSocketChannel");
+  }
+
+  @Test
+  public void defaultServerChannelType_whenEpollIsAvailable() {
+    assume().that(Utils.isEpollAvailable()).isTrue();
+
+    Class<? extends Channel> clientChannelType = Utils.DEFAULT_SERVER_CHANNEL_TYPE;
+
+    assertThat(clientChannelType.getName())
+        .isEqualTo("io.netty.channel.epoll.EpollServerSocketChannel");
+  }
+
+  @Test
+  public void maybeGetTcpUserTimeoutOption() {
+    assume().that(Utils.isEpollAvailable()).isTrue();
+
+    assertThat(Utils.maybeGetTcpUserTimeoutOption()).isNotNull();
   }
 }

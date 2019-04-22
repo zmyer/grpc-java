@@ -2,12 +2,12 @@
 
 buildscript {
     repositories {
-        jcenter()
         google()
+        jcenter()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:3.0.1'
-        classpath "com.google.protobuf:protobuf-gradle-plugin:0.8.3"
+        classpath 'com.android.tools.build:gradle:3.3.0'
+        classpath "com.google.protobuf:protobuf-gradle-plugin:0.8.8"
 
         // NOTE: Do not place your application dependencies here; they belong
         // in the individual module build.gradle files
@@ -16,9 +16,9 @@ buildscript {
 
 allprojects {
     repositories {
+        google()
         mavenLocal()
         jcenter()
-        google()
     }
 }
 
@@ -26,13 +26,12 @@ subprojects {
     apply plugin: "checkstyle"
 
     checkstyle {
-        configFile = file("$rootDir/../buildscripts/checkstyle.xml")
+        configDir = file("$rootDir/../buildscripts")
         toolVersion = "6.17"
         ignoreFailures = false
         if (rootProject.hasProperty("checkstyle.ignoreFailures")) {
             ignoreFailures = rootProject.properties["checkstyle.ignoreFailures"].toBoolean()
         }
-        configProperties["rootDir"] = "$rootDir/../"
     }
 
     // Checkstyle doesn't run automatically with android

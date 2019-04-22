@@ -16,12 +16,13 @@
 
 package io.grpc.services;
 
+import static com.google.common.truth.Truth.assertWithMessage;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
+import io.grpc.InternalChannelz;
 import io.grpc.Status;
-import io.grpc.StatusRuntimeException;
 import io.grpc.channelz.v1.GetChannelRequest;
 import io.grpc.channelz.v1.GetChannelResponse;
 import io.grpc.channelz.v1.GetServersRequest;
@@ -32,7 +33,6 @@ import io.grpc.channelz.v1.GetSubchannelRequest;
 import io.grpc.channelz.v1.GetSubchannelResponse;
 import io.grpc.channelz.v1.GetTopChannelsRequest;
 import io.grpc.channelz.v1.GetTopChannelsResponse;
-import io.grpc.internal.Channelz;
 import io.grpc.services.ChannelzTestHelper.TestChannel;
 import io.grpc.services.ChannelzTestHelper.TestServer;
 import io.grpc.services.ChannelzTestHelper.TestSocket;
@@ -48,7 +48,7 @@ public class ChannelzServiceTest {
   // small value to force pagination
   private static final int MAX_PAGE_SIZE = 1;
 
-  private final Channelz channelz = new Channelz();
+  private final InternalChannelz channelz = new InternalChannelz();
   private ChannelzService service = new ChannelzService(channelz, MAX_PAGE_SIZE);
 
   @Test
@@ -174,8 +174,8 @@ public class ChannelzServiceTest {
     ArgumentCaptor<Exception> exceptionCaptor = ArgumentCaptor.forClass(Exception.class);
     service.getChannel(GetChannelRequest.newBuilder().setChannelId(id).build(), observer);
     verify(observer).onError(exceptionCaptor.capture());
-    Exception exception = exceptionCaptor.getValue();
-    assertEquals(Status.NOT_FOUND, ((StatusRuntimeException) exception).getStatus());
+    Status s = Status.fromThrowable(exceptionCaptor.getValue());
+    assertWithMessage(s.toString()).that(s.getCode()).isEqualTo(Status.Code.NOT_FOUND);
   }
 
   private GetSubchannelResponse getSubchannelHelper(long id) {
@@ -195,8 +195,8 @@ public class ChannelzServiceTest {
     ArgumentCaptor<Exception> exceptionCaptor = ArgumentCaptor.forClass(Exception.class);
     service.getSubchannel(GetSubchannelRequest.newBuilder().setSubchannelId(id).build(), observer);
     verify(observer).onError(exceptionCaptor.capture());
-    Exception exception = exceptionCaptor.getValue();
-    assertEquals(Status.NOT_FOUND, ((StatusRuntimeException) exception).getStatus());
+    Status s = Status.fromThrowable(exceptionCaptor.getValue());
+    assertWithMessage(s.toString()).that(s.getCode()).isEqualTo(Status.Code.NOT_FOUND);
   }
 
   private GetServersResponse getServersHelper(long startId) {
@@ -218,8 +218,8 @@ public class ChannelzServiceTest {
     ArgumentCaptor<Exception> exceptionCaptor = ArgumentCaptor.forClass(Exception.class);
     service.getSocket(GetSocketRequest.newBuilder().setSocketId(id).build(), observer);
     verify(observer).onError(exceptionCaptor.capture());
-    Exception exception = exceptionCaptor.getValue();
-    assertEquals(Status.NOT_FOUND, ((StatusRuntimeException) exception).getStatus());
+    Status s = Status.fromThrowable(exceptionCaptor.getValue());
+    assertWithMessage(s.toString()).that(s.getCode()).isEqualTo(Status.Code.NOT_FOUND);
   }
 
   private GetSocketResponse getSocketHelper(long id) {

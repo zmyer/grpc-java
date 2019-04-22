@@ -65,6 +65,7 @@ class CronetClientStream extends AbstractClientStream {
   private static final String LOG_TAG = "grpc-java-cronet";
   private final String url;
   private final String userAgent;
+  private final StatsTraceContext statsTraceCtx;
   private final Executor executor;
   private final Metadata headers;
   private final CronetClientTransport transport;
@@ -94,10 +95,11 @@ class CronetClientStream extends AbstractClientStream {
       CallOptions callOptions,
       TransportTracer transportTracer) {
     super(
-        new CronetWritableBufferAllocator(), statsTraceCtx, transportTracer, headers,
+        new CronetWritableBufferAllocator(), statsTraceCtx, transportTracer, headers, callOptions,
         method.isSafe());
     this.url = Preconditions.checkNotNull(url, "url");
     this.userAgent = Preconditions.checkNotNull(userAgent, "userAgent");
+    this.statsTraceCtx = Preconditions.checkNotNull(statsTraceCtx, "statsTraceCtx");
     this.executor = Preconditions.checkNotNull(executor, "executor");
     this.headers = Preconditions.checkNotNull(headers, "headers");
     this.transport = Preconditions.checkNotNull(transport, "transport");
@@ -129,6 +131,10 @@ class CronetClientStream extends AbstractClientStream {
     @Override
     public void writeHeaders(Metadata metadata, byte[] payload) {
       startCallback.run();
+      // streamFactory will be set by startCallback, unless the transport is in go-away state
+      if (streamFactory == null) {
+        return;
+      }
 
       BidirectionalStreamCallback callback = new BidirectionalStreamCallback();
       String path = url;
@@ -221,6 +227,8 @@ class CronetClientStream extends AbstractClientStream {
     private Status cancelReason;
     @GuardedBy("lock")
     private boolean readClosed;
+    @GuardedBy("lock")
+    private boolean firstWriteComplete;
 
     public TransportState(
         int maxMessageSize, StatsTraceContext statsTraceCtx, Object lock,
@@ -243,6 +251,7 @@ class CronetClientStream extends AbstractClientStream {
     @GuardedBy("lock")
     @Override
     protected void http2ProcessingFailed(Status status, boolean stopDelivery, Metadata trailers) {
+      Preconditions.checkNotNull(stream, "stream must not be null");
       stream.cancel();
       transportReportStatus(status, stopDelivery, trailers);
     }
@@ -263,6 +272,7 @@ class CronetClientStream extends AbstractClientStream {
     @GuardedBy("lock")
     @Override
     public void bytesRead(int processedBytes) {
+      Preconditions.checkNotNull(stream, "stream must not be null");
       bytesPendingProcess -= processedBytes;
       if (bytesPendingProcess == 0 && !readClosed) {
         if (Log.isLoggable(LOG_TAG, Log.VERBOSE)) {
@@ -341,6 +351,9 @@ class CronetClientStream extends AbstractClientStream {
   }
 
   private void streamWrite(ByteBuffer buffer, boolean endOfStream, boolean flush) {
+    if (stream == null) {
+      return;
+    }
     if (Log.isLoggable(LOG_TAG, Log.VERBOSE)) {
       Log.v(LOG_TAG, "BidirectionalStream.write");
     }
@@ -418,6 +431,12 @@ class CronetClientStream extends AbstractClientStream {
         Log.v(LOG_TAG, "onWriteCompleted");
       }
       synchronized (state.lock) {
+        if (!state.firstWriteComplete) {
+          // Cronet API doesn't notify when headers are written to wire, but it occurs before first
+          // onWriteCompleted callback.
+          state.firstWriteComplete = true;
+          statsTraceCtx.clientOutboundHeaders();
+        }
         state.onSentBytes(buffer.position());
       }
     }
@@ -494,7 +513,7 @@ class CronetClientStream extends AbstractClientStream {
 
     private void reportHeaders(List<Map.Entry<String, String>> headers, boolean endOfStream) {
       // TODO(ericgribkoff): create new utility methods to eliminate all these conversions
-      List<String> headerList = new ArrayList<String>();
+      List<String> headerList = new ArrayList<>();
       for (Map.Entry<String, String> entry : headers) {
         headerList.add(entry.getKey());
         headerList.add(entry.getValue());

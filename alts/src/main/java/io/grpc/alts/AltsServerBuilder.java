@@ -16,32 +16,40 @@
 
 package io.grpc.alts;
 
-import com.google.common.base.MoreObjects;
 import io.grpc.BindableService;
+import io.grpc.Channel;
 import io.grpc.CompressorRegistry;
 import io.grpc.DecompressorRegistry;
 import io.grpc.ExperimentalApi;
 import io.grpc.HandlerRegistry;
+import io.grpc.Metadata;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
+import io.grpc.ServerCall;
+import io.grpc.ServerCall.Listener;
+import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.ServerStreamTracer.Factory;
 import io.grpc.ServerTransportFilter;
+import io.grpc.Status;
 import io.grpc.alts.internal.AltsHandshakerOptions;
 import io.grpc.alts.internal.AltsProtocolNegotiator;
+import io.grpc.alts.internal.AltsProtocolNegotiator.LazyChannel;
 import io.grpc.alts.internal.AltsTsiHandshaker;
 import io.grpc.alts.internal.HandshakerServiceGrpc;
 import io.grpc.alts.internal.RpcProtocolVersionsUtil;
 import io.grpc.alts.internal.TsiHandshaker;
 import io.grpc.alts.internal.TsiHandshakerFactory;
+import io.grpc.internal.ObjectPool;
+import io.grpc.internal.SharedResourcePool;
 import io.grpc.netty.NettyServerBuilder;
 import java.io.File;
-import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * gRPC secure server builder used for ALTS. This class adds on the necessary ALTS support to create
@@ -50,7 +58,10 @@ import java.util.concurrent.TimeUnit;
 @ExperimentalApi("https://github.com/grpc/grpc-java/issues/4151")
 public final class AltsServerBuilder extends ServerBuilder<AltsServerBuilder> {
 
+  private static final Logger logger = Logger.getLogger(AltsServerBuilder.class.getName());
   private final NettyServerBuilder delegate;
+  private ObjectPool<Channel> handshakerChannelPool =
+      SharedResourcePool.forResource(HandshakerServiceChannel.SHARED_HANDSHAKER_CHANNEL);
   private boolean enableUntrustedAlts;
 
   private AltsServerBuilder(NettyServerBuilder nettyDelegate) {
@@ -59,13 +70,7 @@ public final class AltsServerBuilder extends ServerBuilder<AltsServerBuilder> {
 
   /** Creates a gRPC server builder for the given port. */
   public static AltsServerBuilder forPort(int port) {
-    NettyServerBuilder nettyDelegate =
-        NettyServerBuilder.forAddress(new InetSocketAddress(port))
-            .maxConnectionIdle(1, TimeUnit.HOURS)
-            .keepAliveTime(270, TimeUnit.SECONDS)
-            .keepAliveTimeout(20, TimeUnit.SECONDS)
-            .permitKeepAliveTime(10, TimeUnit.SECONDS)
-            .permitKeepAliveWithoutCalls(true);
+    NettyServerBuilder nettyDelegate = NettyServerBuilder.forAddress(new InetSocketAddress(port));
     return new AltsServerBuilder(nettyDelegate);
   }
 
@@ -80,7 +85,11 @@ public final class AltsServerBuilder extends ServerBuilder<AltsServerBuilder> {
 
   /** Sets a new handshaker service address for testing. */
   public AltsServerBuilder setHandshakerAddressForTesting(String handshakerAddress) {
-    HandshakerServiceChannel.setHandshakerAddressForTesting(handshakerAddress);
+    // Instead of using the default shared channel to the handshaker service, create a separate
+    // resource to the test address.
+    handshakerChannelPool =
+        SharedResourcePool.forResource(
+            HandshakerServiceChannel.getHandshakerChannelForTesting(handshakerAddress));
     return this;
   }
 
@@ -170,89 +179,50 @@ public final class AltsServerBuilder extends ServerBuilder<AltsServerBuilder> {
   /** {@inheritDoc} */
   @Override
   public Server build() {
-    CheckGcpEnvironment.check(enableUntrustedAlts);
+    if (!CheckGcpEnvironment.isOnGcp()) {
+      if (enableUntrustedAlts) {
+        logger.log(
+            Level.WARNING,
+            "Untrusted ALTS mode is enabled and we cannot guarantee the trustworthiness of the "
+                + "ALTS handshaker service");
+      } else {
+        Status status =
+            Status.INTERNAL.withDescription("ALTS is only allowed to run on Google Cloud Platform");
+        delegate.intercept(new FailingServerInterceptor(status));
+      }
+    }
+
+    final LazyChannel lazyHandshakerChannel = new LazyChannel(handshakerChannelPool);
     delegate.protocolNegotiator(
-        AltsProtocolNegotiator.create(
+        AltsProtocolNegotiator.createServerNegotiator(
             new TsiHandshakerFactory() {
               @Override
-              public TsiHandshaker newHandshaker() {
-                // Used the shared grpc channel to connecting to the ALTS handshaker service.
+              public TsiHandshaker newHandshaker(String authority) {
                 return AltsTsiHandshaker.newServer(
-                    HandshakerServiceGrpc.newStub(HandshakerServiceChannel.get()),
+                    HandshakerServiceGrpc.newStub(lazyHandshakerChannel.get()),
                     new AltsHandshakerOptions(RpcProtocolVersionsUtil.getRpcProtocolVersions()));
               }
-            }));
-    return new AltsServer(delegate.build());
+            },
+            lazyHandshakerChannel));
+    return delegate.build();
   }
 
-  static final class AltsServer extends io.grpc.Server {
-    private final Server delegate;
+  /** An implementation of {@link ServerInterceptor} that fails each call. */
+  static final class FailingServerInterceptor implements ServerInterceptor {
 
-    AltsServer(Server delegate) {
-      this.delegate = delegate;
+    private final Status status;
+
+    public FailingServerInterceptor(Status status) {
+      this.status = status;
     }
 
     @Override
-    public List<ServerServiceDefinition> getImmutableServices() {
-      return delegate.getImmutableServices();
-    }
-
-    @Override
-    public List<ServerServiceDefinition> getMutableServices() {
-      return delegate.getMutableServices();
-    }
-
-    @Override
-    public int getPort() {
-      return delegate.getPort();
-    }
-
-    @Override
-    public List<ServerServiceDefinition> getServices() {
-      return delegate.getServices();
-    }
-
-    @Override
-    public Server start() throws IOException {
-      delegate.start();
-      return this;
-    }
-
-    @Override
-    public Server shutdown() {
-      delegate.shutdown();
-      return this;
-    }
-
-    @Override
-    public Server shutdownNow() {
-      delegate.shutdownNow();
-      return this;
-    }
-
-    @Override
-    public boolean isShutdown() {
-      return delegate.isShutdown();
-    }
-
-    @Override
-    public boolean isTerminated() {
-      return delegate.isTerminated();
-    }
-
-    @Override
-    public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
-      return delegate.awaitTermination(timeout, unit);
-    }
-
-    @Override
-    public void awaitTermination() throws InterruptedException {
-      delegate.awaitTermination();
-    }
-
-    @Override
-    public String toString() {
-      return MoreObjects.toStringHelper(this).add("delegate", delegate).toString();
+    public <ReqT, RespT> Listener<ReqT> interceptCall(
+        ServerCall<ReqT, RespT> serverCall,
+        Metadata metadata,
+        ServerCallHandler<ReqT, RespT> nextHandler) {
+      serverCall.close(status, new Metadata());
+      return new Listener<ReqT>() {};
     }
   }
 }

@@ -20,8 +20,8 @@ import static com.google.common.base.Charsets.UTF_8;
 import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_WINDOW_SIZE;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.AdditionalAnswers.delegatesTo;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyLong;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -29,7 +29,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
-import io.grpc.internal.Channelz.TransportStats;
+import io.grpc.InternalChannelz.TransportStats;
 import io.grpc.internal.FakeClock;
 import io.grpc.internal.MessageFramer;
 import io.grpc.internal.StatsTraceContext;
@@ -245,7 +245,6 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
 
   protected ByteBuf grpcDataFrame(int streamId, boolean endStream, byte[] content) {
     final ByteBuf compressionFrame = Unpooled.buffer(content.length);
-    TransportTracer noTransportTracer = null;
     MessageFramer framer = new MessageFramer(
         new MessageFramer.Sink() {
           @Override
@@ -326,7 +325,7 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
 
   @CanIgnoreReturnValue
   protected final ChannelFuture enqueue(WriteQueue.QueuedCommand command) {
-    ChannelFuture future = writeQueue.enqueue(command, newPromise(), true);
+    ChannelFuture future = writeQueue.enqueue(command, true);
     channel.runPendingTasks();
     return future;
   }
@@ -441,7 +440,7 @@ public abstract class NettyHandlerTestBase<T extends Http2ConnectionHandler> {
     Http2LocalFlowController localFlowController = connection().local().flowController();
     int maxWindow = handler.flowControlPing().maxWindow();
 
-    handler.flowControlPing().setDataSizeSincePing(maxWindow);
+    handler.flowControlPing().setDataSizeAndSincePing(maxWindow);
     long payload = handler.flowControlPing().payload();
     channelRead(pingFrame(true, payload));
 

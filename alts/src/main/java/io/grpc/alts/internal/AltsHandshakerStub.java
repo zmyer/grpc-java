@@ -18,8 +18,6 @@ package io.grpc.alts.internal;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Optional;
-import io.grpc.alts.internal.Handshaker.HandshakerReq;
-import io.grpc.alts.internal.Handshaker.HandshakerResp;
 import io.grpc.alts.internal.HandshakerServiceGrpc.HandshakerServiceStub;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
@@ -31,7 +29,7 @@ class AltsHandshakerStub {
   private final StreamObserver<HandshakerResp> reader = new Reader();
   private final StreamObserver<HandshakerReq> writer;
   private final ArrayBlockingQueue<Optional<HandshakerResp>> responseQueue =
-      new ArrayBlockingQueue<Optional<HandshakerResp>>(1);
+      new ArrayBlockingQueue<>(1);
   private final AtomicReference<String> exceptionMessage = new AtomicReference<>();
 
   AltsHandshakerStub(HandshakerServiceStub serviceStub) {

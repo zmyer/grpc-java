@@ -18,7 +18,14 @@ package io.grpc.services;
 
 import com.google.common.annotations.VisibleForTesting;
 import io.grpc.ExperimentalApi;
+import io.grpc.InternalChannelz;
+import io.grpc.InternalChannelz.ChannelStats;
+import io.grpc.InternalChannelz.ServerList;
+import io.grpc.InternalChannelz.ServerSocketsList;
+import io.grpc.InternalChannelz.SocketStats;
+import io.grpc.InternalInstrumented;
 import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.grpc.channelz.v1.ChannelzGrpc;
 import io.grpc.channelz.v1.GetChannelRequest;
 import io.grpc.channelz.v1.GetChannelResponse;
@@ -32,12 +39,6 @@ import io.grpc.channelz.v1.GetSubchannelRequest;
 import io.grpc.channelz.v1.GetSubchannelResponse;
 import io.grpc.channelz.v1.GetTopChannelsRequest;
 import io.grpc.channelz.v1.GetTopChannelsResponse;
-import io.grpc.internal.Channelz;
-import io.grpc.internal.Channelz.ChannelStats;
-import io.grpc.internal.Channelz.ServerList;
-import io.grpc.internal.Channelz.ServerSocketsList;
-import io.grpc.internal.Channelz.SocketStats;
-import io.grpc.internal.Instrumented;
 import io.grpc.stub.StreamObserver;
 
 /**
@@ -45,45 +46,65 @@ import io.grpc.stub.StreamObserver;
  */
 @ExperimentalApi("https://github.com/grpc/grpc-java/issues/4206")
 public final class ChannelzService extends ChannelzGrpc.ChannelzImplBase {
-  private final Channelz channelz;
+  private final InternalChannelz channelz;
   private final int maxPageSize;
 
+  /**
+   * Creates an instance.
+   */
   public static ChannelzService newInstance(int maxPageSize) {
-    return new ChannelzService(Channelz.instance(), maxPageSize);
+    return new ChannelzService(InternalChannelz.instance(), maxPageSize);
   }
 
   @VisibleForTesting
-  ChannelzService(Channelz channelz, int maxPageSize) {
+  ChannelzService(InternalChannelz channelz, int maxPageSize) {
     this.channelz = channelz;
     this.maxPageSize = maxPageSize;
   }
 
-  /** Returns top level channel aka {@link io.grpc.internal.ManagedChannelImpl}. */
+  /** Returns top level channel aka {@link io.grpc.ManagedChannel}. */
   @Override
   public void getTopChannels(
       GetTopChannelsRequest request, StreamObserver<GetTopChannelsResponse> responseObserver) {
-    Channelz.RootChannelList rootChannels
+    InternalChannelz.RootChannelList rootChannels
         = channelz.getRootChannels(request.getStartChannelId(), maxPageSize);
 
-    responseObserver.onNext(ChannelzProtoUtil.toGetTopChannelResponse(rootChannels));
-    responseObserver.onCompleted();
-  }
-
-  /** Returns a top level channel aka {@link io.grpc.internal.ManagedChannelImpl}. */
-  @Override
-  public void getChannel(
-      GetChannelRequest request, StreamObserver<GetChannelResponse> responseObserver) {
-    Instrumented<ChannelStats> s = channelz.getRootChannel(request.getChannelId());
-    if (s == null) {
-      responseObserver.onError(Status.NOT_FOUND.asRuntimeException());
+    GetTopChannelsResponse resp;
+    try {
+      resp = ChannelzProtoUtil.toGetTopChannelResponse(rootChannels);
+    } catch (StatusRuntimeException e) {
+      responseObserver.onError(e);
       return;
     }
 
-    responseObserver.onNext(
-        GetChannelResponse
-            .newBuilder()
-            .setChannel(ChannelzProtoUtil.toChannel(s))
-            .build());
+    responseObserver.onNext(resp);
+    responseObserver.onCompleted();
+  }
+
+  /** Returns a top level channel aka {@link io.grpc.ManagedChannel}. */
+  @Override
+  public void getChannel(
+      GetChannelRequest request, StreamObserver<GetChannelResponse> responseObserver) {
+    InternalInstrumented<ChannelStats> s = channelz.getRootChannel(request.getChannelId());
+    if (s == null) {
+      responseObserver.onError(
+          Status.NOT_FOUND.withDescription("Can't find channel " + request.getChannelId())
+              .asRuntimeException());
+      return;
+    }
+
+    GetChannelResponse resp;
+    try {
+      resp = GetChannelResponse
+          .newBuilder()
+          .setChannel(ChannelzProtoUtil.toChannel(s))
+          .build();
+    } catch (StatusRuntimeException e) {
+      responseObserver.onError(e);
+      return;
+    }
+
+    responseObserver.onNext(resp);
     responseObserver.onCompleted();
   }
 
@@ -93,7 +114,15 @@ public final class ChannelzService extends ChannelzGrpc.ChannelzImplBase {
       GetServersRequest request, StreamObserver<GetServersResponse> responseObserver) {
     ServerList servers = channelz.getServers(request.getStartServerId(), maxPageSize);
 
-    responseObserver.onNext(ChannelzProtoUtil.toGetServersResponse(servers));
+    GetServersResponse resp;
+    try {
+      resp = ChannelzProtoUtil.toGetServersResponse(servers);
+    } catch (StatusRuntimeException e) {
+      responseObserver.onError(e);
+      return;
+    }
+
+    responseObserver.onNext(resp);
     responseObserver.onCompleted();
   }
 
@@ -101,17 +130,26 @@ public final class ChannelzService extends ChannelzGrpc.ChannelzImplBase {
   @Override
   public void getSubchannel(
       GetSubchannelRequest request, StreamObserver<GetSubchannelResponse> responseObserver) {
-    Instrumented<ChannelStats> s = channelz.getSubchannel(request.getSubchannelId());
+    InternalInstrumented<ChannelStats> s = channelz.getSubchannel(request.getSubchannelId());
     if (s == null) {
-      responseObserver.onError(Status.NOT_FOUND.asRuntimeException());
+      responseObserver.onError(
+          Status.NOT_FOUND.withDescription("Can't find subchannel " + request.getSubchannelId())
+              .asRuntimeException());
       return;
     }
 
-    responseObserver.onNext(
-        GetSubchannelResponse
-            .newBuilder()
-            .setSubchannel(ChannelzProtoUtil.toSubchannel(s))
-            .build());
+    GetSubchannelResponse resp;
+    try {
+      resp = GetSubchannelResponse
+          .newBuilder()
+          .setSubchannel(ChannelzProtoUtil.toSubchannel(s))
+          .build();
+    } catch (StatusRuntimeException e) {
+      responseObserver.onError(e);
+      return;
+    }
+
+    responseObserver.onNext(resp);
     responseObserver.onCompleted();
   }
 
@@ -119,17 +157,24 @@ public final class ChannelzService extends ChannelzGrpc.ChannelzImplBase {
   @Override
   public void getSocket(
       GetSocketRequest request, StreamObserver<GetSocketResponse> responseObserver) {
-    Instrumented<SocketStats> s = channelz.getSocket(request.getSocketId());
+    InternalInstrumented<SocketStats> s = channelz.getSocket(request.getSocketId());
     if (s == null) {
-      responseObserver.onError(Status.NOT_FOUND.asRuntimeException());
+      responseObserver.onError(
+          Status.NOT_FOUND.withDescription("Can't find socket " + request.getSocketId())
+              .asRuntimeException());
       return;
     }
 
-    responseObserver.onNext(
-          GetSocketResponse
-              .newBuilder()
-              .setSocket(ChannelzProtoUtil.toSocket(s))
-              .build());
+    GetSocketResponse resp;
+    try {
+      resp =
+          GetSocketResponse.newBuilder().setSocket(ChannelzProtoUtil.toSocket(s)).build();
+    } catch (StatusRuntimeException e) {
+      responseObserver.onError(e);
+      return;
+    }
+
+    responseObserver.onNext(resp);
     responseObserver.onCompleted();
   }
 
@@ -139,11 +184,21 @@ public final class ChannelzService extends ChannelzGrpc.ChannelzImplBase {
     ServerSocketsList serverSockets
         = channelz.getServerSockets(request.getServerId(), request.getStartSocketId(), maxPageSize);
     if (serverSockets == null) {
-      responseObserver.onError(Status.NOT_FOUND.asRuntimeException());
+      responseObserver.onError(
+          Status.NOT_FOUND.withDescription("Can't find server " + request.getServerId())
+              .asRuntimeException());
       return;
     }
 
-    responseObserver.onNext(ChannelzProtoUtil.toGetServerSocketsResponse(serverSockets));
+    GetServerSocketsResponse resp;
+    try {
+      resp = ChannelzProtoUtil.toGetServerSocketsResponse(serverSockets);
+    } catch (StatusRuntimeException e) {
+      responseObserver.onError(e);
+      return;
+    }
+
+    responseObserver.onNext(resp);
     responseObserver.onCompleted();
   }
 }

@@ -39,6 +39,7 @@ import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.ssl.SupportedCipherSuiteFilter;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
@@ -91,13 +92,14 @@ public class Http2OkHttpTest extends AbstractInteropTest {
   }
 
   private OkHttpChannelBuilder createChannelBuilder() {
-    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("localhost", getPort())
+    int port = ((InetSocketAddress) getListenAddress()).getPort();
+    OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("localhost", port)
         .maxInboundMessageSize(AbstractInteropTest.MAX_MESSAGE_SIZE)
         .connectionSpec(new ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
             .cipherSuites(TestUtils.preferredTestCiphers().toArray(new String[0]))
             .build())
         .overrideAuthority(GrpcUtil.authorityFromHostAndPort(
-            TestUtils.TEST_SERVER_HOST, getPort()));
+            TestUtils.TEST_SERVER_HOST, port));
     io.grpc.internal.TestingAccessor.setStatsImplementation(
         builder, createClientCensusStatsModule());
     try {
@@ -115,8 +117,7 @@ public class Http2OkHttpTest extends AbstractInteropTest {
         Messages.ResponseParameters.newBuilder()
         .setSize(1);
     Messages.StreamingOutputCallRequest.Builder requestBuilder =
-        Messages.StreamingOutputCallRequest.newBuilder()
-            .setResponseType(Messages.PayloadType.COMPRESSABLE);
+        Messages.StreamingOutputCallRequest.newBuilder();
     for (int i = 0; i < 1000; i++) {
       requestBuilder.addResponseParameters(responseParameters);
     }
@@ -136,9 +137,10 @@ public class Http2OkHttpTest extends AbstractInteropTest {
 
   @Test
   public void wrongHostNameFailHostnameVerification() throws Exception {
+    int port = ((InetSocketAddress) getListenAddress()).getPort();
     ManagedChannel channel = createChannelBuilder()
         .overrideAuthority(GrpcUtil.authorityFromHostAndPort(
-            BAD_HOSTNAME, getPort()))
+            BAD_HOSTNAME, port))
         .build();
     TestServiceGrpc.TestServiceBlockingStub blockingStub =
         TestServiceGrpc.newBlockingStub(channel);
@@ -158,9 +160,10 @@ public class Http2OkHttpTest extends AbstractInteropTest {
 
   @Test
   public void hostnameVerifierWithBadHostname() throws Exception {
+    int port = ((InetSocketAddress) getListenAddress()).getPort();
     ManagedChannel channel = createChannelBuilder()
         .overrideAuthority(GrpcUtil.authorityFromHostAndPort(
-            BAD_HOSTNAME, getPort()))
+            BAD_HOSTNAME, port))
         .hostnameVerifier(new HostnameVerifier() {
           @Override
           public boolean verify(String hostname, SSLSession session) {
@@ -178,9 +181,10 @@ public class Http2OkHttpTest extends AbstractInteropTest {
 
   @Test
   public void hostnameVerifierWithCorrectHostname() throws Exception {
+    int port = ((InetSocketAddress) getListenAddress()).getPort();
     ManagedChannel channel = createChannelBuilder()
         .overrideAuthority(GrpcUtil.authorityFromHostAndPort(
-            TestUtils.TEST_SERVER_HOST, getPort()))
+            TestUtils.TEST_SERVER_HOST, port))
         .hostnameVerifier(new HostnameVerifier() {
           @Override
           public boolean verify(String hostname, SSLSession session) {

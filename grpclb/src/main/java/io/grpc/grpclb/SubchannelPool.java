@@ -20,7 +20,7 @@ import io.grpc.Attributes;
 import io.grpc.EquivalentAddressGroup;
 import io.grpc.LoadBalancer.Helper;
 import io.grpc.LoadBalancer.Subchannel;
-import java.util.concurrent.ScheduledExecutorService;
+import io.grpc.LoadBalancer.SubchannelStateListener;
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
@@ -31,20 +31,33 @@ import javax.annotation.concurrent.NotThreadSafe;
 @NotThreadSafe
 interface SubchannelPool {
   /**
-   * Pass essential utilities.
+   * Pass essential utilities and the balancer that's using this pool.
    */
-  void init(Helper helper, ScheduledExecutorService timerService);
+  void init(Helper helper);
 
   /**
    * Takes a {@link Subchannel} from the pool for the given {@code eag} if there is one available.
    * Otherwise, creates and returns a new {@code Subchannel} with the given {@code eag} and {@code
    * defaultAttributes}.
+   *
+   * <p>There can be at most one Subchannel for each EAG.  After a Subchannel is taken out of the
+   * pool, it must be returned before the same EAG can be used to call this method.
+   *
+   * @param defaultAttributes the attributes used to create the Subchannel.  Not used if a pooled
+   *        subchannel is returned.
+   * @param stateListener receives state updates from now on
    */
-  Subchannel takeOrCreateSubchannel(EquivalentAddressGroup eag, Attributes defaultAttributes);
+  Subchannel takeOrCreateSubchannel(
+      EquivalentAddressGroup eag, Attributes defaultAttributes,
+      SubchannelStateListener stateListener);
 
   /**
    * Puts a {@link Subchannel} back to the pool.  From this point the Subchannel is owned by the
-   * pool.
+   * pool, and the caller should stop referencing to this Subchannel.  The {@link
+   * SubchannelStateListener} will not receive any more updates.
+   *
+   * <p>Can only be called with a Subchannel created by this pool.  Must not be called if the
+   * Subchannel is already in the pool.
    */
   void returnSubchannel(Subchannel subchannel);
 

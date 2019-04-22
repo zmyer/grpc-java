@@ -36,7 +36,7 @@ public final class CronetCallOptions {
    */
   @Deprecated
   public static final CallOptions.Key<Object> CRONET_ANNOTATION_KEY =
-      CallOptions.Key.of("cronet-annotation", null);
+      CallOptions.Key.create("cronet-annotation");
 
   /**
    * Returns a copy of {@code callOptions} with {@code annotation} included as one of the Cronet
@@ -51,9 +51,9 @@ public final class CronetCallOptions {
     Collection<Object> existingAnnotations = callOptions.getOption(CRONET_ANNOTATIONS_KEY);
     ArrayList<Object> newAnnotations;
     if (existingAnnotations == null) {
-      newAnnotations = new ArrayList<Object>();
+      newAnnotations = new ArrayList<>();
     } else {
-      newAnnotations = new ArrayList<Object>(existingAnnotations);
+      newAnnotations = new ArrayList<>(existingAnnotations);
     }
     newAnnotations.add(annotation);
     return callOptions.withOption(
@@ -61,5 +61,5 @@ public final class CronetCallOptions {
   }
 
   static final CallOptions.Key<Collection<Object>> CRONET_ANNOTATIONS_KEY =
-      CallOptions.Key.of("cronet-annotations", null);
+      CallOptions.Key.create("cronet-annotations");
 }

@@ -40,7 +40,7 @@ import javax.annotation.concurrent.ThreadSafe;
 @ExperimentalApi("https://github.com/grpc/grpc-java/issues/933")
 public final class MutableHandlerRegistry extends HandlerRegistry {
   private final ConcurrentMap<String, ServerServiceDefinition> services
-      = new ConcurrentHashMap<String, ServerServiceDefinition>();
+      = new ConcurrentHashMap<>();
 
   /**
    * Registers a service.
@@ -79,7 +79,7 @@ public final class MutableHandlerRegistry extends HandlerRegistry {
   @Override
   @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2222")
   public List<ServerServiceDefinition> getServices() {
-    return Collections.unmodifiableList(new ArrayList<ServerServiceDefinition>(services.values()));
+    return Collections.unmodifiableList(new ArrayList<>(services.values()));
   }
 
   /**

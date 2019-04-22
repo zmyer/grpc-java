@@ -17,22 +17,26 @@
 package io.grpc.grpclb;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Stopwatch;
 import io.grpc.Attributes;
-import io.grpc.ConnectivityStateInfo;
+import io.grpc.ChannelLogger;
+import io.grpc.ChannelLogger.ChannelLogLevel;
 import io.grpc.EquivalentAddressGroup;
 import io.grpc.LoadBalancer;
 import io.grpc.Status;
-import io.grpc.grpclb.GrpclbConstants.LbPolicy;
+import io.grpc.grpclb.GrpclbState.Mode;
+import io.grpc.internal.BackoffPolicy;
 import io.grpc.internal.GrpcAttributes;
-import io.grpc.internal.LogId;
-import io.grpc.internal.ObjectPool;
-import io.grpc.internal.WithLogId;
+import io.grpc.internal.ServiceConfigUtil;
+import io.grpc.internal.ServiceConfigUtil.LbConfig;
+import io.grpc.internal.TimeProvider;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.annotation.Nullable;
@@ -43,70 +47,45 @@ import javax.annotation.Nullable;
  * <p>Optionally, when requested by the naming system, will delegate the work to a local pick-first
  * or round-robin balancer.
  */
-class GrpclbLoadBalancer extends LoadBalancer implements WithLogId {
+class GrpclbLoadBalancer extends LoadBalancer {
+  private static final Mode DEFAULT_MODE = Mode.ROUND_ROBIN;
   private static final Logger logger = Logger.getLogger(GrpclbLoadBalancer.class.getName());
 
-  private final LogId logId = LogId.allocate(getClass().getName());
-
   private final Helper helper;
-  private final SubchannelPool subchannelPool;
-  private final Factory pickFirstBalancerFactory;
-  private final Factory roundRobinBalancerFactory;
-  private final ObjectPool<ScheduledExecutorService> timerServicePool;
   private final TimeProvider time;
+  private final Stopwatch stopwatch;
+  private final SubchannelPool subchannelPool;
+  private final BackoffPolicy.Provider backoffPolicyProvider;
+
+  private Mode mode = Mode.ROUND_ROBIN;
 
   // All mutable states in this class are mutated ONLY from Channel Executor
-
-  private ScheduledExecutorService timerService;
-
-  // If not null, all work is delegated to it.
-  @Nullable
-  private LoadBalancer delegate;
-  private LbPolicy lbPolicy;
-
-  // Null if lbPolicy != GRPCLB
   @Nullable
   private GrpclbState grpclbState;
 
-  GrpclbLoadBalancer(Helper helper, SubchannelPool subchannelPool, Factory pickFirstBalancerFactory,
-      Factory roundRobinBalancerFactory, ObjectPool<ScheduledExecutorService> timerServicePool,
-      TimeProvider time) {
+  GrpclbLoadBalancer(
+      Helper helper,
+      SubchannelPool subchannelPool,
+      TimeProvider time,
+      Stopwatch stopwatch,
+      BackoffPolicy.Provider backoffPolicyProvider) {
     this.helper = checkNotNull(helper, "helper");
-    this.pickFirstBalancerFactory =
-        checkNotNull(pickFirstBalancerFactory, "pickFirstBalancerFactory");
-    this.roundRobinBalancerFactory =
-        checkNotNull(roundRobinBalancerFactory, "roundRobinBalancerFactory");
-    this.timerServicePool = checkNotNull(timerServicePool, "timerServicePool");
-    this.timerService = checkNotNull(timerServicePool.getObject(), "timerService");
     this.time = checkNotNull(time, "time provider");
+    this.stopwatch = checkNotNull(stopwatch, "stopwatch");
+    this.backoffPolicyProvider = checkNotNull(backoffPolicyProvider, "backoffPolicyProvider");
     this.subchannelPool = checkNotNull(subchannelPool, "subchannelPool");
-    this.subchannelPool.init(helper, timerService);
-    setLbPolicy(LbPolicy.GRPCLB);
+    this.subchannelPool.init(helper);
+    recreateStates();
+    checkNotNull(grpclbState, "grpclbState");
   }
 
   @Override
-  public LogId getLogId() {
-    return logId;
-  }
-
-  @Override
-  public void handleSubchannelState(Subchannel subchannel, ConnectivityStateInfo newState) {
-    if (delegate != null) {
-      delegate.handleSubchannelState(subchannel, newState);
-      return;
-    }
-    if (grpclbState != null) {
-      grpclbState.handleSubchannelState(subchannel, newState);
-    }
-  }
-
-  @Override
-  public void handleResolvedAddressGroups(
-      List<EquivalentAddressGroup> updatedServers, Attributes attributes) {
-    LbPolicy newLbPolicy = attributes.get(GrpclbConstants.ATTR_LB_POLICY);
+  public void handleResolvedAddresses(ResolvedAddresses resolvedAddresses) {
+    List<EquivalentAddressGroup> updatedServers = resolvedAddresses.getAddresses();
+    Attributes attributes = resolvedAddresses.getAttributes();
     // LB addresses and backend addresses are treated separately
-    List<LbAddressGroup> newLbAddressGroups = new ArrayList<LbAddressGroup>();
-    List<EquivalentAddressGroup> newBackendServers = new ArrayList<EquivalentAddressGroup>();
+    List<LbAddressGroup> newLbAddressGroups = new ArrayList<>();
+    List<EquivalentAddressGroup> newBackendServers = new ArrayList<>();
     for (EquivalentAddressGroup server : updatedServers) {
       String lbAddrAuthority = server.getAttributes().get(GrpcAttributes.ATTR_LB_ADDR_AUTHORITY);
       if (lbAddrAuthority != null) {
@@ -118,82 +97,71 @@ class GrpclbLoadBalancer extends LoadBalancer implements WithLogId {
 
     newLbAddressGroups = Collections.unmodifiableList(newLbAddressGroups);
     newBackendServers = Collections.unmodifiableList(newBackendServers);
-
-    if (!newLbAddressGroups.isEmpty()) {
-      if (newLbPolicy != LbPolicy.GRPCLB) {
-        newLbPolicy = LbPolicy.GRPCLB;
-        logger.log(
-            Level.FINE, "[{0}] Switching to GRPCLB because there is at least one balancer", logId);
-      }
+    Map<String, ?> rawLbConfigValue = attributes.get(ATTR_LOAD_BALANCING_CONFIG);
+    Mode newMode = retrieveModeFromLbConfig(rawLbConfigValue, helper.getChannelLogger());
+    if (!mode.equals(newMode)) {
+      mode = newMode;
+      helper.getChannelLogger().log(ChannelLogLevel.INFO, "Mode: " + newMode);
+      recreateStates();
     }
-    if (newLbPolicy == null) {
-      logger.log(Level.FINE, "[{0}] New config missing policy. Using PICK_FIRST", logId);
-      newLbPolicy = LbPolicy.PICK_FIRST;
-    }
-
-    // Switch LB policy if requested
-    setLbPolicy(newLbPolicy);
-
-    // Consume the new addresses
-    switch (lbPolicy) {
-      case PICK_FIRST:
-      case ROUND_ROBIN:
-        checkNotNull(delegate, "delegate should not be null. newLbPolicy=" + newLbPolicy);
-        delegate.handleResolvedAddressGroups(newBackendServers, attributes);
-        break;
-      case GRPCLB:
-        grpclbState.handleAddresses(newLbAddressGroups, newBackendServers);
-        break;
-      default:
-        // Do nothing
-    }
+    grpclbState.handleAddresses(newLbAddressGroups, newBackendServers);
   }
 
-  private void setLbPolicy(LbPolicy newLbPolicy) {
-    if (newLbPolicy != lbPolicy) {
-      resetStates();
-      switch (newLbPolicy) {
-        case PICK_FIRST:
-          delegate = checkNotNull(pickFirstBalancerFactory.newLoadBalancer(helper),
-              "pickFirstBalancerFactory.newLoadBalancer()");
-          break;
-        case ROUND_ROBIN:
-          delegate = checkNotNull(roundRobinBalancerFactory.newLoadBalancer(helper),
-              "roundRobinBalancerFactory.newLoadBalancer()");
-          break;
-        case GRPCLB:
-          grpclbState =
-              new GrpclbState(helper, subchannelPool, time, timerService, logId);
-          break;
-        default:
-          // Do nohting
+  @VisibleForTesting
+  static Mode retrieveModeFromLbConfig(
+      @Nullable Map<String, ?> rawLbConfigValue, ChannelLogger channelLogger) {
+    try {
+      if (rawLbConfigValue == null) {
+        return DEFAULT_MODE;
       }
+      List<?> rawChildPolicies = getList(rawLbConfigValue, "childPolicy");
+      if (rawChildPolicies == null) {
+        return DEFAULT_MODE;
+      }
+      List<LbConfig> childPolicies =
+          ServiceConfigUtil.unwrapLoadBalancingConfigList(checkObjectList(rawChildPolicies));
+      for (LbConfig childPolicy : childPolicies) {
+        String childPolicyName = childPolicy.getPolicyName();
+        switch (childPolicyName) {
+          case "round_robin":
+            return Mode.ROUND_ROBIN;
+          case "pick_first":
+            return Mode.PICK_FIRST;
+          default:
+            channelLogger.log(
+                ChannelLogLevel.DEBUG,
+                "grpclb ignoring unsupported child policy " + childPolicyName);
+        }
+      }
+    } catch (RuntimeException e) {
+      channelLogger.log(ChannelLogLevel.WARNING, "Bad grpclb config, using " + DEFAULT_MODE);
+      logger.log(
+          Level.WARNING, "Bad grpclb config: " + rawLbConfigValue + ", using " + DEFAULT_MODE, e);
     }
-    lbPolicy = newLbPolicy;
+    return DEFAULT_MODE;
   }
 
   private void resetStates() {
-    if (delegate != null) {
-      delegate.shutdown();
-      delegate = null;
-    }
     if (grpclbState != null) {
       grpclbState.shutdown();
       grpclbState = null;
     }
   }
 
+  private void recreateStates() {
+    resetStates();
+    checkState(grpclbState == null, "Should've been cleared");
+    grpclbState = new GrpclbState(mode, helper, subchannelPool, time, stopwatch,
+        backoffPolicyProvider);
+  }
+
   @Override
   public void shutdown() {
     resetStates();
-    timerService = timerServicePool.returnObject(timerService);
   }
 
   @Override
   public void handleNameResolutionError(Status error) {
-    if (delegate != null) {
-      delegate.handleNameResolutionError(error);
-    }
     if (grpclbState != null) {
       grpclbState.propagateError(error);
     }
@@ -205,13 +173,37 @@ class GrpclbLoadBalancer extends LoadBalancer implements WithLogId {
     return grpclbState;
   }
 
-  @VisibleForTesting
-  LoadBalancer getDelegate() {
-    return delegate;
+  // TODO(carl-mastrangelo): delete getList and checkObjectList once apply is complete for SVCCFG.
+  /**
+   * Gets a list from an object for the given key.  Copy of
+   * {@link io.grpc.internal.ServiceConfigUtil#getList}.
+   */
+  @SuppressWarnings("unchecked")
+  @Nullable
+  private static List<?> getList(Map<String, ?> obj, String key) {
+    assert key != null;
+    if (!obj.containsKey(key)) {
+      return null;
+    }
+    Object value = obj.get(key);
+    if (!(value instanceof List)) {
+      throw new ClassCastException(
+          String.format("value '%s' for key '%s' in %s is not List", value, key, obj));
+    }
+    return (List<?>) value;
   }
 
-  @VisibleForTesting
-  LbPolicy getLbPolicy() {
-    return lbPolicy;
+  /**
+   * Copy of {@link io.grpc.internal.ServiceConfigUtil#checkObjectList}.
+   */
+  @SuppressWarnings("unchecked")
+  private static List<Map<String, ?>> checkObjectList(List<?> rawList) {
+    for (int i = 0; i < rawList.size(); i++) {
+      if (!(rawList.get(i) instanceof Map)) {
+        throw new ClassCastException(
+            String.format("value %s for idx %d in %s is not object", rawList.get(i), i, rawList));
+      }
+    }
+    return (List<Map<String, ?>>) rawList;
   }
 }

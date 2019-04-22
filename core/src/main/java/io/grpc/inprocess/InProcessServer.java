@@ -19,14 +19,15 @@ package io.grpc.inprocess;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.common.base.MoreObjects;
+import io.grpc.InternalChannelz.SocketStats;
+import io.grpc.InternalInstrumented;
 import io.grpc.ServerStreamTracer;
-import io.grpc.internal.Channelz.SocketStats;
-import io.grpc.internal.Instrumented;
 import io.grpc.internal.InternalServer;
 import io.grpc.internal.ObjectPool;
 import io.grpc.internal.ServerListener;
 import io.grpc.internal.ServerTransportListener;
 import java.io.IOException;
+import java.net.SocketAddress;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -37,13 +38,14 @@ import javax.annotation.concurrent.ThreadSafe;
 @ThreadSafe
 final class InProcessServer implements InternalServer {
   private static final ConcurrentMap<String, InProcessServer> registry
-      = new ConcurrentHashMap<String, InProcessServer>();
+      = new ConcurrentHashMap<>();
 
   static InProcessServer findServer(String name) {
     return registry.get(name);
   }
 
   private final String name;
+  private final int maxInboundMetadataSize;
   private final List<ServerStreamTracer.Factory> streamTracerFactories;
   private ServerListener listener;
   private boolean shutdown;
@@ -56,10 +58,11 @@ final class InProcessServer implements InternalServer {
   private ScheduledExecutorService scheduler;
 
   InProcessServer(
-      String name, ObjectPool<ScheduledExecutorService> schedulerPool,
-      List<ServerStreamTracer.Factory> streamTracerFactories) {
-    this.name = name;
-    this.schedulerPool = schedulerPool;
+      InProcessServerBuilder builder,
+      List<? extends ServerStreamTracer.Factory> streamTracerFactories) {
+    this.name = builder.name;
+    this.schedulerPool = builder.schedulerPool;
+    this.maxInboundMetadataSize = builder.maxInboundMetadataSize;
     this.streamTracerFactories =
         Collections.unmodifiableList(checkNotNull(streamTracerFactories, "streamTracerFactories"));
   }
@@ -75,13 +78,13 @@ final class InProcessServer implements InternalServer {
   }
 
   @Override
-  public int getPort() {
-    return -1;
+  public SocketAddress getListenSocketAddress() {
+    return new InProcessSocketAddress(name);
   }
 
   @Override
-  public List<Instrumented<SocketStats>> getListenSockets() {
-    return Collections.emptyList();
+  public InternalInstrumented<SocketStats> getListenSocketStats() {
+    return null;
   }
 
   @Override
@@ -110,6 +113,10 @@ final class InProcessServer implements InternalServer {
 
   ObjectPool<ScheduledExecutorService> getScheduledExecutorServicePool() {
     return schedulerPool;
+  }
+
+  int getMaxInboundMetadataSize() {
+    return maxInboundMetadataSize;
   }
 
   List<ServerStreamTracer.Factory> getStreamTracerFactories() {

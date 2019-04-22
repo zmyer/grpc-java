@@ -17,20 +17,18 @@
 package io.grpc.okhttp;
 
 import io.grpc.ServerStreamTracer;
+import io.grpc.internal.AbstractTransportTest;
 import io.grpc.internal.AccessProtectedHack;
 import io.grpc.internal.ClientTransportFactory;
 import io.grpc.internal.FakeClock;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.InternalServer;
 import io.grpc.internal.ManagedClientTransport;
-import io.grpc.internal.TransportTracer;
-import io.grpc.internal.testing.AbstractTransportTest;
 import io.grpc.netty.NettyServerBuilder;
 import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.junit.After;
-import org.junit.Ignore;
-import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
@@ -38,19 +36,14 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class OkHttpTransportTest extends AbstractTransportTest {
   private final FakeClock fakeClock = new FakeClock();
-  private final TransportTracer.Factory fakeClockTransportTracer = new TransportTracer.Factory(
-      new TransportTracer.TimeProvider() {
-        @Override
-        public long currentTimeMillis() {
-          return fakeClock.currentTimeMillis();
-        }
-      });
-  private ClientTransportFactory clientFactory = OkHttpChannelBuilder
-      // Although specified here, address is ignored because we never call build.
-      .forAddress("localhost", 0)
-      .negotiationType(NegotiationType.PLAINTEXT)
-      .setTransportTracerFactory(fakeClockTransportTracer)
-      .buildTransportFactory();
+  private ClientTransportFactory clientFactory =
+      OkHttpChannelBuilder
+          // Although specified here, address is ignored because we never call build.
+          .forAddress("localhost", 0)
+          .usePlaintext()
+          .setTransportTracerFactory(fakeClockTransportTracer)
+          .maxInboundMetadataSize(GrpcUtil.DEFAULT_MAX_HEADER_LIST_SIZE)
+          .buildTransportFactory();
 
   @After
   public void releaseClientFactory() {
@@ -58,22 +51,22 @@ public class OkHttpTransportTest extends AbstractTransportTest {
   }
 
   @Override
-  protected InternalServer newServer(List<ServerStreamTracer.Factory> streamTracerFactories) {
+  protected List<? extends InternalServer> newServer(
+      List<ServerStreamTracer.Factory> streamTracerFactories) {
     return AccessProtectedHack.serverBuilderBuildTransportServer(
         NettyServerBuilder
-          .forPort(0)
-          .flowControlWindow(65 * 1024),
+            .forPort(0)
+            .flowControlWindow(65 * 1024),
         streamTracerFactories,
         fakeClockTransportTracer);
   }
 
   @Override
-  protected InternalServer newServer(
-      InternalServer server, List<ServerStreamTracer.Factory> streamTracerFactories) {
-    int port = server.getPort();
+  protected List<? extends InternalServer> newServer(
+      int port, List<ServerStreamTracer.Factory> streamTracerFactories) {
     return AccessProtectedHack.serverBuilderBuildTransportServer(
         NettyServerBuilder
-            .forPort(port)
+            .forAddress(new InetSocketAddress(port))
             .flowControlWindow(65 * 1024),
         streamTracerFactories,
         fakeClockTransportTracer);
@@ -81,17 +74,18 @@ public class OkHttpTransportTest extends AbstractTransportTest {
 
   @Override
   protected String testAuthority(InternalServer server) {
-    return "thebestauthority:" + server.getPort();
+    return "thebestauthority:" + server.getListenSocketAddress();
   }
 
   @Override
   protected ManagedClientTransport newClientTransport(InternalServer server) {
-    int port = server.getPort();
+    int port = ((InetSocketAddress) server.getListenSocketAddress()).getPort();
     return clientFactory.newClientTransport(
         new InetSocketAddress("localhost", port),
-        testAuthority(server),
-        null /* agent */,
-        null /* proxy */);
+        new ClientTransportFactory.ClientTransportOptions()
+          .setAuthority(testAuthority(server))
+          .setEagAttributes(eagAttrs()),
+        transportLogger());
   }
 
   @Override
@@ -100,18 +94,19 @@ public class OkHttpTransportTest extends AbstractTransportTest {
   }
 
   @Override
-  protected long currentTimeMillis() {
-    return fakeClock.currentTimeMillis();
+  protected long fakeCurrentTimeNanos() {
+    return fakeClock.getTicker().read();
   }
-
-  // TODO(ejona): Flaky/Broken
-  @Test
-  @Ignore
-  @Override
-  public void flowControlPushBack() {}
 
   @Override
   protected boolean haveTransportTracer() {
     return true;
+  }
+
+  @Override
+  @org.junit.Test
+  @org.junit.Ignore
+  public void clientChecksInboundMetadataSize_trailer() {
+    // Server-side is flaky due to https://github.com/netty/netty/pull/8332
   }
 }

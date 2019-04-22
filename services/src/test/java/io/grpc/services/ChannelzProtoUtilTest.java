@@ -17,7 +17,7 @@
 package io.grpc.services;
 
 import static com.google.common.truth.Truth.assertThat;
-import static io.grpc.internal.Channelz.id;
+import static io.grpc.InternalChannelz.id;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -32,6 +32,18 @@ import com.google.protobuf.Message;
 import com.google.protobuf.util.Durations;
 import com.google.protobuf.util.Timestamps;
 import io.grpc.ConnectivityState;
+import io.grpc.InternalChannelz;
+import io.grpc.InternalChannelz.ChannelStats;
+import io.grpc.InternalChannelz.ChannelTrace.Event;
+import io.grpc.InternalChannelz.ChannelTrace.Event.Severity;
+import io.grpc.InternalChannelz.RootChannelList;
+import io.grpc.InternalChannelz.ServerList;
+import io.grpc.InternalChannelz.ServerSocketsList;
+import io.grpc.InternalChannelz.ServerStats;
+import io.grpc.InternalChannelz.SocketOptions;
+import io.grpc.InternalChannelz.SocketStats;
+import io.grpc.InternalInstrumented;
+import io.grpc.InternalWithLogId;
 import io.grpc.channelz.v1.Address;
 import io.grpc.channelz.v1.Address.OtherAddress;
 import io.grpc.channelz.v1.Address.TcpIpAddress;
@@ -41,6 +53,8 @@ import io.grpc.channelz.v1.ChannelConnectivityState;
 import io.grpc.channelz.v1.ChannelConnectivityState.State;
 import io.grpc.channelz.v1.ChannelData;
 import io.grpc.channelz.v1.ChannelRef;
+import io.grpc.channelz.v1.ChannelTrace;
+import io.grpc.channelz.v1.ChannelTraceEvent;
 import io.grpc.channelz.v1.GetChannelRequest;
 import io.grpc.channelz.v1.GetServerSocketsResponse;
 import io.grpc.channelz.v1.GetServersResponse;
@@ -60,16 +74,6 @@ import io.grpc.channelz.v1.SocketOptionTimeout;
 import io.grpc.channelz.v1.SocketRef;
 import io.grpc.channelz.v1.Subchannel;
 import io.grpc.channelz.v1.SubchannelRef;
-import io.grpc.internal.Channelz;
-import io.grpc.internal.Channelz.ChannelStats;
-import io.grpc.internal.Channelz.RootChannelList;
-import io.grpc.internal.Channelz.ServerList;
-import io.grpc.internal.Channelz.ServerSocketsList;
-import io.grpc.internal.Channelz.ServerStats;
-import io.grpc.internal.Channelz.SocketOptions;
-import io.grpc.internal.Channelz.SocketStats;
-import io.grpc.internal.Instrumented;
-import io.grpc.internal.WithLogId;
 import io.grpc.services.ChannelzTestHelper.TestChannel;
 import io.grpc.services.ChannelzTestHelper.TestListenSocket;
 import io.grpc.services.ChannelzTestHelper.TestServer;
@@ -79,6 +83,7 @@ import java.net.Inet4Address;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.security.cert.Certificate;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map.Entry;
 import org.junit.Test;
@@ -101,7 +106,7 @@ public final class ChannelzProtoUtilTest {
       .setCallsStarted(1)
       .setCallsSucceeded(2)
       .setCallsFailed(3)
-      .setLastCallStartedTimestamp(Timestamps.fromMillis(4))
+      .setLastCallStartedTimestamp(Timestamps.fromNanos(4))
       .build();
   private final Channel channelProto = Channel
       .newBuilder()
@@ -122,7 +127,7 @@ public final class ChannelzProtoUtilTest {
       .setCallsStarted(1)
       .setCallsSucceeded(2)
       .setCallsFailed(3)
-      .setLastCallStartedTimestamp(Timestamps.fromMillis(4))
+      .setLastCallStartedTimestamp(Timestamps.fromNanos(4))
       .build();
   private final Subchannel subchannelProto = Subchannel
         .newBuilder()
@@ -141,7 +146,7 @@ public final class ChannelzProtoUtilTest {
       .setCallsStarted(1)
       .setCallsSucceeded(2)
       .setCallsFailed(3)
-      .setLastCallStartedTimestamp(Timestamps.fromMillis(4))
+      .setLastCallStartedTimestamp(Timestamps.fromNanos(4))
       .build();
   private final Server serverProto = Server
       .newBuilder()
@@ -183,8 +188,8 @@ public final class ChannelzProtoUtilTest {
       .setValue("some-made-up-value")
       .build();
 
-  private final Channelz.TcpInfo channelzTcpInfo
-      = new Channelz.TcpInfo.Builder()
+  private final InternalChannelz.TcpInfo channelzTcpInfo
+      = new InternalChannelz.TcpInfo.Builder()
       .setState(70)
       .setCaState(71)
       .setRetransmits(72)
@@ -224,7 +229,7 @@ public final class ChannelzProtoUtilTest {
               SocketOptionTcpInfo.newBuilder()
                   .setTcpiState(70)
                   .setTcpiCaState(71)
-                  .setTcpiRetrans(72)
+                  .setTcpiRetransmits(72)
                   .setTcpiProbes(73)
                   .setTcpiBackoff(74)
                   .setTcpiOptions(75)
@@ -308,6 +313,12 @@ public final class ChannelzProtoUtilTest {
               .setIpAddress(ByteString.copyFrom(
                   ((InetSocketAddress) socket.remote).getAddress().getAddress()))
               .setPort(1000))
+      .build();
+
+  private final ChannelTrace channelTrace = ChannelTrace
+      .newBuilder()
+      .setNumEventsLogged(1234)
+      .setCreationTimestamp(Timestamps.fromNanos(1000))
       .build();
 
   @Test
@@ -429,8 +440,8 @@ public final class ChannelzProtoUtilTest {
     when(local.getEncoded()).thenReturn("localcert".getBytes(Charsets.UTF_8));
     when(remote.getEncoded()).thenReturn("remotecert".getBytes(Charsets.UTF_8));
 
-    socket.security = new Channelz.Security(
-        new Channelz.Tls("TLS_NULL_WITH_NULL_NULL", local, remote));
+    socket.security = new InternalChannelz.Security(
+        new InternalChannelz.Tls("TLS_NULL_WITH_NULL_NULL", local, remote));
     assertEquals(
         Security.newBuilder().setTls(
             Tls.newBuilder()
@@ -440,8 +451,8 @@ public final class ChannelzProtoUtilTest {
         .build(),
         ChannelzProtoUtil.toSocket(socket).getSecurity());
 
-    socket.security = new Channelz.Security(
-        new Channelz.Tls("TLS_NULL_WITH_NULL_NULL", /*localCert=*/ null, remote));
+    socket.security = new InternalChannelz.Security(
+        new InternalChannelz.Tls("TLS_NULL_WITH_NULL_NULL", /*localCert=*/ null, remote));
     assertEquals(
         Security.newBuilder().setTls(
             Tls.newBuilder()
@@ -450,8 +461,8 @@ public final class ChannelzProtoUtilTest {
         .build(),
         ChannelzProtoUtil.toSocket(socket).getSecurity());
 
-    socket.security = new Channelz.Security(
-        new Channelz.Tls("TLS_NULL_WITH_NULL_NULL", local, /*remoteCert=*/ null));
+    socket.security = new InternalChannelz.Security(
+        new InternalChannelz.Tls("TLS_NULL_WITH_NULL_NULL", local, /*remoteCert=*/ null));
     assertEquals(
         Security.newBuilder().setTls(
             Tls.newBuilder()
@@ -467,7 +478,8 @@ public final class ChannelzProtoUtilTest {
     Message contents = GetChannelRequest.newBuilder().setChannelId(1).build();
     Any packed = Any.pack(contents);
     socket.security
-        = new Channelz.Security(new Channelz.OtherSecurity("other_security", packed));
+        = new InternalChannelz.Security(
+            new InternalChannelz.OtherSecurity("other_security", packed));
     assertEquals(
         Security.newBuilder().setOther(
             OtherSecurity.newBuilder().setName("other_security").setValue(packed))
@@ -526,7 +538,7 @@ public final class ChannelzProtoUtilTest {
 
     // 1 listen socket
     server.serverStats = toBuilder(server.serverStats)
-        .setListenSockets(ImmutableList.<Instrumented<SocketStats>>of(listenSocket))
+        .addListenSockets(ImmutableList.<InternalInstrumented<SocketStats>>of(listenSocket))
         .build();
     assertEquals(
         serverProto
@@ -539,8 +551,8 @@ public final class ChannelzProtoUtilTest {
     TestListenSocket otherListenSocket = new TestListenSocket();
     SocketRef otherListenSocketRef = ChannelzProtoUtil.toSocketRef(otherListenSocket);
     server.serverStats = toBuilder(server.serverStats)
-        .setListenSockets(
-            ImmutableList.<Instrumented<SocketStats>>of(listenSocket, otherListenSocket))
+        .addListenSockets(
+            ImmutableList.<InternalInstrumented<SocketStats>>of(otherListenSocket))
         .build();
     assertEquals(
         serverProto
@@ -561,7 +573,7 @@ public final class ChannelzProtoUtilTest {
     assertEquals(channelProto, ChannelzProtoUtil.toChannel(channel));
 
     channel.stats = toBuilder(channel.stats)
-        .setSubchannels(ImmutableList.<WithLogId>of(subchannel))
+        .setSubchannels(ImmutableList.<InternalWithLogId>of(subchannel))
         .build();
 
     assertEquals(
@@ -573,7 +585,7 @@ public final class ChannelzProtoUtilTest {
 
     TestChannel otherSubchannel = new TestChannel();
     channel.stats = toBuilder(channel.stats)
-        .setSubchannels(ImmutableList.<WithLogId>of(subchannel, otherSubchannel))
+        .setSubchannels(ImmutableList.<InternalWithLogId>of(subchannel, otherSubchannel))
         .build();
     assertEquals(
         channelProto
@@ -599,7 +611,7 @@ public final class ChannelzProtoUtilTest {
   @Test
   public void toSubchannel_socketChildren() throws Exception {
     subchannel.stats = toBuilder(subchannel.stats)
-        .setSockets(ImmutableList.<WithLogId>of(socket))
+        .setSockets(ImmutableList.<InternalWithLogId>of(socket))
         .build();
 
     assertEquals(
@@ -610,7 +622,7 @@ public final class ChannelzProtoUtilTest {
 
     TestSocket otherSocket = new TestSocket();
     subchannel.stats = toBuilder(subchannel.stats)
-        .setSockets(ImmutableList.<WithLogId>of(socket, otherSocket))
+        .setSockets(ImmutableList.<InternalWithLogId>of(socket, otherSocket))
         .build();
     assertEquals(
         subchannelProto
@@ -625,7 +637,7 @@ public final class ChannelzProtoUtilTest {
   public void toSubchannel_subchannelChildren() throws Exception {
     TestChannel subchannel1 = new TestChannel();
     subchannel.stats = toBuilder(subchannel.stats)
-        .setSubchannels(ImmutableList.<WithLogId>of(subchannel1))
+        .setSubchannels(ImmutableList.<InternalWithLogId>of(subchannel1))
         .build();
     assertEquals(
         subchannelProto.toBuilder()
@@ -635,7 +647,7 @@ public final class ChannelzProtoUtilTest {
 
     TestChannel subchannel2 = new TestChannel();
     subchannel.stats = toBuilder(subchannel.stats)
-        .setSubchannels(ImmutableList.<WithLogId>of(subchannel1, subchannel2))
+        .setSubchannels(ImmutableList.<InternalWithLogId>of(subchannel1, subchannel2))
         .build();
     assertEquals(
         subchannelProto
@@ -652,7 +664,8 @@ public final class ChannelzProtoUtilTest {
     assertEquals(
         GetTopChannelsResponse.newBuilder().setEnd(true).build(),
         ChannelzProtoUtil.toGetTopChannelResponse(
-            new RootChannelList(Collections.<Instrumented<ChannelStats>>emptyList(), true)));
+            new RootChannelList(
+                Collections.<InternalInstrumented<ChannelStats>>emptyList(), true)));
 
     // 1 result, paginated
     assertEquals(
@@ -661,7 +674,8 @@ public final class ChannelzProtoUtilTest {
             .addChannel(channelProto)
             .build(),
         ChannelzProtoUtil.toGetTopChannelResponse(
-            new RootChannelList(ImmutableList.<Instrumented<ChannelStats>>of(channel), false)));
+            new RootChannelList(
+                ImmutableList.<InternalInstrumented<ChannelStats>>of(channel), false)));
 
     // 1 result, end
     assertEquals(
@@ -671,7 +685,8 @@ public final class ChannelzProtoUtilTest {
             .setEnd(true)
             .build(),
         ChannelzProtoUtil.toGetTopChannelResponse(
-            new RootChannelList(ImmutableList.<Instrumented<ChannelStats>>of(channel), true)));
+            new RootChannelList(
+                ImmutableList.<InternalInstrumented<ChannelStats>>of(channel), true)));
 
     // 2 results, end
     TestChannel channel2 = new TestChannel();
@@ -684,7 +699,7 @@ public final class ChannelzProtoUtilTest {
             .build(),
         ChannelzProtoUtil.toGetTopChannelResponse(
             new RootChannelList(
-                ImmutableList.<Instrumented<ChannelStats>>of(channel, channel2), true)));
+                ImmutableList.<InternalInstrumented<ChannelStats>>of(channel, channel2), true)));
   }
 
   @Test
@@ -693,7 +708,7 @@ public final class ChannelzProtoUtilTest {
     assertEquals(
         GetServersResponse.getDefaultInstance(),
         ChannelzProtoUtil.toGetServersResponse(
-            new ServerList(Collections.<Instrumented<ServerStats>>emptyList(), false)));
+            new ServerList(Collections.<InternalInstrumented<ServerStats>>emptyList(), false)));
 
     // 1 result, paginated
     assertEquals(
@@ -702,7 +717,7 @@ public final class ChannelzProtoUtilTest {
             .addServer(serverProto)
             .build(),
         ChannelzProtoUtil.toGetServersResponse(
-            new ServerList(ImmutableList.<Instrumented<ServerStats>>of(server), false)));
+            new ServerList(ImmutableList.<InternalInstrumented<ServerStats>>of(server), false)));
 
     // 1 result, end
     assertEquals(
@@ -712,7 +727,7 @@ public final class ChannelzProtoUtilTest {
             .setEnd(true)
             .build(),
         ChannelzProtoUtil.toGetServersResponse(
-            new ServerList(ImmutableList.<Instrumented<ServerStats>>of(server), true)));
+            new ServerList(ImmutableList.<InternalInstrumented<ServerStats>>of(server), true)));
 
     TestServer server2 = new TestServer();
     // 2 results, end
@@ -724,7 +739,8 @@ public final class ChannelzProtoUtilTest {
             .setEnd(true)
             .build(),
         ChannelzProtoUtil.toGetServersResponse(
-            new ServerList(ImmutableList.<Instrumented<ServerStats>>of(server, server2), true)));
+            new ServerList(
+                ImmutableList.<InternalInstrumented<ServerStats>>of(server, server2), true)));
   }
 
   @Test
@@ -733,7 +749,7 @@ public final class ChannelzProtoUtilTest {
     assertEquals(
         GetServerSocketsResponse.getDefaultInstance(),
         ChannelzProtoUtil.toGetServerSocketsResponse(
-            new ServerSocketsList(Collections.<WithLogId>emptyList(), false)));
+            new ServerSocketsList(Collections.<InternalWithLogId>emptyList(), false)));
 
     // 1 result, paginated
     assertEquals(
@@ -742,7 +758,7 @@ public final class ChannelzProtoUtilTest {
             .addSocketRef(socketRef)
             .build(),
         ChannelzProtoUtil.toGetServerSocketsResponse(
-            new ServerSocketsList(ImmutableList.<WithLogId>of(socket), false)));
+            new ServerSocketsList(ImmutableList.<InternalWithLogId>of(socket), false)));
 
     // 1 result, end
     assertEquals(
@@ -752,7 +768,7 @@ public final class ChannelzProtoUtilTest {
             .setEnd(true)
             .build(),
         ChannelzProtoUtil.toGetServerSocketsResponse(
-            new ServerSocketsList(ImmutableList.<WithLogId>of(socket), true)));
+            new ServerSocketsList(ImmutableList.<InternalWithLogId>of(socket), true)));
 
     TestSocket socket2 = new TestSocket();
     // 2 results, end
@@ -764,7 +780,7 @@ public final class ChannelzProtoUtilTest {
             .setEnd(true)
             .build(),
         ChannelzProtoUtil.toGetServerSocketsResponse(
-            new ServerSocketsList(ImmutableList.<WithLogId>of(socket, socket2), true)));
+            new ServerSocketsList(ImmutableList.<InternalWithLogId>of(socket, socket2), true)));
   }
 
   @Test
@@ -797,22 +813,22 @@ public final class ChannelzProtoUtilTest {
   public void toSocketOptionsList() {
     assertThat(
         ChannelzProtoUtil.toSocketOptionsList(
-            new Channelz.SocketOptions.Builder().build()))
+            new InternalChannelz.SocketOptions.Builder().build()))
         .isEmpty();
 
     assertThat(
         ChannelzProtoUtil.toSocketOptionsList(
-            new Channelz.SocketOptions.Builder().setSocketOptionLingerSeconds(10).build()))
+            new InternalChannelz.SocketOptions.Builder().setSocketOptionLingerSeconds(10).build()))
         .containsExactly(sockOptlinger10s);
 
     assertThat(
         ChannelzProtoUtil.toSocketOptionsList(
-            new Channelz.SocketOptions.Builder().setSocketOptionTimeoutMillis(200).build()))
+            new InternalChannelz.SocketOptions.Builder().setSocketOptionTimeoutMillis(200).build()))
         .containsExactly(sockOptTimeout200ms);
 
     assertThat(
         ChannelzProtoUtil.toSocketOptionsList(
-            new Channelz.SocketOptions
+            new InternalChannelz.SocketOptions
                 .Builder()
                 .addOption("SO_MADE_UP_OPTION", "some-made-up-value")
                 .build()))
@@ -825,11 +841,73 @@ public final class ChannelzProtoUtilTest {
         .build();
     assertThat(
         ChannelzProtoUtil.toSocketOptionsList(
-            new Channelz.SocketOptions.Builder()
+            new InternalChannelz.SocketOptions.Builder()
                 .addOption("SO_MADE_UP_OPTION", "some-made-up-value")
                 .addOption("SO_MADE_UP_OPTION2", "some-made-up-value2")
                 .build()))
         .containsExactly(sockOptAdditional, otherOption);
+  }
+
+  @Test
+  public void channelTrace_withoutEvents() {
+    ChannelStats stats = toBuilder(channel.stats)
+        .setChannelTrace(new InternalChannelz.ChannelTrace.Builder()
+            .setNumEventsLogged(1234)
+            .setCreationTimeNanos(1000)
+            .build())
+        .build();
+
+    ChannelData protoStats = channelData.toBuilder().setTrace(channelTrace).build();
+    assertEquals(ChannelzProtoUtil.extractChannelData(stats), protoStats);
+  }
+
+  @Test
+  public void channelTrace_withEvents() {
+    Event event1 = new Event.Builder()
+        .setDescription("event1")
+        .setSeverity(Severity.CT_ERROR)
+        .setTimestampNanos(12)
+        .setSubchannelRef(subchannel)
+        .build();
+    Event event2 = new Event.Builder()
+        .setDescription("event2")
+        .setTimestampNanos(34)
+        .setSeverity(Severity.CT_INFO)
+        .setChannelRef(channel)
+        .build();
+
+    ChannelStats stats =
+        toBuilder(channel.stats)
+            .setChannelTrace(
+                new InternalChannelz.ChannelTrace.Builder()
+                    .setNumEventsLogged(1234)
+                    .setCreationTimeNanos(1000)
+                    .setEvents(Arrays.asList(event1, event2))
+                    .build())
+            .build();
+
+    ChannelTraceEvent protoEvent1 = ChannelTraceEvent
+        .newBuilder()
+        .setDescription("event1")
+        .setTimestamp(Timestamps.fromNanos(12))
+        .setSeverity(ChannelTraceEvent.Severity.CT_ERROR)
+        .setSubchannelRef(subchannelRef)
+        .build();
+    ChannelTraceEvent protoEvent2 = ChannelTraceEvent
+        .newBuilder()
+        .setDescription("event2")
+        .setTimestamp(Timestamps.fromNanos(34))
+        .setSeverity(ChannelTraceEvent.Severity.CT_INFO)
+        .setChannelRef(channelRef)
+        .build();
+    ChannelData protoStats = channelData
+        .toBuilder()
+        .setTrace(channelTrace
+            .toBuilder()
+            .addAllEvents(Arrays.asList(protoEvent1, protoEvent2))
+            .build())
+        .build();
+    assertEquals(ChannelzProtoUtil.extractChannelData(stats), protoStats);
   }
 
   private static ChannelStats.Builder toBuilder(ChannelStats stats) {
@@ -839,7 +917,7 @@ public final class ChannelzProtoUtilTest {
         .setCallsStarted(stats.callsStarted)
         .setCallsSucceeded(stats.callsSucceeded)
         .setCallsFailed(stats.callsFailed)
-        .setLastCallStartedMillis(stats.lastCallStartedMillis);
+        .setLastCallStartedNanos(stats.lastCallStartedNanos);
     if (!stats.subchannels.isEmpty()) {
       builder.setSubchannels(stats.subchannels);
     }
@@ -865,7 +943,7 @@ public final class ChannelzProtoUtilTest {
         .setCallsStarted(stats.callsStarted)
         .setCallsSucceeded(stats.callsSucceeded)
         .setCallsFailed(stats.callsFailed)
-        .setLastCallStartedMillis(stats.lastCallStartedMillis)
-        .setListenSockets(stats.listenSockets);
+        .setLastCallStartedNanos(stats.lastCallStartedNanos)
+        .addListenSockets(stats.listenSockets);
   }
 }

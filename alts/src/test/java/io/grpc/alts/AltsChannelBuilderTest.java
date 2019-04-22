@@ -17,20 +17,9 @@
 package io.grpc.alts;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 
-import com.google.common.base.Defaults;
-import io.grpc.ManagedChannel;
-import io.grpc.alts.AltsChannelBuilder.AltsChannel;
-import io.grpc.alts.internal.AltsClientOptions;
 import io.grpc.alts.internal.AltsProtocolNegotiator;
-import io.grpc.alts.internal.TransportSecurityCommon.RpcProtocolVersions;
-import io.grpc.netty.InternalNettyChannelBuilder.TransportCreationParamsFilterFactory;
-import io.grpc.netty.ProtocolNegotiator;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
-import java.net.InetSocketAddress;
+import io.grpc.netty.InternalProtocolNegotiator.ProtocolNegotiator;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -43,53 +32,13 @@ public final class AltsChannelBuilderTest {
     AltsChannelBuilder builder =
         AltsChannelBuilder.forTarget("localhost:8080").enableUntrustedAltsForTesting();
 
-    TransportCreationParamsFilterFactory tcpfFactory = builder.getTcpfFactoryForTest();
-    AltsClientOptions altsClientOptions = builder.getAltsClientOptionsForTest();
+    ProtocolNegotiator protocolNegotiator = builder.getProtocolNegotiatorForTest();
+    assertThat(protocolNegotiator).isNull();
 
-    assertThat(tcpfFactory).isNull();
-    assertThat(altsClientOptions).isNull();
+    builder.build();
 
-    ManagedChannel channel = builder.build();
-    assertThat(channel).isInstanceOf(AltsChannel.class);
-
-    tcpfFactory = builder.getTcpfFactoryForTest();
-    altsClientOptions = builder.getAltsClientOptionsForTest();
-
-    assertThat(tcpfFactory).isNotNull();
-    ProtocolNegotiator protocolNegotiator =
-        tcpfFactory
-            .create(new InetSocketAddress(8080), "fakeAuthority", "fakeUserAgent", null)
-            .getProtocolNegotiator();
+    protocolNegotiator = builder.getProtocolNegotiatorForTest();
+    assertThat(protocolNegotiator).isNotNull();
     assertThat(protocolNegotiator).isInstanceOf(AltsProtocolNegotiator.class);
-
-    assertThat(altsClientOptions).isNotNull();
-    RpcProtocolVersions expectedVersions =
-        RpcProtocolVersions.newBuilder()
-            .setMaxRpcVersion(
-                RpcProtocolVersions.Version.newBuilder().setMajor(2).setMinor(1).build())
-            .setMinRpcVersion(
-                RpcProtocolVersions.Version.newBuilder().setMajor(2).setMinor(1).build())
-            .build();
-    assertThat(altsClientOptions.getRpcProtocolVersions()).isEqualTo(expectedVersions);
-  }
-
-  @Test
-  public void allAltsChannelMethodsForward() throws Exception {
-    ManagedChannel mockDelegate = mock(ManagedChannel.class);
-    AltsChannel altsChannel = new AltsChannel(mockDelegate);
-
-    for (Method method : ManagedChannel.class.getDeclaredMethods()) {
-      if (Modifier.isStatic(method.getModifiers()) || Modifier.isPrivate(method.getModifiers())) {
-        continue;
-      }
-      Class<?>[] argTypes = method.getParameterTypes();
-      Object[] args = new Object[argTypes.length];
-      for (int i = 0; i < argTypes.length; i++) {
-        args[i] = Defaults.defaultValue(argTypes[i]);
-      }
-
-      method.invoke(altsChannel, args);
-      method.invoke(verify(mockDelegate), args);
-    }
   }
 }

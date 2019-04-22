@@ -89,7 +89,8 @@ public class Platform {
         "com.google.android.gms.org.conscrypt.OpenSSLProvider",
         "org.conscrypt.OpenSSLProvider",
         "com.android.org.conscrypt.OpenSSLProvider",
-        "org.apache.harmony.xnet.provider.jsse.OpenSSLProvider"
+        "org.apache.harmony.xnet.provider.jsse.OpenSSLProvider",
+        "com.google.android.libraries.stitch.sslguard.SslGuardProvider"
       };
 
   private static final Platform PLATFORM = findPlatform();
@@ -162,15 +163,15 @@ public class Platform {
     if (androidOrAppEngineProvider != null) {
       // Attempt to find Android 2.3+ APIs.
       OptionalMethod<Socket> setUseSessionTickets
-          = new OptionalMethod<Socket>(null, "setUseSessionTickets", boolean.class);
+          = new OptionalMethod<>(null, "setUseSessionTickets", boolean.class);
       OptionalMethod<Socket> setHostname
-          = new OptionalMethod<Socket>(null, "setHostname", String.class);
+          = new OptionalMethod<>(null, "setHostname", String.class);
       Method trafficStatsTagSocket = null;
       Method trafficStatsUntagSocket = null;
       OptionalMethod<Socket> getAlpnSelectedProtocol =
-          new OptionalMethod<Socket>(byte[].class, "getAlpnSelectedProtocol");
+          new OptionalMethod<>(byte[].class, "getAlpnSelectedProtocol");
       OptionalMethod<Socket> setAlpnProtocols =
-          new OptionalMethod<Socket>(null, "setAlpnProtocols", byte[].class);
+          new OptionalMethod<>(null, "setAlpnProtocols", byte[].class);
 
       // Attempt to find Android 4.0+ APIs.
       try {
@@ -185,7 +186,8 @@ public class Platform {
       if (GrpcUtil.IS_RESTRICTED_APPENGINE) {
         tlsExtensionType = TlsExtensionType.ALPN_AND_NPN;
       } else if (androidOrAppEngineProvider.getName().equals("GmsCore_OpenSSL")
-          || androidOrAppEngineProvider.getName().equals("Conscrypt")) {
+          || androidOrAppEngineProvider.getName().equals("Conscrypt")
+          || androidOrAppEngineProvider.getName().equals("Ssl_Guard")) {
         tlsExtensionType = TlsExtensionType.ALPN_AND_NPN;
       } else if (isAtLeastAndroid5()) {
         tlsExtensionType = TlsExtensionType.ALPN_AND_NPN;
@@ -449,7 +451,7 @@ public class Platform {
     public void configureTlsExtensions(
         SSLSocket sslSocket, String hostname, List<Protocol> protocols) {
       SSLParameters parameters = sslSocket.getSSLParameters();
-      List<String> names = new ArrayList<String>(protocols.size());
+      List<String> names = new ArrayList<>(protocols.size());
       for (Protocol protocol : protocols) {
         if (protocol == Protocol.HTTP_1_0) continue; // No HTTP/1.0 for ALPN.
         names.add(protocol.toString());
@@ -505,7 +507,7 @@ public class Platform {
 
     @Override public void configureTlsExtensions(
         SSLSocket sslSocket, String hostname, List<Protocol> protocols) {
-      List<String> names = new ArrayList<String>(protocols.size());
+      List<String> names = new ArrayList<>(protocols.size());
       for (int i = 0, size = protocols.size(); i < size; i++) {
         Protocol protocol = protocols.get(i);
         if (protocol == Protocol.HTTP_1_0) continue; // No HTTP/1.0 for ALPN.

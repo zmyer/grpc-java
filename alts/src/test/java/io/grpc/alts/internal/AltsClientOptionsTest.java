@@ -18,7 +18,7 @@ package io.grpc.alts.internal;
 
 import static com.google.common.truth.Truth.assertThat;
 
-import io.grpc.alts.internal.TransportSecurityCommon.RpcProtocolVersions;
+import com.google.common.collect.ImmutableList;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -39,12 +39,12 @@ public final class AltsClientOptionsTest {
             .setMinRpcVersion(
                 RpcProtocolVersions.Version.newBuilder().setMajor(2).setMinor(1).build())
             .build();
+    ImmutableList<String> serviceAccounts = ImmutableList.of(serviceAccount1, serviceAccount2);
 
     AltsClientOptions options =
         new AltsClientOptions.Builder()
             .setTargetName(targetName)
-            .addTargetServiceAccount(serviceAccount1)
-            .addTargetServiceAccount(serviceAccount2)
+            .setTargetServiceAccounts(serviceAccounts)
             .setRpcProtocolVersions(rpcVersions)
             .build();
 

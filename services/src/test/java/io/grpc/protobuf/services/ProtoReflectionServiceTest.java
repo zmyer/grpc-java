@@ -66,9 +66,9 @@ public class ProtoReflectionServiceTest {
   private MutableHandlerRegistry handlerRegistry = new MutableHandlerRegistry();
   private BindableService reflectionService;
   private ServerServiceDefinition dynamicService =
-      (new DynamicServiceGrpc.DynamicServiceImplBase() {}).bindService();
+      new DynamicServiceGrpc.DynamicServiceImplBase() {}.bindService();
   private ServerServiceDefinition anotherDynamicService =
-      (new AnotherDynamicServiceGrpc.AnotherDynamicServiceImplBase() {}).bindService();
+      new AnotherDynamicServiceGrpc.AnotherDynamicServiceImplBase() {}.bindService();
   private Server server;
   private ManagedChannel channel;
   private ServerReflectionGrpc.ServerReflectionStub stub;
@@ -101,7 +101,7 @@ public class ProtoReflectionServiceTest {
   @Test
   public void listServices() throws Exception {
     Set<ServiceResponse> originalServices =
-        new HashSet<ServiceResponse>(
+        new HashSet<>(
             Arrays.asList(
                 ServiceResponse.newBuilder()
                     .setName("grpc.reflection.v1alpha.ServerReflection")
@@ -113,7 +113,7 @@ public class ProtoReflectionServiceTest {
 
     handlerRegistry.addService(dynamicService);
     assertServiceResponseEquals(
-        new HashSet<ServiceResponse>(
+        new HashSet<>(
             Arrays.asList(
                 ServiceResponse.newBuilder()
                     .setName("grpc.reflection.v1alpha.ServerReflection")
@@ -127,7 +127,7 @@ public class ProtoReflectionServiceTest {
 
     handlerRegistry.addService(anotherDynamicService);
     assertServiceResponseEquals(
-        new HashSet<ServiceResponse>(
+        new HashSet<>(
             Arrays.asList(
                 ServiceResponse.newBuilder()
                     .setName("grpc.reflection.v1alpha.ServerReflection")
@@ -144,7 +144,7 @@ public class ProtoReflectionServiceTest {
 
     handlerRegistry.removeService(dynamicService);
     assertServiceResponseEquals(
-        new HashSet<ServiceResponse>(
+        new HashSet<>(
             Arrays.asList(
                 ServiceResponse.newBuilder()
                     .setName("grpc.reflection.v1alpha.ServerReflection")
@@ -261,7 +261,7 @@ public class ProtoReflectionServiceTest {
             .getFileDescriptorResponse()
             .getFileDescriptorProtoList();
     assertEquals(goldenResponse.size(), response.size());
-    assertEquals(new HashSet<ByteString>(goldenResponse), new HashSet<ByteString>(response));
+    assertEquals(new HashSet<>(goldenResponse), new HashSet<>(response));
   }
 
   @Test
@@ -368,7 +368,7 @@ public class ProtoReflectionServiceTest {
             .getFileDescriptorResponse()
             .getFileDescriptorProtoList();
     assertEquals(goldenResponse.size(), response.size());
-    assertEquals(new HashSet<ByteString>(goldenResponse), new HashSet<ByteString>(response));
+    assertEquals(new HashSet<>(goldenResponse), new HashSet<>(response));
   }
 
   @Test
@@ -461,7 +461,7 @@ public class ProtoReflectionServiceTest {
             .setAllExtensionNumbersOfType("grpc.reflection.testing.ThirdLevelType")
             .build();
 
-    Set<Integer> goldenResponse = new HashSet<Integer>(Arrays.asList(100, 101));
+    Set<Integer> goldenResponse = new HashSet<>(Arrays.asList(100, 101));
 
     StreamRecorder<ServerReflectionResponse> responseObserver = StreamRecorder.create();
     StreamObserver<ServerReflectionRequest> requestObserver =
@@ -469,7 +469,7 @@ public class ProtoReflectionServiceTest {
     requestObserver.onNext(request);
     requestObserver.onCompleted();
     Set<Integer> extensionNumberResponseSet =
-        new HashSet<Integer>(
+        new HashSet<>(
             responseObserver
                 .firstValue()
                 .get()
@@ -589,7 +589,7 @@ public class ProtoReflectionServiceTest {
   private static class FlowControlClientResponseObserver
       implements ClientResponseObserver<ServerReflectionRequest, ServerReflectionResponse> {
     private final List<ServerReflectionResponse> responses =
-        new ArrayList<ServerReflectionResponse>();
+        new ArrayList<>();
     private boolean onCompleteCalled = false;
 
     @Override
@@ -632,6 +632,6 @@ public class ProtoReflectionServiceTest {
     List<ServiceResponse> response =
         responseObserver.firstValue().get().getListServicesResponse().getServiceList();
     assertEquals(goldenResponse.size(), response.size());
-    assertEquals(goldenResponse, new HashSet<ServiceResponse>(response));
+    assertEquals(goldenResponse, new HashSet<>(response));
   }
 }

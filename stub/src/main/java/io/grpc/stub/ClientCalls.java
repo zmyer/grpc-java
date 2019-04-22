@@ -34,10 +34,11 @@ import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Future;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.annotation.Nullable;
@@ -55,27 +56,29 @@ public final class ClientCalls {
   private ClientCalls() {}
 
   /**
-   * Executes a unary call with a response {@link StreamObserver}.
+   * Executes a unary call with a response {@link StreamObserver}.  The {@code call} should not be
+   * already started.  After calling this method, {@code call} should no longer be used.
    */
   public static <ReqT, RespT> void asyncUnaryCall(
-      ClientCall<ReqT, RespT> call,
-      ReqT param,
-      StreamObserver<RespT> observer) {
-    asyncUnaryRequestCall(call, param, observer, false);
+      ClientCall<ReqT, RespT> call, ReqT req, StreamObserver<RespT> responseObserver) {
+    asyncUnaryRequestCall(call, req, responseObserver, false);
   }
 
   /**
-   * Executes a server-streaming call with a response {@link StreamObserver}.
+   * Executes a server-streaming call with a response {@link StreamObserver}.  The {@code call}
+   * should not be already started.  After calling this method, {@code call} should no longer be
+   * used.
    */
   public static <ReqT, RespT> void asyncServerStreamingCall(
-      ClientCall<ReqT, RespT> call,
-      ReqT param,
-      StreamObserver<RespT> responseObserver) {
-    asyncUnaryRequestCall(call, param, responseObserver, true);
+      ClientCall<ReqT, RespT> call, ReqT req, StreamObserver<RespT> responseObserver) {
+    asyncUnaryRequestCall(call, req, responseObserver, true);
   }
 
   /**
    * Executes a client-streaming call returning a {@link StreamObserver} for the request messages.
+   * The {@code call} should not be already started.  After calling this method, {@code call}
+   * should no longer be used.
+   *
    * @return request stream observer.
    */
   public static <ReqT, RespT> StreamObserver<ReqT> asyncClientStreamingCall(
@@ -85,7 +88,9 @@ public final class ClientCalls {
   }
 
   /**
-   * Executes a bidi-streaming call.
+   * Executes a bidirectional-streaming call.  The {@code call} should not be already started.
+   * After calling this method, {@code call} should no longer be used.
+   *
    * @return request stream observer.
    */
   public static <ReqT, RespT> StreamObserver<ReqT> asyncBidiStreamingCall(
@@ -94,12 +99,14 @@ public final class ClientCalls {
   }
 
   /**
-   * Executes a unary call and blocks on the response.
+   * Executes a unary call and blocks on the response.  The {@code call} should not be already
+   * started.  After calling this method, {@code call} should no longer be used.
+   *
    * @return the single response message.
    */
-  public static <ReqT, RespT> RespT blockingUnaryCall(ClientCall<ReqT, RespT> call, ReqT param) {
+  public static <ReqT, RespT> RespT blockingUnaryCall(ClientCall<ReqT, RespT> call, ReqT req) {
     try {
-      return getUnchecked(futureUnaryCall(call, param));
+      return getUnchecked(futureUnaryCall(call, req));
     } catch (RuntimeException e) {
       throw cancelThrow(call, e);
     } catch (Error e) {
@@ -108,16 +115,17 @@ public final class ClientCalls {
   }
 
   /**
-   * Executes a unary call and blocks on the response.
+   * Executes a unary call and blocks on the response.  The {@code call} should not be already
+   * started.  After calling this method, {@code call} should no longer be used.
    *
    * @return the single response message.
    */
   public static <ReqT, RespT> RespT blockingUnaryCall(
-      Channel channel, MethodDescriptor<ReqT, RespT> method, CallOptions callOptions, ReqT param) {
+      Channel channel, MethodDescriptor<ReqT, RespT> method, CallOptions callOptions, ReqT req) {
     ThreadlessExecutor executor = new ThreadlessExecutor();
     ClientCall<ReqT, RespT> call = channel.newCall(method, callOptions.withExecutor(executor));
     try {
-      ListenableFuture<RespT> responseFuture = futureUnaryCall(call, param);
+      ListenableFuture<RespT> responseFuture = futureUnaryCall(call, req);
       while (!responseFuture.isDone()) {
         try {
           executor.waitAndDrain();
@@ -139,43 +147,47 @@ public final class ClientCalls {
 
   /**
    * Executes a server-streaming call returning a blocking {@link Iterator} over the
-   * response stream.
+   * response stream.  The {@code call} should not be already started.  After calling this method,
+   * {@code call} should no longer be used.
+   *
    * @return an iterator over the response stream.
    */
   // TODO(louiscryan): Not clear if we want to use this idiom for 'simple' stubs.
   public static <ReqT, RespT> Iterator<RespT> blockingServerStreamingCall(
-      ClientCall<ReqT, RespT> call, ReqT param) {
-    BlockingResponseStream<RespT> result = new BlockingResponseStream<RespT>(call);
-    asyncUnaryRequestCall(call, param, result.listener(), true);
+      ClientCall<ReqT, RespT> call, ReqT req) {
+    BlockingResponseStream<RespT> result = new BlockingResponseStream<>(call);
+    asyncUnaryRequestCall(call, req, result.listener(), true);
     return result;
   }
 
   /**
    * Executes a server-streaming call returning a blocking {@link Iterator} over the
-   * response stream.
+   * response stream.  The {@code call} should not be already started.  After calling this method,
+   * {@code call} should no longer be used.
    *
    * @return an iterator over the response stream.
    */
   // TODO(louiscryan): Not clear if we want to use this idiom for 'simple' stubs.
   public static <ReqT, RespT> Iterator<RespT> blockingServerStreamingCall(
-      Channel channel, MethodDescriptor<ReqT, RespT> method, CallOptions callOptions, ReqT param) {
+      Channel channel, MethodDescriptor<ReqT, RespT> method, CallOptions callOptions, ReqT req) {
     ThreadlessExecutor executor = new ThreadlessExecutor();
     ClientCall<ReqT, RespT> call = channel.newCall(method, callOptions.withExecutor(executor));
-    BlockingResponseStream<RespT> result = new BlockingResponseStream<RespT>(call, executor);
-    asyncUnaryRequestCall(call, param, result.listener(), true);
+    BlockingResponseStream<RespT> result = new BlockingResponseStream<>(call, executor);
+    asyncUnaryRequestCall(call, req, result.listener(), true);
     return result;
   }
 
   /**
-   * Executes a unary call and returns a {@link ListenableFuture} to the response.
+   * Executes a unary call and returns a {@link ListenableFuture} to the response.  The
+   * {@code call} should not be already started.  After calling this method, {@code call} should no
+   * longer be used.
    *
    * @return a future for the single response message.
    */
   public static <ReqT, RespT> ListenableFuture<RespT> futureUnaryCall(
-      ClientCall<ReqT, RespT> call,
-      ReqT param) {
-    GrpcFuture<RespT> responseFuture = new GrpcFuture<RespT>(call);
-    asyncUnaryRequestCall(call, param, new UnaryStreamToFuture<RespT>(responseFuture), false);
+      ClientCall<ReqT, RespT> call, ReqT req) {
+    GrpcFuture<RespT> responseFuture = new GrpcFuture<>(call);
+    asyncUnaryRequestCall(call, req, new UnaryStreamToFuture<>(responseFuture), false);
     return responseFuture;
   }
 
@@ -249,26 +261,26 @@ public final class ClientCalls {
   }
 
   private static <ReqT, RespT> void asyncUnaryRequestCall(
-      ClientCall<ReqT, RespT> call, ReqT param, StreamObserver<RespT> responseObserver,
+      ClientCall<ReqT, RespT> call, ReqT req, StreamObserver<RespT> responseObserver,
       boolean streamingResponse) {
     asyncUnaryRequestCall(
         call,
-        param,
-        new StreamObserverToCallListenerAdapter<ReqT, RespT>(
+        req,
+        new StreamObserverToCallListenerAdapter<>(
             responseObserver,
-            new CallToStreamObserverAdapter<ReqT>(call),
+            new CallToStreamObserverAdapter<>(call),
             streamingResponse),
         streamingResponse);
   }
 
   private static <ReqT, RespT> void asyncUnaryRequestCall(
       ClientCall<ReqT, RespT> call,
-      ReqT param,
+      ReqT req,
       ClientCall.Listener<RespT> responseListener,
       boolean streamingResponse) {
     startCall(call, responseListener, streamingResponse);
     try {
-      call.sendMessage(param);
+      call.sendMessage(req);
       call.halfClose();
     } catch (RuntimeException e) {
       throw cancelThrow(call, e);
@@ -278,19 +290,22 @@ public final class ClientCalls {
   }
 
   private static <ReqT, RespT> StreamObserver<ReqT> asyncStreamingRequestCall(
-      ClientCall<ReqT, RespT> call, StreamObserver<RespT> responseObserver,
+      ClientCall<ReqT, RespT> call,
+      StreamObserver<RespT> responseObserver,
       boolean streamingResponse) {
-    CallToStreamObserverAdapter<ReqT> adapter = new CallToStreamObserverAdapter<ReqT>(call);
+    CallToStreamObserverAdapter<ReqT> adapter = new CallToStreamObserverAdapter<>(call);
     startCall(
         call,
-        new StreamObserverToCallListenerAdapter<ReqT, RespT>(
+        new StreamObserverToCallListenerAdapter<>(
             responseObserver, adapter, streamingResponse),
         streamingResponse);
     return adapter;
   }
 
-  private static <ReqT, RespT> void startCall(ClientCall<ReqT, RespT> call,
-      ClientCall.Listener<RespT> responseListener, boolean streamingResponse) {
+  private static <ReqT, RespT> void startCall(
+      ClientCall<ReqT, RespT> call,
+      ClientCall.Listener<RespT> responseListener,
+      boolean streamingResponse) {
     call.start(responseListener, new Metadata());
     if (streamingResponse) {
       call.request(1);
@@ -430,7 +445,7 @@ public final class ClientCalls {
   }
 
   /**
-   * Complete a GrpcFuture using {@link StreamObserver} events.
+   * Completes a {@link GrpcFuture} using {@link StreamObserver} events.
    */
   private static final class UnaryStreamToFuture<RespT> extends ClientCall.Listener<RespT> {
     private final GrpcFuture<RespT> responseFuture;
@@ -500,16 +515,15 @@ public final class ClientCalls {
   }
 
   /**
-   * Convert events on a {@link io.grpc.ClientCall.Listener} into a blocking
-   * {@link Iterator}.
+   * Convert events on a {@link io.grpc.ClientCall.Listener} into a blocking {@link Iterator}.
    *
    * <p>The class is not thread-safe, but it does permit {@link ClientCall.Listener} calls in a
-   * separate thread from {@code Iterator} calls.
+   * separate thread from {@link Iterator} calls.
    */
   // TODO(ejona86): determine how to allow ClientCall.cancel() in case of application error.
   private static final class BlockingResponseStream<T> implements Iterator<T> {
     // Due to flow control, only needs to hold up to 2 items: 1 for value, 1 for close.
-    private final BlockingQueue<Object> buffer = new ArrayBlockingQueue<Object>(2);
+    private final BlockingQueue<Object> buffer = new ArrayBlockingQueue<>(2);
     private final ClientCall.Listener<T> listener = new QueuingListener();
     private final ClientCall<?, T> call;
     /** May be null. */
@@ -614,32 +628,54 @@ public final class ClientCalls {
     }
   }
 
-  private static final class ThreadlessExecutor implements Executor {
+  @SuppressWarnings("serial")
+  private static final class ThreadlessExecutor extends ConcurrentLinkedQueue<Runnable>
+      implements Executor {
     private static final Logger log = Logger.getLogger(ThreadlessExecutor.class.getName());
 
-    private final BlockingQueue<Runnable> queue = new LinkedBlockingQueue<Runnable>();
+    private volatile Thread waiter;
 
     // Non private to avoid synthetic class
     ThreadlessExecutor() {}
 
     /**
      * Waits until there is a Runnable, then executes it and all queued Runnables after it.
+     * Must only be called by one thread at a time.
      */
     public void waitAndDrain() throws InterruptedException {
-      Runnable runnable = queue.take();
-      while (runnable != null) {
+      final Thread currentThread = Thread.currentThread();
+      throwIfInterrupted(currentThread);
+      Runnable runnable = poll();
+      if (runnable == null) {
+        waiter = currentThread;
+        try {
+          while ((runnable = poll()) == null) {
+            LockSupport.park(this);
+            throwIfInterrupted(currentThread);
+          }
+        } finally {
+          waiter = null;
+        }
+      }
+      do {
         try {
           runnable.run();
         } catch (Throwable t) {
           log.log(Level.WARNING, "Runnable threw exception", t);
         }
-        runnable = queue.poll();
+      } while ((runnable = poll()) != null);
+    }
+
+    private static void throwIfInterrupted(Thread currentThread) throws InterruptedException {
+      if (currentThread.isInterrupted()) {
+        throw new InterruptedException();
       }
     }
 
     @Override
     public void execute(Runnable runnable) {
-      queue.add(runnable);
+      add(runnable);
+      LockSupport.unpark(waiter); // no-op if null
     }
   }
 }

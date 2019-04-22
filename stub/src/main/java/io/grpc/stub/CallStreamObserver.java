@@ -16,7 +16,6 @@
 
 package io.grpc.stub;
 
-import com.google.errorprone.annotations.DoNotMock;
 import io.grpc.ExperimentalApi;
 
 /**
@@ -37,9 +36,11 @@ import io.grpc.ExperimentalApi;
  *
  * <p>Like {@code StreamObserver}, implementations are not required to be thread-safe; if multiple
  * threads will be writing to an instance concurrently, the application must synchronize its calls.
+ *
+ * <p>DO NOT MOCK: The API is too complex to reliably mock. Use InProcessChannelBuilder to create
+ * "real" RPCs suitable for testing.
  */
 @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1788")
-@DoNotMock
 public abstract class CallStreamObserver<V> implements StreamObserver<V> {
 
   /**
@@ -83,9 +84,9 @@ public abstract class CallStreamObserver<V> implements StreamObserver<V> {
    *   <li>{@link io.grpc.MethodDescriptor.MethodType#UNARY} operations on both the
    *   client and server.
    *   </li>
-   *   <li>{@link io.grpc.MethodDescriptor.MethodType#CLIENT_STREAMING} operations on the server.
+   *   <li>{@link io.grpc.MethodDescriptor.MethodType#CLIENT_STREAMING} operations on the client.
    *   </li>
-   *   <li>{@link io.grpc.MethodDescriptor.MethodType#SERVER_STREAMING} operations on the client.
+   *   <li>{@link io.grpc.MethodDescriptor.MethodType#SERVER_STREAMING} operations on the server.
    *   </li>
    * </ul>
    * </p>

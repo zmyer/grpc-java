@@ -17,8 +17,9 @@
 package io.grpc.internal;
 
 import static com.google.common.truth.Truth.assertThat;
+import static io.grpc.internal.ServiceConfigInterceptor.HEDGING_POLICY_KEY;
 import static io.grpc.internal.ServiceConfigInterceptor.RETRY_POLICY_KEY;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 
 import io.grpc.CallOptions;
@@ -26,7 +27,7 @@ import io.grpc.Channel;
 import io.grpc.Deadline;
 import io.grpc.MethodDescriptor;
 import io.grpc.MethodDescriptor.MethodType;
-import io.grpc.internal.ServiceConfigInterceptor.MethodInfo;
+import io.grpc.internal.ManagedChannelServiceConfig.MethodInfo;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -60,7 +61,7 @@ public class ServiceConfigInterceptorTest {
   }
 
   private final ServiceConfigInterceptor interceptor = new ServiceConfigInterceptor(
-      true /* retryEnabled */, 5 /* maxRetryAttemptsLimit */);
+      /* retryEnabled = */ true, /* maxRetryAttemptsLimit = */ 5, /* maxHedgedAttemptsLimit = */ 6);
 
   private final String fullMethodName =
       MethodDescriptor.generateFullMethodName("service", "method");
@@ -101,6 +102,21 @@ public class ServiceConfigInterceptorTest {
   }
 
   @Test
+  public void handleNullConfig() {
+    JsonObj name = new JsonObj("service", "service");
+    JsonObj methodConfig = new JsonObj("name", new JsonList(name), "waitForReady", true);
+    JsonObj serviceConfig = new JsonObj("methodConfig", new JsonList(methodConfig));
+
+    interceptor.handleUpdate(serviceConfig);
+    interceptor.handleUpdate(null);
+
+    interceptor.interceptCall(methodDescriptor, CallOptions.DEFAULT.withoutWaitForReady(), channel);
+
+    verify(channel).newCall(eq(methodDescriptor), callOptionsCap.capture());
+    assertThat(callOptionsCap.getValue().isWaitForReady()).isFalse();
+  }
+
+  @Test
   public void handleUpdateNotCalledBeforeInterceptCall() {
     interceptor.interceptCall(methodDescriptor, CallOptions.DEFAULT.withoutWaitForReady(), channel);
 
@@ -108,6 +124,8 @@ public class ServiceConfigInterceptorTest {
     assertThat(callOptionsCap.getValue().isWaitForReady()).isFalse();
     assertThat(callOptionsCap.getValue().getOption(RETRY_POLICY_KEY).get())
         .isEqualTo(RetryPolicy.DEFAULT);
+    assertThat(callOptionsCap.getValue().getOption(HEDGING_POLICY_KEY).get())
+        .isEqualTo(HedgingPolicy.DEFAULT);
   }
 
   @Test
@@ -342,13 +360,13 @@ public class ServiceConfigInterceptorTest {
 
     interceptor.handleUpdate(serviceConfig1);
 
-    assertThat(interceptor.serviceMap.get()).isNotEmpty();
-    assertThat(interceptor.serviceMethodMap.get()).isEmpty();
+    assertThat(interceptor.managedChannelServiceConfig.get().getServiceMap()).isNotEmpty();
+    assertThat(interceptor.managedChannelServiceConfig.get().getServiceMethodMap()).isEmpty();
 
     interceptor.handleUpdate(serviceConfig2);
 
-    assertThat(interceptor.serviceMap.get()).isEmpty();
-    assertThat(interceptor.serviceMethodMap.get()).isNotEmpty();
+    assertThat(interceptor.managedChannelServiceConfig.get().getServiceMap()).isEmpty();
+    assertThat(interceptor.managedChannelServiceConfig.get().getServiceMethodMap()).isNotEmpty();
   }
 
   @Test
@@ -360,12 +378,12 @@ public class ServiceConfigInterceptorTest {
 
     interceptor.handleUpdate(serviceConfig);
 
-    assertThat(interceptor.serviceMethodMap.get())
+    assertThat(interceptor.managedChannelServiceConfig.get().getServiceMethodMap())
         .containsExactly(
             methodDescriptor.getFullMethodName(),
-            new MethodInfo(methodConfig, false, 1));
-    assertThat(interceptor.serviceMap.get()).containsExactly(
-        "service2", new MethodInfo(methodConfig, false, 1));
+            new MethodInfo(methodConfig, false, 1, 1));
+    assertThat(interceptor.managedChannelServiceConfig.get().getServiceMap()).containsExactly(
+        "service2", new MethodInfo(methodConfig, false, 1, 1));
   }
 
 
@@ -376,7 +394,7 @@ public class ServiceConfigInterceptorTest {
 
     thrown.expectMessage("Duration value is out of range");
 
-    new MethodInfo(methodConfig, false, 1);
+    new MethodInfo(methodConfig, false, 1, 1);
   }
 
   @Test
@@ -384,7 +402,7 @@ public class ServiceConfigInterceptorTest {
     JsonObj name = new JsonObj("service", "service");
     JsonObj methodConfig = new JsonObj("name", new JsonList(name), "timeout", "315576000000s");
 
-    MethodInfo info = new MethodInfo(methodConfig, false, 1);
+    MethodInfo info = new MethodInfo(methodConfig, false, 1, 1);
 
     assertThat(info.timeoutNanos).isEqualTo(Long.MAX_VALUE);
   }
@@ -398,7 +416,7 @@ public class ServiceConfigInterceptorTest {
     thrown.expect(IllegalArgumentException.class);
     thrown.expectMessage("exceeds bounds");
 
-    new MethodInfo(methodConfig, false, 1);
+    new MethodInfo(methodConfig, false, 1, 1);
   }
 
   @Test
@@ -409,7 +427,7 @@ public class ServiceConfigInterceptorTest {
     thrown.expect(IllegalArgumentException.class);
     thrown.expectMessage("exceeds bounds");
 
-    new MethodInfo(methodConfig, false, 1);
+    new MethodInfo(methodConfig, false, 1, 1);
   }
 
   private static final class NoopMarshaller implements MethodDescriptor.Marshaller<Void> {

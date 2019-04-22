@@ -20,7 +20,9 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
-import io.grpc.Attributes;
+import io.grpc.NameResolver;
+import io.grpc.ProxyDetector;
+import io.grpc.SynchronizationContext;
 import java.net.URI;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -29,6 +31,30 @@ import org.junit.runners.JUnit4;
 /** Unit tests for {@link DnsNameResolverProvider}. */
 @RunWith(JUnit4.class)
 public class DnsNameResolverProviderTest {
+  private final SynchronizationContext syncContext = new SynchronizationContext(
+      new Thread.UncaughtExceptionHandler() {
+        @Override
+        public void uncaughtException(Thread t, Throwable e) {
+          throw new AssertionError(e);
+        }
+      });
+  private final NameResolver.Helper helper = new NameResolver.Helper() {
+      @Override
+      public int getDefaultPort() {
+        throw new UnsupportedOperationException("Should not be called");
+      }
+
+      @Override
+      public ProxyDetector getProxyDetector() {
+        return GrpcUtil.getDefaultProxyDetector();
+      }
+
+      @Override
+      public SynchronizationContext getSynchronizationContext() {
+        return syncContext;
+      }
+    };
+
   private DnsNameResolverProvider provider = new DnsNameResolverProvider();
 
   @Test
@@ -39,8 +65,8 @@ public class DnsNameResolverProviderTest {
   @Test
   public void newNameResolver() {
     assertSame(DnsNameResolver.class,
-        provider.newNameResolver(URI.create("dns:///localhost:443"), Attributes.EMPTY).getClass());
+        provider.newNameResolver(URI.create("dns:///localhost:443"), helper).getClass());
     assertNull(
-        provider.newNameResolver(URI.create("notdns:///localhost:443"), Attributes.EMPTY));
+        provider.newNameResolver(URI.create("notdns:///localhost:443"), helper));
   }
 }

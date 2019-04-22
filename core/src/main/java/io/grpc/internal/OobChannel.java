@@ -26,9 +26,16 @@ import com.google.common.util.concurrent.SettableFuture;
 import io.grpc.Attributes;
 import io.grpc.CallOptions;
 import io.grpc.ClientCall;
+import io.grpc.ConnectivityState;
 import io.grpc.ConnectivityStateInfo;
 import io.grpc.Context;
 import io.grpc.EquivalentAddressGroup;
+import io.grpc.InternalChannelz;
+import io.grpc.InternalChannelz.ChannelStats;
+import io.grpc.InternalChannelz.ChannelTrace;
+import io.grpc.InternalInstrumented;
+import io.grpc.InternalLogId;
+import io.grpc.InternalWithLogId;
 import io.grpc.LoadBalancer;
 import io.grpc.LoadBalancer.PickResult;
 import io.grpc.LoadBalancer.PickSubchannelArgs;
@@ -38,9 +45,10 @@ import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
-import io.grpc.internal.Channelz.ChannelStats;
+import io.grpc.SynchronizationContext;
 import io.grpc.internal.ClientCallImpl.ClientTransportProvider;
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
@@ -54,23 +62,25 @@ import javax.annotation.concurrent.ThreadSafe;
  * to its own RPC needs.
  */
 @ThreadSafe
-final class OobChannel extends ManagedChannel implements Instrumented<ChannelStats> {
+final class OobChannel extends ManagedChannel implements InternalInstrumented<ChannelStats> {
   private static final Logger log = Logger.getLogger(OobChannel.class.getName());
 
   private InternalSubchannel subchannel;
   private AbstractSubchannel subchannelImpl;
   private SubchannelPicker subchannelPicker;
 
-  private final LogId logId = LogId.allocate(getClass().getName());
+  private final InternalLogId logId;
   private final String authority;
   private final DelayedClientTransport delayedTransport;
-  private final Channelz channelz;
+  private final InternalChannelz channelz;
   private final ObjectPool<? extends Executor> executorPool;
   private final Executor executor;
   private final ScheduledExecutorService deadlineCancellationExecutor;
   private final CountDownLatch terminatedLatch = new CountDownLatch(1);
   private volatile boolean shutdown;
   private final CallTracer channelCallsTracer;
+  private final ChannelTracer channelTracer;
+  private final TimeProvider timeProvider;
 
   private final ClientTransportProvider transportProvider = new ClientTransportProvider() {
     @Override
@@ -82,7 +92,7 @@ final class OobChannel extends ManagedChannel implements Instrumented<ChannelSta
     }
 
     @Override
-    public <ReqT> RetriableStream<ReqT> newRetriableStream(MethodDescriptor<ReqT, ?> method,
+    public <ReqT> ClientStream newRetriableStream(MethodDescriptor<ReqT, ?> method,
         CallOptions callOptions, Metadata headers, Context context) {
       throw new UnsupportedOperationException("OobChannel should not create retriable streams");
     }
@@ -90,14 +100,16 @@ final class OobChannel extends ManagedChannel implements Instrumented<ChannelSta
 
   OobChannel(
       String authority, ObjectPool<? extends Executor> executorPool,
-      ScheduledExecutorService deadlineCancellationExecutor, ChannelExecutor channelExecutor,
-      CallTracer callsTracer, Channelz channelz) {
+      ScheduledExecutorService deadlineCancellationExecutor, SynchronizationContext syncContext,
+      CallTracer callsTracer, ChannelTracer channelTracer, InternalChannelz channelz,
+      TimeProvider timeProvider) {
     this.authority = checkNotNull(authority, "authority");
+    this.logId = InternalLogId.allocate(getClass(), authority);
     this.executorPool = checkNotNull(executorPool, "executorPool");
     this.executor = checkNotNull(executorPool.getObject(), "executor");
     this.deadlineCancellationExecutor = checkNotNull(
         deadlineCancellationExecutor, "deadlineCancellationExecutor");
-    this.delayedTransport = new DelayedClientTransport(executor, channelExecutor);
+    this.delayedTransport = new DelayedClientTransport(executor, syncContext);
     this.channelz = Preconditions.checkNotNull(channelz);
     this.delayedTransport.start(new ManagedClientTransport.Listener() {
         @Override
@@ -121,6 +133,8 @@ final class OobChannel extends ManagedChannel implements Instrumented<ChannelSta
         }
       });
     this.channelCallsTracer = callsTracer;
+    this.channelTracer = checkNotNull(channelTracer, "channelTracer");
+    this.timeProvider = checkNotNull(timeProvider, "timeProvider");
   }
 
   // Must be called only once, right after the OobChannel is created.
@@ -139,7 +153,7 @@ final class OobChannel extends ManagedChannel implements Instrumented<ChannelSta
         }
 
         @Override
-        Instrumented<ChannelStats> getInternalSubchannel() {
+        InternalInstrumented<ChannelStats> getInternalSubchannel() {
           return subchannel;
         }
 
@@ -149,8 +163,8 @@ final class OobChannel extends ManagedChannel implements Instrumented<ChannelSta
         }
 
         @Override
-        public EquivalentAddressGroup getAddresses() {
-          return subchannel.getAddressGroup();
+        public List<EquivalentAddressGroup> getAllAddresses() {
+          return subchannel.getAddressGroups();
         }
 
         @Override
@@ -171,13 +185,13 @@ final class OobChannel extends ManagedChannel implements Instrumented<ChannelSta
   }
 
   void updateAddresses(EquivalentAddressGroup eag) {
-    subchannel.updateAddresses(eag);
+    subchannel.updateAddresses(Collections.singletonList(eag));
   }
 
   @Override
   public <RequestT, ResponseT> ClientCall<RequestT, ResponseT> newCall(
       MethodDescriptor<RequestT, ResponseT> methodDescriptor, CallOptions callOptions) {
-    return new ClientCallImpl<RequestT, ResponseT>(methodDescriptor,
+    return new ClientCallImpl<>(methodDescriptor,
         callOptions.getExecutor() == null ? executor : callOptions.getExecutor(),
         callOptions, transportProvider, deadlineCancellationExecutor, channelCallsTracer,
         false /* retryEnabled */);
@@ -196,6 +210,14 @@ final class OobChannel extends ManagedChannel implements Instrumented<ChannelSta
   @Override
   public boolean awaitTermination(long time, TimeUnit unit) throws InterruptedException {
     return terminatedLatch.await(time, unit);
+  }
+
+  @Override
+  public ConnectivityState getState(boolean requestConnectionIgnored) {
+    if (subchannel == null) {
+      return ConnectivityState.IDLE;
+    }
+    return subchannel.getState();
   }
 
   @Override
@@ -219,6 +241,12 @@ final class OobChannel extends ManagedChannel implements Instrumented<ChannelSta
   }
 
   void handleSubchannelStateChange(final ConnectivityStateInfo newState) {
+    channelTracer.reportEvent(
+        new ChannelTrace.Event.Builder()
+            .setDescription("Entering " + newState.getState() + " state")
+            .setSeverity(ChannelTrace.Event.Severity.CT_INFO)
+            .setTimestampNanos(timeProvider.currentTimeNanos())
+            .build());
     switch (newState.getState()) {
       case READY:
       case IDLE:
@@ -262,16 +290,17 @@ final class OobChannel extends ManagedChannel implements Instrumented<ChannelSta
     final SettableFuture<ChannelStats> ret = SettableFuture.create();
     final ChannelStats.Builder builder = new ChannelStats.Builder();
     channelCallsTracer.updateBuilder(builder);
+    channelTracer.updateBuilder(builder);
     builder
         .setTarget(authority)
         .setState(subchannel.getState())
-        .setSubchannels(Collections.<WithLogId>singletonList(subchannel));
+        .setSubchannels(Collections.<InternalWithLogId>singletonList(subchannel));
     ret.set(builder.build());
     return ret;
   }
 
   @Override
-  public LogId getLogId() {
+  public InternalLogId getLogId() {
     return logId;
   }
 

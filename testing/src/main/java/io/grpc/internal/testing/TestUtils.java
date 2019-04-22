@@ -39,7 +39,6 @@ import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManagerFactory;
@@ -68,11 +67,11 @@ public class TestUtils {
    * Creates a new {@link InetSocketAddress} on localhost that overrides the host with
    * {@link #TEST_SERVER_HOST}.
    */
-  public static InetSocketAddress testServerAddress(int port) {
+  public static InetSocketAddress testServerAddress(InetSocketAddress originalSockAddr) {
     try {
       InetAddress inetAddress = InetAddress.getByName("localhost");
       inetAddress = InetAddress.getByAddress(TEST_SERVER_HOST, inetAddress.getAddress());
-      return new InetSocketAddress(inetAddress, port);
+      return new InetSocketAddress(inetAddress, originalSockAddr.getPort());
     } catch (UnknownHostException e) {
       throw new RuntimeException(e);
     }
@@ -90,7 +89,7 @@ public class TestUtils {
     } catch (NoSuchAlgorithmException ex) {
       throw new RuntimeException(ex);
     }
-    List<String> ciphersMinusGcm = new ArrayList<String>();
+    List<String> ciphersMinusGcm = new ArrayList<>();
     for (String cipher : ciphers) {
       // The GCM implementation in Java is _very_ slow (~1 MB/s)
       if (cipher.contains("_GCM_")) {
@@ -202,19 +201,6 @@ public class TestUtils {
     SSLContext context = SSLContext.getInstance("TLS", provider);
     context.init(null, trustManagerFactory.getTrustManagers(), null);
     return context.getSocketFactory();
-  }
-
-  /**
-   * Sleeps for at least the specified time. When in need of a guaranteed sleep time, use this in
-   * preference to {@code Thread.sleep} which might not sleep for the required time.
-   */
-  public static void sleepAtLeast(long millis) throws InterruptedException {
-    long delay = TimeUnit.MILLISECONDS.toNanos(millis);
-    long end = System.nanoTime() + delay;
-    while (delay > 0) {
-      TimeUnit.NANOSECONDS.sleep(delay);
-      delay = end - System.nanoTime();
-    }
   }
 
   private TestUtils() {}

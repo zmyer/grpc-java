@@ -31,22 +31,16 @@ public final class ChannelzGrpc {
   public static final String SERVICE_NAME = "grpc.channelz.v1.Channelz";
 
   // Static method descriptors that strictly reflect the proto.
-  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
-  @java.lang.Deprecated // Use {@link #getGetTopChannelsMethod()} instead. 
-  public static final io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetTopChannelsRequest,
-      io.grpc.channelz.v1.GetTopChannelsResponse> METHOD_GET_TOP_CHANNELS = getGetTopChannelsMethodHelper();
-
   private static volatile io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetTopChannelsRequest,
       io.grpc.channelz.v1.GetTopChannelsResponse> getGetTopChannelsMethod;
 
-  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "GetTopChannels",
+      requestType = io.grpc.channelz.v1.GetTopChannelsRequest.class,
+      responseType = io.grpc.channelz.v1.GetTopChannelsResponse.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
   public static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetTopChannelsRequest,
       io.grpc.channelz.v1.GetTopChannelsResponse> getGetTopChannelsMethod() {
-    return getGetTopChannelsMethodHelper();
-  }
-
-  private static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetTopChannelsRequest,
-      io.grpc.channelz.v1.GetTopChannelsResponse> getGetTopChannelsMethodHelper() {
     io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetTopChannelsRequest, io.grpc.channelz.v1.GetTopChannelsResponse> getGetTopChannelsMethod;
     if ((getGetTopChannelsMethod = ChannelzGrpc.getGetTopChannelsMethod) == null) {
       synchronized (ChannelzGrpc.class) {
@@ -68,22 +62,17 @@ public final class ChannelzGrpc {
      }
      return getGetTopChannelsMethod;
   }
-  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
-  @java.lang.Deprecated // Use {@link #getGetServersMethod()} instead. 
-  public static final io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServersRequest,
-      io.grpc.channelz.v1.GetServersResponse> METHOD_GET_SERVERS = getGetServersMethodHelper();
 
   private static volatile io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServersRequest,
       io.grpc.channelz.v1.GetServersResponse> getGetServersMethod;
 
-  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "GetServers",
+      requestType = io.grpc.channelz.v1.GetServersRequest.class,
+      responseType = io.grpc.channelz.v1.GetServersResponse.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
   public static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServersRequest,
       io.grpc.channelz.v1.GetServersResponse> getGetServersMethod() {
-    return getGetServersMethodHelper();
-  }
-
-  private static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServersRequest,
-      io.grpc.channelz.v1.GetServersResponse> getGetServersMethodHelper() {
     io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServersRequest, io.grpc.channelz.v1.GetServersResponse> getGetServersMethod;
     if ((getGetServersMethod = ChannelzGrpc.getGetServersMethod) == null) {
       synchronized (ChannelzGrpc.class) {
@@ -105,22 +94,49 @@ public final class ChannelzGrpc {
      }
      return getGetServersMethod;
   }
-  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
-  @java.lang.Deprecated // Use {@link #getGetServerSocketsMethod()} instead. 
-  public static final io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServerSocketsRequest,
-      io.grpc.channelz.v1.GetServerSocketsResponse> METHOD_GET_SERVER_SOCKETS = getGetServerSocketsMethodHelper();
+
+  private static volatile io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServerRequest,
+      io.grpc.channelz.v1.GetServerResponse> getGetServerMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "GetServer",
+      requestType = io.grpc.channelz.v1.GetServerRequest.class,
+      responseType = io.grpc.channelz.v1.GetServerResponse.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServerRequest,
+      io.grpc.channelz.v1.GetServerResponse> getGetServerMethod() {
+    io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServerRequest, io.grpc.channelz.v1.GetServerResponse> getGetServerMethod;
+    if ((getGetServerMethod = ChannelzGrpc.getGetServerMethod) == null) {
+      synchronized (ChannelzGrpc.class) {
+        if ((getGetServerMethod = ChannelzGrpc.getGetServerMethod) == null) {
+          ChannelzGrpc.getGetServerMethod = getGetServerMethod = 
+              io.grpc.MethodDescriptor.<io.grpc.channelz.v1.GetServerRequest, io.grpc.channelz.v1.GetServerResponse>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(
+                  "grpc.channelz.v1.Channelz", "GetServer"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.channelz.v1.GetServerRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  io.grpc.channelz.v1.GetServerResponse.getDefaultInstance()))
+                  .setSchemaDescriptor(new ChannelzMethodDescriptorSupplier("GetServer"))
+                  .build();
+          }
+        }
+     }
+     return getGetServerMethod;
+  }
 
   private static volatile io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServerSocketsRequest,
       io.grpc.channelz.v1.GetServerSocketsResponse> getGetServerSocketsMethod;
 
-  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "GetServerSockets",
+      requestType = io.grpc.channelz.v1.GetServerSocketsRequest.class,
+      responseType = io.grpc.channelz.v1.GetServerSocketsResponse.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
   public static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServerSocketsRequest,
       io.grpc.channelz.v1.GetServerSocketsResponse> getGetServerSocketsMethod() {
-    return getGetServerSocketsMethodHelper();
-  }
-
-  private static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServerSocketsRequest,
-      io.grpc.channelz.v1.GetServerSocketsResponse> getGetServerSocketsMethodHelper() {
     io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetServerSocketsRequest, io.grpc.channelz.v1.GetServerSocketsResponse> getGetServerSocketsMethod;
     if ((getGetServerSocketsMethod = ChannelzGrpc.getGetServerSocketsMethod) == null) {
       synchronized (ChannelzGrpc.class) {
@@ -142,22 +158,17 @@ public final class ChannelzGrpc {
      }
      return getGetServerSocketsMethod;
   }
-  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
-  @java.lang.Deprecated // Use {@link #getGetChannelMethod()} instead. 
-  public static final io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetChannelRequest,
-      io.grpc.channelz.v1.GetChannelResponse> METHOD_GET_CHANNEL = getGetChannelMethodHelper();
 
   private static volatile io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetChannelRequest,
       io.grpc.channelz.v1.GetChannelResponse> getGetChannelMethod;
 
-  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "GetChannel",
+      requestType = io.grpc.channelz.v1.GetChannelRequest.class,
+      responseType = io.grpc.channelz.v1.GetChannelResponse.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
   public static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetChannelRequest,
       io.grpc.channelz.v1.GetChannelResponse> getGetChannelMethod() {
-    return getGetChannelMethodHelper();
-  }
-
-  private static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetChannelRequest,
-      io.grpc.channelz.v1.GetChannelResponse> getGetChannelMethodHelper() {
     io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetChannelRequest, io.grpc.channelz.v1.GetChannelResponse> getGetChannelMethod;
     if ((getGetChannelMethod = ChannelzGrpc.getGetChannelMethod) == null) {
       synchronized (ChannelzGrpc.class) {
@@ -179,22 +190,17 @@ public final class ChannelzGrpc {
      }
      return getGetChannelMethod;
   }
-  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
-  @java.lang.Deprecated // Use {@link #getGetSubchannelMethod()} instead. 
-  public static final io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetSubchannelRequest,
-      io.grpc.channelz.v1.GetSubchannelResponse> METHOD_GET_SUBCHANNEL = getGetSubchannelMethodHelper();
 
   private static volatile io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetSubchannelRequest,
       io.grpc.channelz.v1.GetSubchannelResponse> getGetSubchannelMethod;
 
-  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "GetSubchannel",
+      requestType = io.grpc.channelz.v1.GetSubchannelRequest.class,
+      responseType = io.grpc.channelz.v1.GetSubchannelResponse.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
   public static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetSubchannelRequest,
       io.grpc.channelz.v1.GetSubchannelResponse> getGetSubchannelMethod() {
-    return getGetSubchannelMethodHelper();
-  }
-
-  private static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetSubchannelRequest,
-      io.grpc.channelz.v1.GetSubchannelResponse> getGetSubchannelMethodHelper() {
     io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetSubchannelRequest, io.grpc.channelz.v1.GetSubchannelResponse> getGetSubchannelMethod;
     if ((getGetSubchannelMethod = ChannelzGrpc.getGetSubchannelMethod) == null) {
       synchronized (ChannelzGrpc.class) {
@@ -216,22 +222,17 @@ public final class ChannelzGrpc {
      }
      return getGetSubchannelMethod;
   }
-  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
-  @java.lang.Deprecated // Use {@link #getGetSocketMethod()} instead. 
-  public static final io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetSocketRequest,
-      io.grpc.channelz.v1.GetSocketResponse> METHOD_GET_SOCKET = getGetSocketMethodHelper();
 
   private static volatile io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetSocketRequest,
       io.grpc.channelz.v1.GetSocketResponse> getGetSocketMethod;
 
-  @io.grpc.ExperimentalApi("https://github.com/grpc/grpc-java/issues/1901")
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "GetSocket",
+      requestType = io.grpc.channelz.v1.GetSocketRequest.class,
+      responseType = io.grpc.channelz.v1.GetSocketResponse.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
   public static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetSocketRequest,
       io.grpc.channelz.v1.GetSocketResponse> getGetSocketMethod() {
-    return getGetSocketMethodHelper();
-  }
-
-  private static io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetSocketRequest,
-      io.grpc.channelz.v1.GetSocketResponse> getGetSocketMethodHelper() {
     io.grpc.MethodDescriptor<io.grpc.channelz.v1.GetSocketRequest, io.grpc.channelz.v1.GetSocketResponse> getGetSocketMethod;
     if ((getGetSocketMethod = ChannelzGrpc.getGetSocketMethod) == null) {
       synchronized (ChannelzGrpc.class) {
@@ -293,7 +294,7 @@ public final class ChannelzGrpc {
      */
     public void getTopChannels(io.grpc.channelz.v1.GetTopChannelsRequest request,
         io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetTopChannelsResponse> responseObserver) {
-      asyncUnimplementedUnaryCall(getGetTopChannelsMethodHelper(), responseObserver);
+      asyncUnimplementedUnaryCall(getGetTopChannelsMethod(), responseObserver);
     }
 
     /**
@@ -303,7 +304,17 @@ public final class ChannelzGrpc {
      */
     public void getServers(io.grpc.channelz.v1.GetServersRequest request,
         io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetServersResponse> responseObserver) {
-      asyncUnimplementedUnaryCall(getGetServersMethodHelper(), responseObserver);
+      asyncUnimplementedUnaryCall(getGetServersMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Returns a single Server, or else a NOT_FOUND code.
+     * </pre>
+     */
+    public void getServer(io.grpc.channelz.v1.GetServerRequest request,
+        io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetServerResponse> responseObserver) {
+      asyncUnimplementedUnaryCall(getGetServerMethod(), responseObserver);
     }
 
     /**
@@ -313,7 +324,7 @@ public final class ChannelzGrpc {
      */
     public void getServerSockets(io.grpc.channelz.v1.GetServerSocketsRequest request,
         io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetServerSocketsResponse> responseObserver) {
-      asyncUnimplementedUnaryCall(getGetServerSocketsMethodHelper(), responseObserver);
+      asyncUnimplementedUnaryCall(getGetServerSocketsMethod(), responseObserver);
     }
 
     /**
@@ -323,7 +334,7 @@ public final class ChannelzGrpc {
      */
     public void getChannel(io.grpc.channelz.v1.GetChannelRequest request,
         io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetChannelResponse> responseObserver) {
-      asyncUnimplementedUnaryCall(getGetChannelMethodHelper(), responseObserver);
+      asyncUnimplementedUnaryCall(getGetChannelMethod(), responseObserver);
     }
 
     /**
@@ -333,7 +344,7 @@ public final class ChannelzGrpc {
      */
     public void getSubchannel(io.grpc.channelz.v1.GetSubchannelRequest request,
         io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetSubchannelResponse> responseObserver) {
-      asyncUnimplementedUnaryCall(getGetSubchannelMethodHelper(), responseObserver);
+      asyncUnimplementedUnaryCall(getGetSubchannelMethod(), responseObserver);
     }
 
     /**
@@ -343,48 +354,55 @@ public final class ChannelzGrpc {
      */
     public void getSocket(io.grpc.channelz.v1.GetSocketRequest request,
         io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetSocketResponse> responseObserver) {
-      asyncUnimplementedUnaryCall(getGetSocketMethodHelper(), responseObserver);
+      asyncUnimplementedUnaryCall(getGetSocketMethod(), responseObserver);
     }
 
     @java.lang.Override public final io.grpc.ServerServiceDefinition bindService() {
       return io.grpc.ServerServiceDefinition.builder(getServiceDescriptor())
           .addMethod(
-            getGetTopChannelsMethodHelper(),
+            getGetTopChannelsMethod(),
             asyncUnaryCall(
               new MethodHandlers<
                 io.grpc.channelz.v1.GetTopChannelsRequest,
                 io.grpc.channelz.v1.GetTopChannelsResponse>(
                   this, METHODID_GET_TOP_CHANNELS)))
           .addMethod(
-            getGetServersMethodHelper(),
+            getGetServersMethod(),
             asyncUnaryCall(
               new MethodHandlers<
                 io.grpc.channelz.v1.GetServersRequest,
                 io.grpc.channelz.v1.GetServersResponse>(
                   this, METHODID_GET_SERVERS)))
           .addMethod(
-            getGetServerSocketsMethodHelper(),
+            getGetServerMethod(),
+            asyncUnaryCall(
+              new MethodHandlers<
+                io.grpc.channelz.v1.GetServerRequest,
+                io.grpc.channelz.v1.GetServerResponse>(
+                  this, METHODID_GET_SERVER)))
+          .addMethod(
+            getGetServerSocketsMethod(),
             asyncUnaryCall(
               new MethodHandlers<
                 io.grpc.channelz.v1.GetServerSocketsRequest,
                 io.grpc.channelz.v1.GetServerSocketsResponse>(
                   this, METHODID_GET_SERVER_SOCKETS)))
           .addMethod(
-            getGetChannelMethodHelper(),
+            getGetChannelMethod(),
             asyncUnaryCall(
               new MethodHandlers<
                 io.grpc.channelz.v1.GetChannelRequest,
                 io.grpc.channelz.v1.GetChannelResponse>(
                   this, METHODID_GET_CHANNEL)))
           .addMethod(
-            getGetSubchannelMethodHelper(),
+            getGetSubchannelMethod(),
             asyncUnaryCall(
               new MethodHandlers<
                 io.grpc.channelz.v1.GetSubchannelRequest,
                 io.grpc.channelz.v1.GetSubchannelResponse>(
                   this, METHODID_GET_SUBCHANNEL)))
           .addMethod(
-            getGetSocketMethodHelper(),
+            getGetSocketMethod(),
             asyncUnaryCall(
               new MethodHandlers<
                 io.grpc.channelz.v1.GetSocketRequest,
@@ -425,7 +443,7 @@ public final class ChannelzGrpc {
     public void getTopChannels(io.grpc.channelz.v1.GetTopChannelsRequest request,
         io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetTopChannelsResponse> responseObserver) {
       asyncUnaryCall(
-          getChannel().newCall(getGetTopChannelsMethodHelper(), getCallOptions()), request, responseObserver);
+          getChannel().newCall(getGetTopChannelsMethod(), getCallOptions()), request, responseObserver);
     }
 
     /**
@@ -436,7 +454,18 @@ public final class ChannelzGrpc {
     public void getServers(io.grpc.channelz.v1.GetServersRequest request,
         io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetServersResponse> responseObserver) {
       asyncUnaryCall(
-          getChannel().newCall(getGetServersMethodHelper(), getCallOptions()), request, responseObserver);
+          getChannel().newCall(getGetServersMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Returns a single Server, or else a NOT_FOUND code.
+     * </pre>
+     */
+    public void getServer(io.grpc.channelz.v1.GetServerRequest request,
+        io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetServerResponse> responseObserver) {
+      asyncUnaryCall(
+          getChannel().newCall(getGetServerMethod(), getCallOptions()), request, responseObserver);
     }
 
     /**
@@ -447,7 +476,7 @@ public final class ChannelzGrpc {
     public void getServerSockets(io.grpc.channelz.v1.GetServerSocketsRequest request,
         io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetServerSocketsResponse> responseObserver) {
       asyncUnaryCall(
-          getChannel().newCall(getGetServerSocketsMethodHelper(), getCallOptions()), request, responseObserver);
+          getChannel().newCall(getGetServerSocketsMethod(), getCallOptions()), request, responseObserver);
     }
 
     /**
@@ -458,7 +487,7 @@ public final class ChannelzGrpc {
     public void getChannel(io.grpc.channelz.v1.GetChannelRequest request,
         io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetChannelResponse> responseObserver) {
       asyncUnaryCall(
-          getChannel().newCall(getGetChannelMethodHelper(), getCallOptions()), request, responseObserver);
+          getChannel().newCall(getGetChannelMethod(), getCallOptions()), request, responseObserver);
     }
 
     /**
@@ -469,7 +498,7 @@ public final class ChannelzGrpc {
     public void getSubchannel(io.grpc.channelz.v1.GetSubchannelRequest request,
         io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetSubchannelResponse> responseObserver) {
       asyncUnaryCall(
-          getChannel().newCall(getGetSubchannelMethodHelper(), getCallOptions()), request, responseObserver);
+          getChannel().newCall(getGetSubchannelMethod(), getCallOptions()), request, responseObserver);
     }
 
     /**
@@ -480,7 +509,7 @@ public final class ChannelzGrpc {
     public void getSocket(io.grpc.channelz.v1.GetSocketRequest request,
         io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetSocketResponse> responseObserver) {
       asyncUnaryCall(
-          getChannel().newCall(getGetSocketMethodHelper(), getCallOptions()), request, responseObserver);
+          getChannel().newCall(getGetSocketMethod(), getCallOptions()), request, responseObserver);
     }
   }
 
@@ -514,7 +543,7 @@ public final class ChannelzGrpc {
      */
     public io.grpc.channelz.v1.GetTopChannelsResponse getTopChannels(io.grpc.channelz.v1.GetTopChannelsRequest request) {
       return blockingUnaryCall(
-          getChannel(), getGetTopChannelsMethodHelper(), getCallOptions(), request);
+          getChannel(), getGetTopChannelsMethod(), getCallOptions(), request);
     }
 
     /**
@@ -524,7 +553,17 @@ public final class ChannelzGrpc {
      */
     public io.grpc.channelz.v1.GetServersResponse getServers(io.grpc.channelz.v1.GetServersRequest request) {
       return blockingUnaryCall(
-          getChannel(), getGetServersMethodHelper(), getCallOptions(), request);
+          getChannel(), getGetServersMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Returns a single Server, or else a NOT_FOUND code.
+     * </pre>
+     */
+    public io.grpc.channelz.v1.GetServerResponse getServer(io.grpc.channelz.v1.GetServerRequest request) {
+      return blockingUnaryCall(
+          getChannel(), getGetServerMethod(), getCallOptions(), request);
     }
 
     /**
@@ -534,7 +573,7 @@ public final class ChannelzGrpc {
      */
     public io.grpc.channelz.v1.GetServerSocketsResponse getServerSockets(io.grpc.channelz.v1.GetServerSocketsRequest request) {
       return blockingUnaryCall(
-          getChannel(), getGetServerSocketsMethodHelper(), getCallOptions(), request);
+          getChannel(), getGetServerSocketsMethod(), getCallOptions(), request);
     }
 
     /**
@@ -544,7 +583,7 @@ public final class ChannelzGrpc {
      */
     public io.grpc.channelz.v1.GetChannelResponse getChannel(io.grpc.channelz.v1.GetChannelRequest request) {
       return blockingUnaryCall(
-          getChannel(), getGetChannelMethodHelper(), getCallOptions(), request);
+          getChannel(), getGetChannelMethod(), getCallOptions(), request);
     }
 
     /**
@@ -554,7 +593,7 @@ public final class ChannelzGrpc {
      */
     public io.grpc.channelz.v1.GetSubchannelResponse getSubchannel(io.grpc.channelz.v1.GetSubchannelRequest request) {
       return blockingUnaryCall(
-          getChannel(), getGetSubchannelMethodHelper(), getCallOptions(), request);
+          getChannel(), getGetSubchannelMethod(), getCallOptions(), request);
     }
 
     /**
@@ -564,7 +603,7 @@ public final class ChannelzGrpc {
      */
     public io.grpc.channelz.v1.GetSocketResponse getSocket(io.grpc.channelz.v1.GetSocketRequest request) {
       return blockingUnaryCall(
-          getChannel(), getGetSocketMethodHelper(), getCallOptions(), request);
+          getChannel(), getGetSocketMethod(), getCallOptions(), request);
     }
   }
 
@@ -599,7 +638,7 @@ public final class ChannelzGrpc {
     public com.google.common.util.concurrent.ListenableFuture<io.grpc.channelz.v1.GetTopChannelsResponse> getTopChannels(
         io.grpc.channelz.v1.GetTopChannelsRequest request) {
       return futureUnaryCall(
-          getChannel().newCall(getGetTopChannelsMethodHelper(), getCallOptions()), request);
+          getChannel().newCall(getGetTopChannelsMethod(), getCallOptions()), request);
     }
 
     /**
@@ -610,7 +649,18 @@ public final class ChannelzGrpc {
     public com.google.common.util.concurrent.ListenableFuture<io.grpc.channelz.v1.GetServersResponse> getServers(
         io.grpc.channelz.v1.GetServersRequest request) {
       return futureUnaryCall(
-          getChannel().newCall(getGetServersMethodHelper(), getCallOptions()), request);
+          getChannel().newCall(getGetServersMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * Returns a single Server, or else a NOT_FOUND code.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<io.grpc.channelz.v1.GetServerResponse> getServer(
+        io.grpc.channelz.v1.GetServerRequest request) {
+      return futureUnaryCall(
+          getChannel().newCall(getGetServerMethod(), getCallOptions()), request);
     }
 
     /**
@@ -621,7 +671,7 @@ public final class ChannelzGrpc {
     public com.google.common.util.concurrent.ListenableFuture<io.grpc.channelz.v1.GetServerSocketsResponse> getServerSockets(
         io.grpc.channelz.v1.GetServerSocketsRequest request) {
       return futureUnaryCall(
-          getChannel().newCall(getGetServerSocketsMethodHelper(), getCallOptions()), request);
+          getChannel().newCall(getGetServerSocketsMethod(), getCallOptions()), request);
     }
 
     /**
@@ -632,7 +682,7 @@ public final class ChannelzGrpc {
     public com.google.common.util.concurrent.ListenableFuture<io.grpc.channelz.v1.GetChannelResponse> getChannel(
         io.grpc.channelz.v1.GetChannelRequest request) {
       return futureUnaryCall(
-          getChannel().newCall(getGetChannelMethodHelper(), getCallOptions()), request);
+          getChannel().newCall(getGetChannelMethod(), getCallOptions()), request);
     }
 
     /**
@@ -643,7 +693,7 @@ public final class ChannelzGrpc {
     public com.google.common.util.concurrent.ListenableFuture<io.grpc.channelz.v1.GetSubchannelResponse> getSubchannel(
         io.grpc.channelz.v1.GetSubchannelRequest request) {
       return futureUnaryCall(
-          getChannel().newCall(getGetSubchannelMethodHelper(), getCallOptions()), request);
+          getChannel().newCall(getGetSubchannelMethod(), getCallOptions()), request);
     }
 
     /**
@@ -654,16 +704,17 @@ public final class ChannelzGrpc {
     public com.google.common.util.concurrent.ListenableFuture<io.grpc.channelz.v1.GetSocketResponse> getSocket(
         io.grpc.channelz.v1.GetSocketRequest request) {
       return futureUnaryCall(
-          getChannel().newCall(getGetSocketMethodHelper(), getCallOptions()), request);
+          getChannel().newCall(getGetSocketMethod(), getCallOptions()), request);
     }
   }
 
   private static final int METHODID_GET_TOP_CHANNELS = 0;
   private static final int METHODID_GET_SERVERS = 1;
-  private static final int METHODID_GET_SERVER_SOCKETS = 2;
-  private static final int METHODID_GET_CHANNEL = 3;
-  private static final int METHODID_GET_SUBCHANNEL = 4;
-  private static final int METHODID_GET_SOCKET = 5;
+  private static final int METHODID_GET_SERVER = 2;
+  private static final int METHODID_GET_SERVER_SOCKETS = 3;
+  private static final int METHODID_GET_CHANNEL = 4;
+  private static final int METHODID_GET_SUBCHANNEL = 5;
+  private static final int METHODID_GET_SOCKET = 6;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -689,6 +740,10 @@ public final class ChannelzGrpc {
         case METHODID_GET_SERVERS:
           serviceImpl.getServers((io.grpc.channelz.v1.GetServersRequest) request,
               (io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetServersResponse>) responseObserver);
+          break;
+        case METHODID_GET_SERVER:
+          serviceImpl.getServer((io.grpc.channelz.v1.GetServerRequest) request,
+              (io.grpc.stub.StreamObserver<io.grpc.channelz.v1.GetServerResponse>) responseObserver);
           break;
         case METHODID_GET_SERVER_SOCKETS:
           serviceImpl.getServerSockets((io.grpc.channelz.v1.GetServerSocketsRequest) request,
@@ -767,12 +822,13 @@ public final class ChannelzGrpc {
         if (result == null) {
           serviceDescriptor = result = io.grpc.ServiceDescriptor.newBuilder(SERVICE_NAME)
               .setSchemaDescriptor(new ChannelzFileDescriptorSupplier())
-              .addMethod(getGetTopChannelsMethodHelper())
-              .addMethod(getGetServersMethodHelper())
-              .addMethod(getGetServerSocketsMethodHelper())
-              .addMethod(getGetChannelMethodHelper())
-              .addMethod(getGetSubchannelMethodHelper())
-              .addMethod(getGetSocketMethodHelper())
+              .addMethod(getGetTopChannelsMethod())
+              .addMethod(getGetServersMethod())
+              .addMethod(getGetServerMethod())
+              .addMethod(getGetServerSocketsMethod())
+              .addMethod(getGetChannelMethod())
+              .addMethod(getGetSubchannelMethod())
+              .addMethod(getGetSocketMethod())
               .build();
         }
       }

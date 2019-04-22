@@ -18,7 +18,7 @@ package io.grpc.netty;
 
 import io.grpc.Attributes;
 import io.grpc.Internal;
-import io.grpc.internal.Channelz;
+import io.grpc.InternalChannelz;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http2.Http2ConnectionDecoder;
 import io.netty.handler.codec.http2.Http2ConnectionEncoder;
@@ -45,8 +45,9 @@ public abstract class GrpcHttp2ConnectionHandler extends Http2ConnectionHandler 
   }
 
   /**
-   * Same as {@link #handleProtocolNegotiationCompleted(Attributes, Channelz.Security)}
-   * but with no {@link Channelz.Security}.
+   * Same as {@link #handleProtocolNegotiationCompleted(
+   *   Attributes, io.grpc.InternalChannelz.Security)}
+   * but with no {@link io.grpc.InternalChannelz.Security}.
    *
    * @deprecated Use the two argument method instead.
    */
@@ -64,7 +65,8 @@ public abstract class GrpcHttp2ConnectionHandler extends Http2ConnectionHandler 
    * @param attrs arbitrary attributes passed after protocol negotiation (eg. SSLSession).
    * @param securityInfo informs channelz about the security protocol.
    */
-  public void handleProtocolNegotiationCompleted(Attributes attrs, Channelz.Security securityInfo) {
+  public void handleProtocolNegotiationCompleted(
+      Attributes attrs, InternalChannelz.Security securityInfo) {
   }
 
   /**
@@ -73,7 +75,22 @@ public abstract class GrpcHttp2ConnectionHandler extends Http2ConnectionHandler 
    * useful if the channel will soon be deregistered from the executor and used in a non-Netty
    * context.
    */
+  @SuppressWarnings("FutureReturnValueIgnored")
   public void notifyUnused() {
     channelUnused.setSuccess(null);
+  }
+
+  /** Get the attributes of the EquivalentAddressGroup used to create this transport. */
+  public Attributes getEagAttributes() {
+    return Attributes.EMPTY;
+  }
+
+  /**
+   * Returns the authority of the server. Only available on the client-side.
+   *
+   * @throws UnsupportedOperationException if on server-side
+   */
+  public String getAuthority() {
+    throw new UnsupportedOperationException();
   }
 }

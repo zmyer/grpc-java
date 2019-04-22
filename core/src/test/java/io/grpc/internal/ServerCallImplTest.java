@@ -21,9 +21,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.isA;
-import static org.mockito.Matchers.same;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.isA;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -34,14 +34,13 @@ import com.google.common.io.CharStreams;
 import io.grpc.CompressorRegistry;
 import io.grpc.Context;
 import io.grpc.DecompressorRegistry;
+import io.grpc.InternalChannelz.ServerStats;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.MethodDescriptor.Marshaller;
 import io.grpc.MethodDescriptor.MethodType;
 import io.grpc.ServerCall;
 import io.grpc.Status;
-import io.grpc.internal.Channelz.ServerStats;
-import io.grpc.internal.Channelz.ServerStats.Builder;
 import io.grpc.internal.ServerCallImpl.ServerStreamListenerImpl;
 import io.grpc.internal.testing.SingleMessageProducer;
 import java.io.ByteArrayInputStream;
@@ -89,7 +88,7 @@ public class ServerCallImplTest {
   public void setUp() {
     MockitoAnnotations.initMocks(this);
     context = Context.ROOT.withCancellation();
-    call = new ServerCallImpl<Long, Long>(stream, UNARY_METHOD, requestHeaders, context,
+    call = new ServerCallImpl<>(stream, UNARY_METHOD, requestHeaders, context,
         DecompressorRegistry.getDefaultInstance(), CompressorRegistry.getDefaultInstance(),
         serverCallTracer);
   }
@@ -106,13 +105,13 @@ public class ServerCallImplTest {
 
   private void callTracer0(Status status) {
     CallTracer tracer = CallTracer.getDefaultFactory().create();
-    Builder beforeBuilder = new Builder();
+    ServerStats.Builder beforeBuilder = new ServerStats.Builder();
     tracer.updateBuilder(beforeBuilder);
     ServerStats before = beforeBuilder.build();
     assertEquals(0, before.callsStarted);
-    assertEquals(0, before.lastCallStartedMillis);
+    assertEquals(0, before.lastCallStartedNanos);
 
-    call = new ServerCallImpl<Long, Long>(stream, UNARY_METHOD, requestHeaders, context,
+    call = new ServerCallImpl<>(stream, UNARY_METHOD, requestHeaders, context,
         DecompressorRegistry.getDefaultInstance(), CompressorRegistry.getDefaultInstance(),
         tracer);
 
@@ -122,7 +121,7 @@ public class ServerCallImplTest {
     // end: required boilerplate
 
     call.close(status, new Metadata());
-    Builder afterBuilder = new Builder();
+    ServerStats.Builder afterBuilder = new ServerStats.Builder();
     tracer.updateBuilder(afterBuilder);
     ServerStats after = afterBuilder.build();
     assertEquals(1, after.callsStarted);
@@ -218,7 +217,7 @@ public class ServerCallImplTest {
 
   private void sendMessage_serverSendsOne_closeOnSecondCall(
       MethodDescriptor<Long, Long> method) {
-    ServerCallImpl<Long, Long> serverCall = new ServerCallImpl<Long, Long>(
+    ServerCallImpl<Long, Long> serverCall = new ServerCallImpl<>(
         stream,
         method,
         requestHeaders,
@@ -252,7 +251,7 @@ public class ServerCallImplTest {
 
   private void sendMessage_serverSendsOne_closeOnSecondCall_appRunToCompletion(
       MethodDescriptor<Long, Long> method) {
-    ServerCallImpl<Long, Long> serverCall = new ServerCallImpl<Long, Long>(
+    ServerCallImpl<Long, Long> serverCall = new ServerCallImpl<>(
         stream,
         method,
         requestHeaders,
@@ -289,7 +288,7 @@ public class ServerCallImplTest {
 
   private void serverSendsOne_okFailsOnMissingResponse(
       MethodDescriptor<Long, Long> method) {
-    ServerCallImpl<Long, Long> serverCall = new ServerCallImpl<Long, Long>(
+    ServerCallImpl<Long, Long> serverCall = new ServerCallImpl<>(
         stream,
         method,
         requestHeaders,
@@ -344,7 +343,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_halfClosed() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
 
     streamListener.halfClosed();
 
@@ -354,7 +353,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_halfClosed_onlyOnce() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
     streamListener.halfClosed();
     // canceling the call should short circuit future halfClosed() calls.
     streamListener.closed(Status.CANCELLED);
@@ -367,7 +366,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_closedOk() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
 
     streamListener.closed(Status.OK);
 
@@ -379,7 +378,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_closedCancelled() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
 
     streamListener.closed(Status.CANCELLED);
 
@@ -391,7 +390,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_onReady() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
 
     streamListener.onReady();
 
@@ -401,7 +400,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_onReady_onlyOnce() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
     streamListener.onReady();
     // canceling the call should short circuit future halfClosed() calls.
     streamListener.closed(Status.CANCELLED);
@@ -414,7 +413,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_messageRead() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
     streamListener.messagesAvailable(new SingleMessageProducer(UNARY_METHOD.streamRequest(1234L)));
 
     verify(callListener).onMessage(1234L);
@@ -423,7 +422,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_messageRead_onlyOnce() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
     streamListener.messagesAvailable(new SingleMessageProducer(UNARY_METHOD.streamRequest(1234L)));
     // canceling the call should short circuit future halfClosed() calls.
     streamListener.closed(Status.CANCELLED);
@@ -436,7 +435,7 @@ public class ServerCallImplTest {
   @Test
   public void streamListener_unexpectedRuntimeException() {
     ServerStreamListenerImpl<Long> streamListener =
-        new ServerCallImpl.ServerStreamListenerImpl<Long>(call, callListener, context);
+        new ServerCallImpl.ServerStreamListenerImpl<>(call, callListener, context);
     doThrow(new RuntimeException("unexpected exception"))
         .when(callListener)
         .onMessage(any(Long.class));

@@ -16,17 +16,20 @@
 
 package io.grpc.grpclb;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
 import com.google.common.annotations.VisibleForTesting;
 import io.grpc.Attributes;
+import io.grpc.ConnectivityStateInfo;
 import io.grpc.EquivalentAddressGroup;
+import io.grpc.LoadBalancer.CreateSubchannelArgs;
 import io.grpc.LoadBalancer.Helper;
 import io.grpc.LoadBalancer.Subchannel;
+import io.grpc.LoadBalancer.SubchannelStateListener;
+import io.grpc.SynchronizationContext.ScheduledHandle;
 import java.util.HashMap;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -35,83 +38,72 @@ import java.util.concurrent.TimeUnit;
  */
 final class CachedSubchannelPool implements SubchannelPool {
   private final HashMap<EquivalentAddressGroup, CacheEntry> cache =
-      new HashMap<EquivalentAddressGroup, CacheEntry>();
+      new HashMap<>();
 
   private Helper helper;
-  private ScheduledExecutorService timerService;
 
   @VisibleForTesting
   static final long SHUTDOWN_TIMEOUT_MS = 10000;
 
   @Override
-  public void init(Helper helper, ScheduledExecutorService timerService) {
+  public void init(Helper helper) {
     this.helper = checkNotNull(helper, "helper");
-    this.timerService = checkNotNull(timerService, "timerService");
   }
 
   @Override
   public Subchannel takeOrCreateSubchannel(
-      EquivalentAddressGroup eag, Attributes defaultAttributes) {
-    CacheEntry entry = cache.remove(eag);
-    Subchannel subchannel;
+      EquivalentAddressGroup eag, Attributes defaultAttributes, SubchannelStateListener listener) {
+    final CacheEntry entry = cache.get(eag);
+    final Subchannel subchannel;
     if (entry == null) {
-      subchannel = helper.createSubchannel(eag, defaultAttributes);
+      final CacheEntry newEntry = new CacheEntry();
+      subchannel = helper.createSubchannel(CreateSubchannelArgs.newBuilder()
+          .setAddresses(eag)
+          .setAttributes(defaultAttributes)
+          .setStateListener(new StateListener(newEntry))
+          .build());
+      newEntry.init(subchannel);
+      cache.put(eag, newEntry);
+      newEntry.taken(listener);
     } else {
       subchannel = entry.subchannel;
-      entry.shutdownTimer.cancel(false);
+      checkState(eag.equals(subchannel.getAddresses()),
+          "Unexpected address change from %s to %s", eag, subchannel.getAddresses());
+      entry.taken(listener);
+      // Make the listener up-to-date with the latest state in case it has changed while it's in the
+      // cache.
+      helper.getSynchronizationContext().execute(new Runnable() {
+          @Override
+          public void run() {
+            entry.maybeNotifyStateListener();
+          }
+        });
     }
     return subchannel;
   }
 
   @Override
   public void returnSubchannel(Subchannel subchannel) {
-    CacheEntry prev = cache.get(subchannel.getAddresses());
-    if (prev != null) {
-      // Returning the same Subchannel twice has no effect.
-      // Returning a different Subchannel for an already cached EAG will cause the
-      // latter Subchannel to be shutdown immediately.
-      if (prev.subchannel != subchannel) {
-        subchannel.shutdown();
-      }
-      return;
-    }
-    final ShutdownSubchannelTask shutdownTask = new ShutdownSubchannelTask(subchannel);
-    ScheduledFuture<?> shutdownTimer =
-        timerService.schedule(
-            new ShutdownSubchannelScheduledTask(shutdownTask),
-            SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-    shutdownTask.timer = shutdownTimer;
-    CacheEntry entry = new CacheEntry(subchannel, shutdownTimer);
-    cache.put(subchannel.getAddresses(), entry);
+    CacheEntry entry = cache.get(subchannel.getAddresses());
+    checkArgument(entry != null, "Cache record for %s not found", subchannel);
+    checkArgument(entry.subchannel == subchannel,
+        "Subchannel being returned (%s) doesn't match the cache (%s)",
+        subchannel, entry.subchannel);
+    entry.returned();
   }
 
   @Override
   public void clear() {
     for (CacheEntry entry : cache.values()) {
-      entry.shutdownTimer.cancel(false);
+      entry.cancelShutdownTimer();
       entry.subchannel.shutdown();
     }
     cache.clear();
   }
 
   @VisibleForTesting
-  final class ShutdownSubchannelScheduledTask implements Runnable {
-    private final ShutdownSubchannelTask task;
-
-    ShutdownSubchannelScheduledTask(ShutdownSubchannelTask task) {
-      this.task = checkNotNull(task, "task");
-    }
-
-    @Override
-    public void run() {
-      helper.runSerialized(task);
-    }
-  }
-
-  @VisibleForTesting
   final class ShutdownSubchannelTask implements Runnable {
     private final Subchannel subchannel;
-    private ScheduledFuture<?> timer;
 
     private ShutdownSubchannelTask(Subchannel subchannel) {
       this.subchannel = checkNotNull(subchannel, "subchannel");
@@ -120,23 +112,67 @@ final class CachedSubchannelPool implements SubchannelPool {
     // This runs in channelExecutor
     @Override
     public void run() {
-      // getSubchannel() may have cancelled the timer after the timer has expired but before this
-      // task is actually run in the channelExecutor.
-      if (!timer.isCancelled()) {
-        CacheEntry entry = cache.remove(subchannel.getAddresses());
-        checkState(entry.subchannel == subchannel, "Inconsistent state");
-        subchannel.shutdown();
+      CacheEntry entry = cache.remove(subchannel.getAddresses());
+      checkState(entry.subchannel == subchannel, "Inconsistent state");
+      entry.cancelShutdownTimer();
+      subchannel.shutdown();
+    }
+  }
+
+  private class CacheEntry {
+    Subchannel subchannel;
+    ScheduledHandle shutdownTimer;
+    ConnectivityStateInfo state;
+    // Not null if outside of pool
+    SubchannelStateListener stateListener;
+
+    void init(Subchannel subchannel) {
+      this.subchannel = checkNotNull(subchannel, "subchannel");
+    }
+
+    void cancelShutdownTimer() {
+      if (shutdownTimer != null) {
+        shutdownTimer.cancel();
+        shutdownTimer = null;
+      }
+    }
+
+    void taken(SubchannelStateListener listener) {
+      checkState(stateListener == null, "Already out of pool");
+      stateListener = checkNotNull(listener, "listener");
+      cancelShutdownTimer();
+    }
+
+    void returned() {
+      checkState(stateListener != null, "Already in pool");
+      if (shutdownTimer == null) {
+        shutdownTimer = helper.getSynchronizationContext().schedule(
+            new ShutdownSubchannelTask(subchannel), SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS,
+            helper.getScheduledExecutorService());
+      } else {
+        checkState(shutdownTimer.isPending());
+      }
+      stateListener = null;
+    }
+
+    void maybeNotifyStateListener() {
+      if (stateListener != null && state != null) {
+        stateListener.onSubchannelState(subchannel, state);
       }
     }
   }
 
-  private static class CacheEntry {
-    final Subchannel subchannel;
-    final ScheduledFuture<?> shutdownTimer;
+  private static final class StateListener implements SubchannelStateListener {
+    private final CacheEntry entry;
 
-    CacheEntry(Subchannel subchannel, ScheduledFuture<?> shutdownTimer) {
-      this.subchannel = checkNotNull(subchannel, "subchannel");
-      this.shutdownTimer = checkNotNull(shutdownTimer, "shutdownTimer");
+    StateListener(CacheEntry entry) {
+      this.entry = checkNotNull(entry, "entry");
+    }
+
+    @Override
+    public void onSubchannelState(Subchannel subchannel, ConnectivityStateInfo newState) {
+      entry.state = newState;
+      entry.maybeNotifyStateListener();
     }
   }
 }
