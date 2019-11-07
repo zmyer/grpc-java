@@ -81,7 +81,8 @@ abstract class RetriableStream<ReqT> implements ClientStream {
   private final Throttle throttle;
 
   private volatile State state = new State(
-      new ArrayList<BufferEntry>(8), Collections.<Substream>emptyList(), null, null, false, false,
+      new ArrayList<BufferEntry>(8), Collections.<Substream>emptyList(), null,
+          null, false, false,
       false, 0);
 
   /**

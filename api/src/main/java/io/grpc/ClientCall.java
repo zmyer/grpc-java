@@ -148,7 +148,7 @@ public abstract class ClientCall<ReqT, RespT> {
      * {@link #sendMessage}) without requiring excessive buffering internally. This event is
      * just a suggestion and the application is free to ignore it, however doing so may
      * result in excessive buffering within the ClientCall.
-     *
+     *-
      * <p>If the type of a call is either {@link MethodDescriptor.MethodType#UNARY} or
      * {@link MethodDescriptor.MethodType#SERVER_STREAMING}, this callback may not be fired. Calls
      * that send exactly one message should not await this callback.
