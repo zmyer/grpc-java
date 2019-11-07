@@ -38,6 +38,7 @@ import io.grpc.internal.ServerTransportListener;
 import io.grpc.internal.TransportTracer;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFactory;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelInitializer;
@@ -45,7 +46,6 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.ServerChannel;
-import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.AbstractReferenceCounted;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.Future;
@@ -67,7 +67,7 @@ class NettyServer implements InternalServer, InternalWithLogId {
 
   private final InternalLogId logId;
   private final SocketAddress address;
-  private final Class<? extends ServerChannel> channelType;
+  private final ChannelFactory<? extends ServerChannel> channelFactory;
   private final Map<ChannelOption<?>, ?> channelOptions;
   private final ProtocolNegotiator protocolNegotiator;
   private final int maxStreamsPerConnection;
@@ -96,7 +96,7 @@ class NettyServer implements InternalServer, InternalWithLogId {
       new AtomicReference<>();
 
   NettyServer(
-      SocketAddress address, Class<? extends ServerChannel> channelType,
+      SocketAddress address, ChannelFactory<? extends ServerChannel> channelFactory,
       Map<ChannelOption<?>, ?> channelOptions,
       ObjectPool<? extends EventLoopGroup> bossGroupPool,
       ObjectPool<? extends EventLoopGroup> workerGroupPool,
@@ -110,7 +110,7 @@ class NettyServer implements InternalServer, InternalWithLogId {
       boolean permitKeepAliveWithoutCalls, long permitKeepAliveTimeInNanos,
       InternalChannelz channelz) {
     this.address = address;
-    this.channelType = checkNotNull(channelType, "channelType");
+    this.channelFactory = checkNotNull(channelFactory, "channelFactory");
     checkNotNull(channelOptions, "channelOptions");
     this.channelOptions = new HashMap<ChannelOption<?>, Object>(channelOptions);
     this.bossGroupPool = checkNotNull(bossGroupPool, "bossGroupPool");
@@ -156,11 +156,10 @@ class NettyServer implements InternalServer, InternalWithLogId {
 
     ServerBootstrap b = new ServerBootstrap();
     b.group(bossGroup, workerGroup);
-    b.channel(channelType);
-    if (NioServerSocketChannel.class.isAssignableFrom(channelType)) {
-      b.option(SO_BACKLOG, 128);
-      b.childOption(SO_KEEPALIVE, true);
-    }
+    b.channelFactory(channelFactory);
+    // For non-socket based channel, the option will be ignored.
+    b.option(SO_BACKLOG, 128);
+    b.childOption(SO_KEEPALIVE, true);
 
     if (channelOptions != null) {
       for (Map.Entry<ChannelOption<?>, ?> entry : channelOptions.entrySet()) {
@@ -172,7 +171,7 @@ class NettyServer implements InternalServer, InternalWithLogId {
 
     b.childHandler(new ChannelInitializer<Channel>() {
       @Override
-      public void initChannel(Channel ch) throws Exception {
+      public void initChannel(Channel ch) {
 
         ChannelPromise channelDone = ch.newPromise();
 
@@ -219,7 +218,7 @@ class NettyServer implements InternalServer, InternalWithLogId {
          * Releases the event loop if the channel is "done", possibly due to the channel closing.
          */
         final class LoopReleaser implements ChannelFutureListener {
-          boolean done;
+          private boolean done;
 
           @Override
           public void operationComplete(ChannelFuture future) throws Exception {
@@ -285,6 +284,12 @@ class NettyServer implements InternalServer, InternalWithLogId {
         eventLoopReferenceCounter.release();
       }
     });
+    try {
+      channel.closeFuture().await();
+    } catch (InterruptedException e) {
+      log.log(Level.FINE, "Interrupted while shutting down", e);
+      Thread.currentThread().interrupt();
+    }
   }
 
   @Override

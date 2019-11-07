@@ -9,7 +9,8 @@ plugins {
 
 repositories {
     maven { // The google mirror is less flaky than mavenCentral()
-        url "http://maven.aliyun.com/nexus/content/groups/public/" }
+        url "https://maven-central.storage-download.googleapis.com/repos/central/data/" }
+    mavenCentral()
     mavenLocal()
 }
 
@@ -21,8 +22,8 @@ targetCompatibility = 1.7
 
 // Feel free to delete the comment at the next line. It is just for safely
 // updating the version in our release process.
-def grpcVersion = '1.21.0-SNAPSHOT' // CURRENT_GRPC_VERSION
-def protobufVersion = '3.7.1'
+def grpcVersion = '1.26.0-SNAPSHOT' // CURRENT_GRPC_VERSION
+def protobufVersion = '3.10.0'
 def protocVersion = protobufVersion
 
 dependencies {
@@ -37,7 +38,7 @@ dependencies {
 
     testImplementation "io.grpc:grpc-testing:${grpcVersion}"
     testImplementation "junit:junit:4.12"
-    testImplementation "org.mockito:mockito-core:2.25.1"
+    testImplementation "org.mockito:mockito-core:2.28.2"
 }
 
 protobuf {
@@ -90,16 +91,16 @@ task helloWorldClient(type: CreateStartScripts) {
     classpath = startScripts.classpath
 }
 
-task authServer(type: CreateStartScripts) {
-    mainClassName = 'io.grpc.examples.authentication.AuthServer'
-    applicationName = 'auth-server'
+task hedgingHelloWorldServer(type: CreateStartScripts) {
+    mainClassName = 'io.grpc.examples.hedging.HedgingHelloWorldServer'
+    applicationName = 'hedging-hello-world-server'
     outputDir = new File(project.buildDir, 'tmp')
     classpath = startScripts.classpath
 }
 
-task authClient(type: CreateStartScripts) {
-    mainClassName = 'io.grpc.examples.authentication.AuthClient'
-    applicationName = 'auth-client'
+task hedgingHelloWorldClient(type: CreateStartScripts) {
+    mainClassName = 'io.grpc.examples.hedging.HedgingHelloWorldClient'
+    applicationName = 'hedging-hello-world-client'
     outputDir = new File(project.buildDir, 'tmp')
     classpath = startScripts.classpath
 }
@@ -116,8 +117,8 @@ applicationDistribution.into('bin') {
     from(routeGuideClient)
     from(helloWorldServer)
     from(helloWorldClient)
-    from(authServer)
-    from(authClient)
+    from(hedgingHelloWorldClient)
+    from(hedgingHelloWorldServer)
     from(compressingHelloWorldClient)
     fileMode = 0755
 }

@@ -100,6 +100,21 @@ public class AbstractManagedChannelImplBuilderTest {
   }
 
   @Test
+  public void offloadExecutor_normal() {
+    Executor executor = mock(Executor.class);
+    assertEquals(builder, builder.offloadExecutor(executor));
+    assertEquals(executor, builder.offloadExecutorPool.getObject());
+  }
+
+  @Test
+  public void offloadExecutor_null() {
+    ObjectPool<? extends Executor> defaultValue = builder.offloadExecutorPool;
+    builder.offloadExecutor(mock(Executor.class));
+    assertEquals(builder, builder.offloadExecutor(null));
+    assertEquals(defaultValue, builder.offloadExecutorPool);
+  }
+
+  @Test
   public void nameResolverFactory_default() {
     assertNotNull(builder.getNameResolverFactory());
   }
@@ -272,7 +287,7 @@ public class AbstractManagedChannelImplBuilderTest {
         .isInstanceOf(CensusTracingModule.TracingClientInterceptor.class);
     assertThat(effectiveInterceptors.get(1))
         .isInstanceOf(CensusStatsModule.StatsClientInterceptor.class);
-    assertThat(effectiveInterceptors.get(2)).isSameAs(DUMMY_USER_INTERCEPTOR);
+    assertThat(effectiveInterceptors.get(2)).isSameInstanceAs(DUMMY_USER_INTERCEPTOR);
   }
 
   @Test
@@ -283,7 +298,7 @@ public class AbstractManagedChannelImplBuilderTest {
     assertEquals(2, effectiveInterceptors.size());
     assertThat(effectiveInterceptors.get(0))
         .isInstanceOf(CensusTracingModule.TracingClientInterceptor.class);
-    assertThat(effectiveInterceptors.get(1)).isSameAs(DUMMY_USER_INTERCEPTOR);
+    assertThat(effectiveInterceptors.get(1)).isSameInstanceAs(DUMMY_USER_INTERCEPTOR);
   }
 
   @Test
@@ -294,7 +309,7 @@ public class AbstractManagedChannelImplBuilderTest {
     assertEquals(2, effectiveInterceptors.size());
     assertThat(effectiveInterceptors.get(0))
         .isInstanceOf(CensusStatsModule.StatsClientInterceptor.class);
-    assertThat(effectiveInterceptors.get(1)).isSameAs(DUMMY_USER_INTERCEPTOR);
+    assertThat(effectiveInterceptors.get(1)).isSameInstanceAs(DUMMY_USER_INTERCEPTOR);
   }
 
   @Test

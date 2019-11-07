@@ -159,7 +159,7 @@ final class GoogleAuthLibraryCallCredentials extends io.grpc.CallCredentials2 {
     // Always use HTTPS, by definition.
     final String scheme = "https";
     final int defaultPort = 443;
-    String path = "/" + MethodDescriptor.extractFullServiceName(method.getFullMethodName());
+    String path = "/" + method.getServiceName();
     URI uri;
     try {
       uri = new URI(scheme, authority, path, null, null);
@@ -296,8 +296,8 @@ final class GoogleAuthLibraryCallCredentials extends io.grpc.CallCredentials2 {
         methodPairs.add(new MethodPair(getter, setter));
       }
       {
-        Method getter = serviceAccountClass.getMethod("getPrivateKey");
-        Method setter = builderClass.getMethod("setPrivateKey", getter.getReturnType());
+        Method getter = serviceAccountClass.getMethod("getPrivateKeyId");
+        Method setter = builderClass.getMethod("setPrivateKeyId", getter.getReturnType());
         methodPairs.add(new MethodPair(getter, setter));
       }
     }

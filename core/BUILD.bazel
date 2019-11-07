@@ -30,7 +30,6 @@ java_library(
     ]),
     visibility = ["//:__subpackages__"],
     deps = [
-        ":perfmark",
         "//api",
         "//context",
         "@com_google_android_annotations//jar",
@@ -41,6 +40,7 @@ java_library(
         "@com_google_j2objc_j2objc_annotations//jar",
         "@io_opencensus_opencensus_api//jar",
         "@io_opencensus_opencensus_contrib_grpc_metrics//jar",
+        "@io_perfmark_perfmark_api//jar",
         "@org_codehaus_mojo_animal_sniffer_annotations//jar",
     ],
 )
@@ -63,17 +63,17 @@ java_library(
     ],
 )
 
+# Mirrors the dependencies included in the artifact on Maven Central for usage
+# with maven_install's override_targets. Purposefully does not export any
+# symbols, as it should only be used as a dep for pre-compiled binaries on
+# Maven Central.
 java_library(
-    name = "perfmark",
-    srcs = glob(
-        [
-            "src/main/java/io/grpc/perfmark/*.java",
-        ],
-        exclude = ["src/main/java/io/grpc/perfmark/package-info.java"],
-    ),
-    visibility = ["//:__subpackages__"],
-    deps = [
-        "@com_google_code_findbugs_jsr305//jar",
-        "@com_google_errorprone_error_prone_annotations//jar",
+    name = "core_maven",
+    visibility = ["//visibility:public"],
+    runtime_deps = [
+        ":inprocess",
+        ":internal",
+        ":util",
+        "//api",
     ],
 )

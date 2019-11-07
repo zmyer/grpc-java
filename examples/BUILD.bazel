@@ -1,3 +1,4 @@
+load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@io_grpc_grpc_java//:java_grpc_library.bzl", "java_grpc_library")
 
 proto_library(
@@ -71,6 +72,7 @@ java_library(
         ":route_guide_java_proto",
         "@com_google_api_grpc_proto_google_common_protos//jar",
         "@com_google_code_findbugs_jsr305//jar",
+        "@com_google_code_gson_gson",
         "@com_google_guava_guava//jar",
         "@com_google_protobuf//:protobuf_java",
         "@com_google_protobuf//:protobuf_java_util",
@@ -93,24 +95,6 @@ java_binary(
     name = "hello-world-server",
     testonly = 1,
     main_class = "io.grpc.examples.helloworld.HelloWorldServer",
-    runtime_deps = [
-        ":examples",
-    ],
-)
-
-java_binary(
-    name = "auth-client",
-    testonly = 1,
-    main_class = "io.grpc.examples.authentication.AuthClient",
-    runtime_deps = [
-        ":examples",
-    ],
-)
-
-java_binary(
-    name = "auth-server",
-    testonly = 1,
-    main_class = "io.grpc.examples.authentication.AuthServer",
     runtime_deps = [
         ":examples",
     ],

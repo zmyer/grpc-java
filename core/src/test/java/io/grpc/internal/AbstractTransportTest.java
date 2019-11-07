@@ -42,6 +42,7 @@ import static org.mockito.Mockito.verify;
 import com.google.common.base.Objects;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
+import com.google.common.io.ByteStreams;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
 import io.grpc.Attributes;
@@ -765,7 +766,7 @@ public abstract class AbstractTransportTest {
 
     // This attribute is available right after transport is started
     assertThat(((ConnectionClientTransport) client).getAttributes()
-        .get(GrpcAttributes.ATTR_CLIENT_EAG_ATTRS)).isSameAs(EAG_ATTRS);
+        .get(GrpcAttributes.ATTR_CLIENT_EAG_ATTRS)).isSameInstanceAs(EAG_ATTRS);
 
     MockServerTransportListener serverTransportListener
         = serverListener.takeListenerOrFail(TIMEOUT_MS, TimeUnit.MILLISECONDS);
@@ -785,9 +786,9 @@ public abstract class AbstractTransportTest {
     clientInOrder.verify(clientStreamTracerFactory).newClientStreamTracer(
         streamInfoCaptor.capture(), same(clientHeaders));
     ClientStreamTracer.StreamInfo streamInfo = streamInfoCaptor.getValue();
-    assertThat(streamInfo.getTransportAttrs()).isSameAs(
+    assertThat(streamInfo.getTransportAttrs()).isSameInstanceAs(
         ((ConnectionClientTransport) client).getAttributes());
-    assertThat(streamInfo.getCallOptions()).isSameAs(callOptions);
+    assertThat(streamInfo.getCallOptions()).isSameInstanceAs(callOptions);
 
     ClientStreamListenerBase clientStreamListener = new ClientStreamListenerBase();
     clientStream.start(clientStreamListener);
@@ -813,7 +814,7 @@ public abstract class AbstractTransportTest {
 
     // This attribute is still available when the transport is connected
     assertThat(((ConnectionClientTransport) client).getAttributes()
-        .get(GrpcAttributes.ATTR_CLIENT_EAG_ATTRS)).isSameAs(EAG_ATTRS);
+        .get(GrpcAttributes.ATTR_CLIENT_EAG_ATTRS)).isSameInstanceAs(EAG_ATTRS);
 
     serverStream.request(1);
     assertTrue(clientStreamListener.awaitOnReadyAndDrain(TIMEOUT_MS, TimeUnit.MILLISECONDS));
@@ -2293,7 +2294,7 @@ public abstract class AbstractTransportTest {
     @Override
     public String parse(InputStream stream) {
       try {
-        return new String(IoUtils.toByteArray(stream), UTF_8);
+        return new String(ByteStreams.toByteArray(stream), UTF_8);
       } catch (IOException ex) {
         throw new RuntimeException(ex);
       }

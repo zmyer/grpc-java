@@ -59,7 +59,7 @@ import javax.annotation.Nullable;
  * A DNS-based {@link NameResolver}.
  *
  * <p>Each {@code A} or {@code AAAA} record emits an {@link EquivalentAddressGroup} in the list
- * passed to {@link NameResolver.Observer#onResult(ResolutionResult)}.
+ * passed to {@link NameResolver.Listener2#onResult(ResolutionResult)}.
  *
  * @see DnsNameResolverProvider
  */
@@ -92,8 +92,6 @@ final class DnsNameResolver extends NameResolver {
       System.getProperty("io.grpc.internal.DnsNameResolverProvider.enable_jndi", "true");
   private static final String JNDI_LOCALHOST_PROPERTY =
       System.getProperty("io.grpc.internal.DnsNameResolverProvider.enable_jndi_localhost", "false");
-  private static final String JNDI_SRV_PROPERTY =
-      System.getProperty("io.grpc.internal.DnsNameResolverProvider.enable_grpclb", "false");
   private static final String JNDI_TXT_PROPERTY =
       System.getProperty("io.grpc.internal.DnsNameResolverProvider.enable_service_config", "false");
 
@@ -117,8 +115,6 @@ final class DnsNameResolver extends NameResolver {
   @VisibleForTesting
   static boolean enableJndiLocalhost = Boolean.parseBoolean(JNDI_LOCALHOST_PROPERTY);
   @VisibleForTesting
-  static boolean enableSrv = Boolean.parseBoolean(JNDI_SRV_PROPERTY);
-  @VisibleForTesting
   static boolean enableTxt = Boolean.parseBoolean(JNDI_TXT_PROPERTY);
 
   private static final ResourceResolverFactory resourceResolverFactory =
@@ -138,6 +134,8 @@ final class DnsNameResolver extends NameResolver {
   private final String authority;
   private final String host;
   private final int port;
+
+  /** Executor that will be used if an Executor is not provide via {@link NameResolver.Args}. */
   private final Resource<Executor> executorResource;
   private final long cacheTtlNanos;
   private final SynchronizationContext syncContext;
@@ -147,15 +145,26 @@ final class DnsNameResolver extends NameResolver {
   private ResolutionResults cachedResolutionResults;
   private boolean shutdown;
   private Executor executor;
+
+  /** True if using an executor resource that should be released after use. */
+  private final boolean usingExecutorResource;
+  private final boolean enableSrv;
+
   private boolean resolving;
 
-  // The field must be accessed from syncContext, although the methods on an Observer can be called
+  // The field must be accessed from syncContext, although the methods on an Listener2 can be called
   // from any thread.
-  private NameResolver.Observer observer;
+  private NameResolver.Listener2 listener;
 
-  DnsNameResolver(@Nullable String nsAuthority, String name, Helper helper,
-      Resource<Executor> executorResource, Stopwatch stopwatch, boolean isAndroid) {
-    Preconditions.checkNotNull(helper, "helper");
+  DnsNameResolver(
+      @Nullable String nsAuthority,
+      String name,
+      Args args,
+      Resource<Executor> executorResource,
+      Stopwatch stopwatch,
+      boolean isAndroid,
+      boolean enableSrv) {
+    Preconditions.checkNotNull(args, "args");
     // TODO: if a DNS server is provided as nsAuthority, use it.
     // https://www.captechconsulting.com/blogs/accessing-the-dusty-corners-of-dns-with-java
     this.executorResource = executorResource;
@@ -167,15 +176,18 @@ final class DnsNameResolver extends NameResolver {
         "nameUri (%s) doesn't have an authority", nameUri);
     host = nameUri.getHost();
     if (nameUri.getPort() == -1) {
-      port = helper.getDefaultPort();
+      port = args.getDefaultPort();
     } else {
       port = nameUri.getPort();
     }
-    this.proxyDetector = Preconditions.checkNotNull(helper.getProxyDetector(), "proxyDetector");
+    this.proxyDetector = Preconditions.checkNotNull(args.getProxyDetector(), "proxyDetector");
     this.cacheTtlNanos = getNetworkAddressCacheTtlNanos(isAndroid);
     this.stopwatch = Preconditions.checkNotNull(stopwatch, "stopwatch");
     this.syncContext =
-        Preconditions.checkNotNull(helper.getSynchronizationContext(), "syncContext");
+        Preconditions.checkNotNull(args.getSynchronizationContext(), "syncContext");
+    this.executor = args.getOffloadExecutor();
+    this.usingExecutorResource = executor == null;
+    this.enableSrv = enableSrv;
   }
 
   @Override
@@ -184,24 +196,26 @@ final class DnsNameResolver extends NameResolver {
   }
 
   @Override
-  public void start(Observer observer) {
-    Preconditions.checkState(this.observer == null, "already started");
-    executor = SharedResourceHolder.get(executorResource);
-    this.observer = Preconditions.checkNotNull(observer, "observer");
+  public void start(Listener2 listener) {
+    Preconditions.checkState(this.listener == null, "already started");
+    if (usingExecutorResource) {
+      executor = SharedResourceHolder.get(executorResource);
+    }
+    this.listener = Preconditions.checkNotNull(listener, "listener");
     resolve();
   }
 
   @Override
   public void refresh() {
-    Preconditions.checkState(observer != null, "not started");
+    Preconditions.checkState(listener != null, "not started");
     resolve();
   }
 
   private final class Resolve implements Runnable {
-    private final Observer savedObserver;
+    private final Listener2 savedListener;
 
-    Resolve(Observer savedObserver) {
-      this.savedObserver = Preconditions.checkNotNull(savedObserver, "savedObserver");
+    Resolve(Listener2 savedListener) {
+      this.savedListener = Preconditions.checkNotNull(savedListener, "savedListener");
     }
 
     @Override
@@ -229,7 +243,7 @@ final class DnsNameResolver extends NameResolver {
       try {
         proxiedAddr = proxyDetector.proxyFor(destination);
       } catch (IOException e) {
-        savedObserver.onError(
+        savedListener.onError(
             Status.UNAVAILABLE.withDescription("Unable to resolve host " + host).withCause(e));
         return;
       }
@@ -243,7 +257,7 @@ final class DnsNameResolver extends NameResolver {
                 .setAddresses(Collections.singletonList(server))
                 .setAttributes(Attributes.EMPTY)
                 .build();
-        savedObserver.onResult(resolutionResult);
+        savedListener.onResult(resolutionResult);
         return;
       }
 
@@ -273,7 +287,7 @@ final class DnsNameResolver extends NameResolver {
           logger.finer("Found DNS results " + resolutionResults + " for " + host);
         }
       } catch (Exception e) {
-        savedObserver.onError(
+        savedListener.onError(
             Status.UNAVAILABLE.withDescription("Unable to resolve host " + host).withCause(e));
         return;
       }
@@ -284,7 +298,7 @@ final class DnsNameResolver extends NameResolver {
       }
       servers.addAll(resolutionResults.balancerAddresses);
       if (servers.isEmpty()) {
-        savedObserver.onError(Status.UNAVAILABLE.withDescription(
+        savedListener.onError(Status.UNAVAILABLE.withDescription(
             "No DNS backend or balancer addresses found for " + host));
         return;
       }
@@ -295,7 +309,7 @@ final class DnsNameResolver extends NameResolver {
             parseServiceConfig(resolutionResults.txtRecords, random, getLocalHostname());
         if (serviceConfig != null) {
           if (serviceConfig.getError() != null) {
-            savedObserver.onError(serviceConfig.getError());
+            savedListener.onError(serviceConfig.getError());
             return;
           } else {
             @SuppressWarnings("unchecked")
@@ -308,7 +322,7 @@ final class DnsNameResolver extends NameResolver {
       }
       ResolutionResult resolutionResult =
           ResolutionResult.newBuilder().setAddresses(servers).setAttributes(attrs.build()).build();
-      savedObserver.onResult(resolutionResult);
+      savedListener.onResult(resolutionResult);
     }
   }
 
@@ -346,7 +360,7 @@ final class DnsNameResolver extends NameResolver {
       return;
     }
     resolving = true;
-    executor.execute(new Resolve(observer));
+    executor.execute(new Resolve(listener));
   }
 
   private boolean cacheRefreshRequired() {
@@ -361,7 +375,7 @@ final class DnsNameResolver extends NameResolver {
       return;
     }
     shutdown = true;
-    if (executor != null) {
+    if (executor != null && usingExecutorResource) {
       executor = SharedResourceHolder.release(executorResource, executor);
     }
   }
@@ -437,7 +451,6 @@ final class DnsNameResolver extends NameResolver {
    *
    * @throws IOException if one of the txt records contains improperly formatted JSON.
    */
-  @SuppressWarnings("unchecked")
   @VisibleForTesting
   static List<Map<String, ?>> parseTxtResults(List<String> txtRecords) throws IOException {
     List<Map<String, ?>> possibleServiceConfigChoices = new ArrayList<>();
@@ -451,7 +464,7 @@ final class DnsNameResolver extends NameResolver {
         throw new ClassCastException("wrong type " + rawChoices);
       }
       List<?> listChoices = (List<?>) rawChoices;
-      possibleServiceConfigChoices.addAll(ServiceConfigUtil.checkObjectList(listChoices));
+      possibleServiceConfigChoices.addAll(JsonUtil.checkObjectList(listChoices));
     }
     return possibleServiceConfigChoices;
   }
@@ -461,7 +474,7 @@ final class DnsNameResolver extends NameResolver {
     if (!serviceConfigChoice.containsKey(SERVICE_CONFIG_CHOICE_PERCENTAGE_KEY)) {
       return null;
     }
-    return ServiceConfigUtil.getDouble(serviceConfigChoice, SERVICE_CONFIG_CHOICE_PERCENTAGE_KEY);
+    return JsonUtil.getDouble(serviceConfigChoice, SERVICE_CONFIG_CHOICE_PERCENTAGE_KEY);
   }
 
   @Nullable
@@ -470,8 +483,8 @@ final class DnsNameResolver extends NameResolver {
     if (!serviceConfigChoice.containsKey(SERVICE_CONFIG_CHOICE_CLIENT_LANGUAGE_KEY)) {
       return null;
     }
-    return ServiceConfigUtil.checkStringList(
-        ServiceConfigUtil.getList(serviceConfigChoice, SERVICE_CONFIG_CHOICE_CLIENT_LANGUAGE_KEY));
+    return JsonUtil.checkStringList(
+        JsonUtil.getList(serviceConfigChoice, SERVICE_CONFIG_CHOICE_CLIENT_LANGUAGE_KEY));
   }
 
   @Nullable
@@ -479,8 +492,8 @@ final class DnsNameResolver extends NameResolver {
     if (!serviceConfigChoice.containsKey(SERVICE_CONFIG_CHOICE_CLIENT_HOSTNAME_KEY)) {
       return null;
     }
-    return ServiceConfigUtil.checkStringList(
-        ServiceConfigUtil.getList(serviceConfigChoice, SERVICE_CONFIG_CHOICE_CLIENT_HOSTNAME_KEY));
+    return JsonUtil.checkStringList(
+        JsonUtil.getList(serviceConfigChoice, SERVICE_CONFIG_CHOICE_CLIENT_HOSTNAME_KEY));
   }
 
   /**
@@ -559,7 +572,7 @@ final class DnsNameResolver extends NameResolver {
       }
     }
     Map<String, ?> sc =
-        ServiceConfigUtil.getObject(choice, SERVICE_CONFIG_CHOICE_SERVICE_CONFIG_KEY);
+        JsonUtil.getObject(choice, SERVICE_CONFIG_CHOICE_SERVICE_CONFIG_KEY);
     if (sc == null) {
       throw new VerifyException(String.format(
           "key '%s' missing in '%s'", choice, SERVICE_CONFIG_CHOICE_SERVICE_CONFIG_KEY));
@@ -673,6 +686,15 @@ final class DnsNameResolver extends NameResolver {
               .asSubclass(ResourceResolverFactory.class);
     } catch (ClassNotFoundException e) {
       logger.log(Level.FINE, "Unable to find JndiResourceResolverFactory, skipping.", e);
+      return null;
+    } catch (ClassCastException e) {
+      // This can happen if JndiResourceResolverFactory was removed by something like Proguard
+      // combined with a broken ClassLoader that prefers classes from the child over the parent
+      // while also not properly filtering dependencies in the parent that should be hidden. If the
+      // class loader prefers loading from the parent then ResourceresolverFactory would have also
+      // been loaded from the parent. If the class loader filtered deps, then
+      // JndiResourceResolverFactory wouldn't have been found.
+      logger.log(Level.FINE, "Unable to cast JndiResourceResolverFactory, skipping.", e);
       return null;
     }
     Constructor<? extends ResourceResolverFactory> jndiCtor;

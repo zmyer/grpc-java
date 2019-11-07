@@ -36,12 +36,12 @@ $ VERSION_FILES=(
   android-interop-testing/app/build.gradle
   core/src/main/java/io/grpc/internal/GrpcUtil.java
   cronet/build.gradle
-  documentation/android-channel-builder.md
   examples/build.gradle
   examples/pom.xml
   examples/android/clientcache/app/build.gradle
   examples/android/helloworld/app/build.gradle
   examples/android/routeguide/app/build.gradle
+  examples/android/strictmode/app/build.gradle
   examples/example-alts/build.gradle
   examples/example-gauth/build.gradle
   examples/example-gauth/pom.xml
@@ -70,7 +70,7 @@ would be used to create all `v1.7` tags (e.g. `v1.7.0`, `v1.7.1`).
    $ sed -i 's/[0-9]\+\.[0-9]\+\.[0-9]\+\(.*CURRENT_GRPC_VERSION\)/'$MAJOR.$((MINOR+1)).0'\1/' \
      "${VERSION_FILES[@]}"
    $ sed -i s/$MAJOR.$MINOR.$PATCH/$MAJOR.$((MINOR+1)).0/ \
-     compiler/src/test{,Lite,Nano}/golden/Test{,Deprecated}Service.java.txt
+     compiler/src/test{,Lite}/golden/Test{,Deprecated}Service.java.txt
    $ ./gradlew build
    $ git commit -a -m "Start $MAJOR.$((MINOR+1)).0 development cycle"
    ```
@@ -94,6 +94,14 @@ would be used to create all `v1.7` tags (e.g. `v1.7.0`, `v1.7.1`).
 7. Move items out of the release milestone that didn't make the cut. Issues that
    may be backported should stay in the release milestone. Treat issues with the
    'release blocker' label with special care.
+8. Begin compiling release notes. This produces a starting point:
+
+   ```bash
+   $ echo "## gRPC Java $MAJOR.$MINOR.0 Release Notes" && echo && \
+     git shortlog "$(git merge-base upstream/v$MAJOR.$((MINOR-1)).x upstream/v$MAJOR.$MINOR.x)"..upstream/v$MAJOR.$MINOR.x | cat && \
+     echo && echo && echo "Backported commits in previous release:" && \
+     git cherry -v v$MAJOR.$((MINOR-1)).0 upstream/v$MAJOR.$MINOR.x | grep ^-
+   ```
 
 Tagging the Release
 -------------------
@@ -110,7 +118,9 @@ Tagging the Release
    $ git checkout -b release
    # Bump documented versions. Don't forget protobuf version
    $ ${EDITOR:-nano -w} README.md
-   $ git commit -a -m "Update README to reference $MAJOR.$MINOR.$PATCH"
+   $ ${EDITOR:-nano -w} documentation/android-channel-builder.md
+   $ ${EDITOR:-nano -w} cronet/README.md
+   $ git commit -a -m "Update README etc to reference $MAJOR.$MINOR.$PATCH"
    ```
 3. Change root build files to remove "-SNAPSHOT" for the next release version
    (e.g. `0.7.0`). Commit the result and make a tag:
@@ -118,7 +128,7 @@ Tagging the Release
    ```bash
    # Change version to remove -SNAPSHOT
    $ sed -i 's/-SNAPSHOT\(.*CURRENT_GRPC_VERSION\)/\1/' "${VERSION_FILES[@]}"
-   $ sed -i s/-SNAPSHOT// compiler/src/test{,Lite,Nano}/golden/Test{,Deprecated}Service.java.txt
+   $ sed -i s/-SNAPSHOT// compiler/src/test{,Lite}/golden/Test{,Deprecated}Service.java.txt
    $ ./gradlew build
    $ git commit -a -m "Bump version to $MAJOR.$MINOR.$PATCH"
    $ git tag -a v$MAJOR.$MINOR.$PATCH -m "Version $MAJOR.$MINOR.$PATCH"
@@ -131,7 +141,7 @@ Tagging the Release
    $ sed -i 's/[0-9]\+\.[0-9]\+\.[0-9]\+\(.*CURRENT_GRPC_VERSION\)/'$MAJOR.$MINOR.$((PATCH+1))-SNAPSHOT'\1/' \
      "${VERSION_FILES[@]}"
    $ sed -i s/$MAJOR.$MINOR.$PATCH/$MAJOR.$MINOR.$((PATCH+1))-SNAPSHOT/ \
-     compiler/src/test{,Lite,Nano}/golden/Test{,Deprecated}Service.java.txt
+     compiler/src/test{,Lite}/golden/Test{,Deprecated}Service.java.txt
    $ ./gradlew build
    $ git commit -a -m "Bump version to $MAJOR.$MINOR.$((PATCH+1))-SNAPSHOT"
    ```
@@ -179,8 +189,8 @@ releases. Generate one for the new release by following the
 Update README.md
 ----------------
 After waiting ~1 day and verifying that the release appears on [Maven
-Central](https://mvnrepository.com/), cherry-pick the commit that updated the
-README into the master branch and go through review process.
+Central](https://search.maven.org/search?q=g:io.grpc), cherry-pick the commit
+that updated the README into the master branch and go through review process.
 
 ```
 $ git checkout -b bump-readme master
@@ -191,8 +201,8 @@ Update version referenced by tutorials
 --------------------------------------
 
 Update the `grpc_java_release_tag` in
-[\_data/config.yml](https://github.com/grpc/grpc.github.io/blob/master/_data/config.yml)
-of the grpc.github.io repository.
+[config.toml](https://github.com/grpc/grpc.io/blob/master/config.toml)
+of the grpc.io repository.
 
 Notify the Community
 --------------------
@@ -215,6 +225,7 @@ Now we need to update gh-pages with the new Javadoc:
 
 ```bash
 git checkout gh-pages
+git pull --ff-only
 rm -r javadoc/
 wget -O grpc-all-javadoc.jar "http://search.maven.org/remotecontent?filepath=io/grpc/grpc-all/$MAJOR.$MINOR.$PATCH/grpc-all-$MAJOR.$MINOR.$PATCH-javadoc.jar"
 unzip -d javadoc grpc-all-javadoc.jar

@@ -20,9 +20,12 @@ import static junit.framework.TestCase.assertSame;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import io.grpc.MethodDescriptor.Marshaller;
 import io.grpc.MethodDescriptor.MethodType;
+import io.grpc.testing.TestMethodDescriptors;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -91,6 +94,22 @@ public class MethodDescriptorTest {
   }
 
   @Test
+  public void safeImpliesIdempotent() {
+    MethodDescriptor<String, String> descriptor = MethodDescriptor.<String, String>newBuilder()
+        .setType(MethodType.UNARY)
+        .setFullMethodName("package.service/method")
+        .setRequestMarshaller(new StringMarshaller())
+        .setResponseMarshaller(new StringMarshaller())
+        .setSafe(true)
+        .build();
+    assertTrue(descriptor.isSafe());
+    assertTrue(descriptor.isIdempotent());
+    descriptor = descriptor.toBuilder().setIdempotent(false).build();
+    assertFalse(descriptor.isSafe());
+    assertFalse(descriptor.isIdempotent());
+  }
+
+  @Test
   public void safeAndNonUnary() {
     MethodDescriptor<String, String> descriptor = MethodDescriptor.<String, String>newBuilder()
         .setType(MethodType.SERVER_STREAMING)
@@ -99,8 +118,9 @@ public class MethodDescriptorTest {
         .setResponseMarshaller(new StringMarshaller())
         .build();
 
-    thrown.expect(IllegalArgumentException.class);
-    MethodDescriptor<String, String> unused = descriptor.toBuilder().setSafe(true).build();
+    // Verify it does not throw
+    MethodDescriptor<String, String> newDescriptor = descriptor.toBuilder().setSafe(true).build();
+    assertTrue(newDescriptor.isSafe());
   }
 
   @Test
@@ -133,6 +153,28 @@ public class MethodDescriptorTest {
         .setSampledToLocalTracing(true)
         .build();
     assertTrue(md4.isSampledToLocalTracing());
+  }
+
+  @Test
+  public void getServiceName_extractsService() {
+    Marshaller<Void> marshaller = TestMethodDescriptors.voidMarshaller();
+    MethodDescriptor<?, ?> md = MethodDescriptor.newBuilder(marshaller, marshaller)
+        .setType(MethodType.UNARY)
+        .setFullMethodName("foo/bar")
+        .build();
+
+    assertEquals("foo", md.getServiceName());
+  }
+
+  @Test
+  public void getServiceName_returnsNull() {
+    Marshaller<Void> marshaller = TestMethodDescriptors.voidMarshaller();
+    MethodDescriptor<?, ?> md = MethodDescriptor.newBuilder(marshaller, marshaller)
+        .setType(MethodType.UNARY)
+        .setFullMethodName("foo-bar")
+        .build();
+
+    assertNull(md.getServiceName());
   }
 
   @Test

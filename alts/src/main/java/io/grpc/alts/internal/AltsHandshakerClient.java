@@ -136,7 +136,7 @@ class AltsHandshakerClient {
       throw new IllegalStateException("Could not get enough key data from the handshake.");
     }
     byte[] key = new byte[KEY_LENGTH];
-    result.getKeyData().copyTo(key, 0, 0, KEY_LENGTH);
+    result.getKeyData().substring(0, KEY_LENGTH).copyTo(key, 0);
     return key;
   }
 
@@ -229,8 +229,14 @@ class AltsHandshakerClient {
     return resp.getOutFrames().asReadOnlyByteBuffer();
   }
 
+  private boolean closed = false;
+
   /** Closes the connection. */
   public void close() {
+    if (closed) {
+      return;
+    }
+    closed = true;
     handshakerStub.close();
   }
 }

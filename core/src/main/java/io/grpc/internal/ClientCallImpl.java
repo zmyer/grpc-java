@@ -46,8 +46,9 @@ import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.MethodDescriptor.MethodType;
 import io.grpc.Status;
-import io.grpc.perfmark.PerfMark;
-import io.grpc.perfmark.PerfTag;
+import io.perfmark.Link;
+import io.perfmark.PerfMark;
+import io.perfmark.Tag;
 import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.util.concurrent.CancellationException;
@@ -69,7 +70,7 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
       = "gzip".getBytes(Charset.forName("US-ASCII"));
 
   private final MethodDescriptor<ReqT, RespT> method;
-  private final PerfTag tag;
+  private final Tag tag;
   private final Executor callExecutor;
   private final CallTracer channelCallsTracer;
   private final Context context;
@@ -96,7 +97,7 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
       boolean retryEnabled) {
     this.method = method;
     // TODO(carl-mastrangelo): consider moving this construction to ManagedChannelImpl.
-    this.tag = PerfTag.create(PerfTag.allocateNumericId(), method.getFullMethodName());
+    this.tag = PerfMark.createTag(method.getFullMethodName(), System.identityHashCode(this));
     // If we know that the executor is a direct executor, we don't need to wrap it with a
     // SerializingExecutor. This is purely for performance reasons.
     // See https://github.com/grpc/grpc-java/issues/368
@@ -112,6 +113,7 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
     this.clientTransportProvider = clientTransportProvider;
     this.deadlineCancellationExecutor = deadlineCancellationExecutor;
     this.retryEnabled = retryEnabled;
+    PerfMark.event("ClientCall.<init>", tag);
   }
 
   private final class ContextCancellationListener implements CancellationListener {
@@ -183,12 +185,11 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
 
   @Override
   public void start(Listener<RespT> observer, Metadata headers) {
-    PerfMark.taskStart(
-        tag.getNumericTag(), Thread.currentThread().getName(), tag, "ClientCall.start");
+    PerfMark.startTask("ClientCall.start", tag);
     try {
       startInternal(observer, headers);
     } finally {
-      PerfMark.taskEnd(tag.getNumericTag(), Thread.currentThread().getName());
+      PerfMark.stopTask("ClientCall.start", tag);
     }
   }
 
@@ -249,7 +250,7 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
     boolean deadlineExceeded = effectiveDeadline != null && effectiveDeadline.isExpired();
     if (!deadlineExceeded) {
       logIfContextNarrowedTimeout(
-          effectiveDeadline, callOptions.getDeadline(), context.getDeadline());
+          effectiveDeadline, context.getDeadline(), callOptions.getDeadline());
       if (retryEnabled) {
         stream = clientTransportProvider.newRetriableStream(method, callOptions, headers, context);
       } else {
@@ -264,7 +265,8 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
       }
     } else {
       stream = new FailingClientStream(
-          DEADLINE_EXCEEDED.withDescription("deadline exceeded: " + effectiveDeadline));
+          DEADLINE_EXCEEDED.withDescription(
+              "ClientCall started after deadline exceeded: " + effectiveDeadline));
     }
 
     if (callOptions.getAuthority() != null) {
@@ -294,7 +296,7 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
     context.addListener(cancellationListener, directExecutor());
     if (effectiveDeadline != null
         // If the context has the effective deadline, we don't need to schedule an extra task.
-        && context.getDeadline() != effectiveDeadline
+        && !effectiveDeadline.equals(context.getDeadline())
         // If the channel has been terminated, we don't need to schedule an extra task.
         && deadlineCancellationExecutor != null) {
       deadlineCancellationFuture = startDeadlineTimer(effectiveDeadline);
@@ -312,7 +314,7 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
       Deadline effectiveDeadline, @Nullable Deadline outerCallDeadline,
       @Nullable Deadline callDeadline) {
     if (!log.isLoggable(Level.FINE) || effectiveDeadline == null
-        || outerCallDeadline != effectiveDeadline) {
+        || !effectiveDeadline.equals(outerCallDeadline)) {
       return;
     }
 
@@ -346,10 +348,23 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
 
     @Override
     public void run() {
+      InsightBuilder insight = new InsightBuilder();
+      stream.appendTimeoutInsight(insight);
       // DelayedStream.cancel() is safe to call from a thread that is different from where the
       // stream is created.
-      stream.cancel(DEADLINE_EXCEEDED.augmentDescription(
-          String.format("deadline exceeded after %dns", remainingNanos)));
+      long seconds = Math.abs(remainingNanos) / TimeUnit.SECONDS.toNanos(1);
+      long nanos = Math.abs(remainingNanos) % TimeUnit.SECONDS.toNanos(1);
+
+      StringBuilder buf = new StringBuilder();
+      buf.append("deadline exceeded after ");
+      if (remainingNanos < 0) {
+        buf.append('-');
+      }
+      buf.append(seconds);
+      buf.append(String.format(".%09d", nanos));
+      buf.append("s. ");
+      buf.append(insight);
+      stream.cancel(DEADLINE_EXCEEDED.augmentDescription(buf.toString()));
     }
   }
 
@@ -379,19 +394,23 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
 
   @Override
   public void request(int numMessages) {
-    checkState(stream != null, "Not started");
-    checkArgument(numMessages >= 0, "Number requested must be non-negative");
-    stream.request(numMessages);
+    PerfMark.startTask("ClientCall.request", tag);
+    try {
+      checkState(stream != null, "Not started");
+      checkArgument(numMessages >= 0, "Number requested must be non-negative");
+      stream.request(numMessages);
+    } finally {
+      PerfMark.stopTask("ClientCall.cancel", tag);
+    }
   }
 
   @Override
   public void cancel(@Nullable String message, @Nullable Throwable cause) {
-    PerfMark.taskStart(
-        tag.getNumericTag(), Thread.currentThread().getName(), tag, "ClientCall.cancel");
+    PerfMark.startTask("ClientCall.cancel", tag);
     try {
       cancelInternal(message, cause);
     } finally {
-      PerfMark.taskEnd(tag.getNumericTag(), Thread.currentThread().getName());
+      PerfMark.stopTask("ClientCall.cancel", tag);
     }
   }
 
@@ -426,12 +445,11 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
 
   @Override
   public void halfClose() {
-    PerfMark.taskStart(
-        tag.getNumericTag(), Thread.currentThread().getName(), tag, "ClientCall.halfClose");
+    PerfMark.startTask("ClientCall.halfClose", tag);
     try {
       halfCloseInternal();
     } finally {
-      PerfMark.taskEnd(tag.getNumericTag(), Thread.currentThread().getName());
+      PerfMark.stopTask("ClientCall.halfClose", tag);
     }
   }
 
@@ -445,12 +463,11 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
 
   @Override
   public void sendMessage(ReqT message) {
-    PerfMark.taskStart(
-        tag.getNumericTag(), Thread.currentThread().getName(), tag, "ClientCall.sendMessage");
+    PerfMark.startTask("ClientCall.sendMessage", tag);
     try {
       sendMessageInternal(message);
     } finally {
-      PerfMark.taskEnd(tag.getNumericTag(), Thread.currentThread().getName());
+      PerfMark.stopTask("ClientCall.sendMessage", tag);
     }
   }
 
@@ -512,7 +529,6 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
   private class ClientStreamListenerImpl implements ClientStreamListener {
     private final Listener<RespT> observer;
     private boolean closed;
-    private final long listenerScopeId = PerfTag.allocateNumericId();
 
     public ClientStreamListenerImpl(Listener<RespT> observer) {
       this.observer = checkNotNull(observer, "observer");
@@ -520,18 +536,29 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
 
     @Override
     public void headersRead(final Metadata headers) {
+      PerfMark.startTask("ClientStreamListener.headersRead", tag);
+      final Link link = PerfMark.linkOut();
+
       final class HeadersRead extends ContextRunnable {
         HeadersRead() {
           super(context);
         }
 
         @Override
-        public final void runInContext() {
+        public void runInContext() {
+          PerfMark.startTask("ClientCall$Listener.headersRead", tag);
+          PerfMark.linkIn(link);
+          try {
+            runInternal();
+          } finally {
+            PerfMark.stopTask("ClientCall$Listener.headersRead", tag);
+          }
+        }
+
+        private void runInternal() {
           if (closed) {
             return;
           }
-          PerfMark.taskStart(
-              listenerScopeId, Thread.currentThread().getName(), tag, "ClientCall.headersRead");
           try {
             observer.onHeaders(headers);
           } catch (Throwable t) {
@@ -539,33 +566,43 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
                 Status.CANCELLED.withCause(t).withDescription("Failed to read headers");
             stream.cancel(status);
             close(status, new Metadata());
-          } finally {
-            PerfMark.taskEnd(listenerScopeId, Thread.currentThread().getName());
           }
         }
       }
 
-      callExecutor.execute(new HeadersRead());
+      try {
+        callExecutor.execute(new HeadersRead());
+      } finally {
+        PerfMark.stopTask("ClientStreamListener.headersRead", tag);
+      }
     }
 
     @Override
     public void messagesAvailable(final MessageProducer producer) {
+      PerfMark.startTask("ClientStreamListener.messagesAvailable", tag);
+      final Link link = PerfMark.linkOut();
+
       final class MessagesAvailable extends ContextRunnable {
         MessagesAvailable() {
           super(context);
         }
 
         @Override
-        public final void runInContext() {
+        public void runInContext() {
+          PerfMark.startTask("ClientCall$Listener.messagesAvailable", tag);
+          PerfMark.linkIn(link);
+          try {
+            runInternal();
+          } finally {
+            PerfMark.stopTask("ClientCall$Listener.messagesAvailable", tag);
+          }
+        }
+
+        private void runInternal() {
           if (closed) {
             GrpcUtil.closeQuietly(producer);
             return;
           }
-          PerfMark.taskStart(
-              listenerScopeId,
-              Thread.currentThread().getName(),
-              tag,
-              "ClientCall.messagesAvailable");
           try {
             InputStream message;
             while ((message = producer.next()) != null) {
@@ -583,13 +620,15 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
                 Status.CANCELLED.withCause(t).withDescription("Failed to read message.");
             stream.cancel(status);
             close(status, new Metadata());
-          } finally {
-            PerfMark.taskEnd(listenerScopeId, Thread.currentThread().getName());
           }
         }
       }
 
-      callExecutor.execute(new MessagesAvailable());
+      try {
+        callExecutor.execute(new MessagesAvailable());
+      } finally {
+        PerfMark.stopTask("ClientStreamListener.messagesAvailable", tag);
+      }
     }
 
     /**
@@ -613,37 +652,55 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
 
     @Override
     public void closed(Status status, RpcProgress rpcProgress, Metadata trailers) {
+      PerfMark.startTask("ClientStreamListener.closed", tag);
+      try {
+        closedInternal(status, rpcProgress, trailers);
+      } finally {
+        PerfMark.stopTask("ClientStreamListener.closed", tag);
+      }
+    }
+
+    private void closedInternal(
+        Status status, @SuppressWarnings("unused") RpcProgress rpcProgress, Metadata trailers) {
       Deadline deadline = effectiveDeadline();
       if (status.getCode() == Status.Code.CANCELLED && deadline != null) {
         // When the server's deadline expires, it can only reset the stream with CANCEL and no
         // description. Since our timer may be delayed in firing, we double-check the deadline and
         // turn the failure into the likely more helpful DEADLINE_EXCEEDED status.
         if (deadline.isExpired()) {
-          status = DEADLINE_EXCEEDED;
+          InsightBuilder insight = new InsightBuilder();
+          stream.appendTimeoutInsight(insight);
+          status = DEADLINE_EXCEEDED.augmentDescription(
+              "ClientCall was cancelled at or after deadline. " + insight);
           // Replace trailers to prevent mixing sources of status and trailers.
           trailers = new Metadata();
         }
       }
       final Status savedStatus = status;
       final Metadata savedTrailers = trailers;
+      final Link link = PerfMark.linkOut();
       final class StreamClosed extends ContextRunnable {
         StreamClosed() {
           super(context);
         }
 
         @Override
-        public final void runInContext() {
+        public void runInContext() {
+          PerfMark.startTask("ClientCall$Listener.onClose", tag);
+          PerfMark.linkIn(link);
+          try {
+            runInternal();
+          } finally {
+            PerfMark.stopTask("ClientCall$Listener.onClose", tag);
+          }
+        }
+
+        private void runInternal() {
           if (closed) {
             // We intentionally don't keep the status or metadata from the server.
             return;
           }
-          PerfMark.taskStart(
-              listenerScopeId, Thread.currentThread().getName(), tag, "ClientCall.closed");
-          try {
-            close(savedStatus, savedTrailers);
-          } finally {
-            PerfMark.taskEnd(listenerScopeId, Thread.currentThread().getName());
-          }
+          close(savedStatus, savedTrailers);
         }
       }
 
@@ -652,15 +709,30 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
 
     @Override
     public void onReady() {
+      if (method.getType().clientSendsOneMessage()) {
+        return;
+      }
+
+      PerfMark.startTask("ClientStreamListener.onReady", tag);
+      final Link link = PerfMark.linkOut();
+
       final class StreamOnReady extends ContextRunnable {
         StreamOnReady() {
           super(context);
         }
 
         @Override
-        public final void runInContext() {
-          PerfMark.taskStart(
-              listenerScopeId, Thread.currentThread().getName(), tag, "ClientCall.onReady");
+        public void runInContext() {
+          PerfMark.startTask("ClientCall$Listener.onReady", tag);
+          PerfMark.linkIn(link);
+          try {
+            runInternal();
+          } finally {
+            PerfMark.stopTask("ClientCall$Listener.onReady", tag);
+          }
+        }
+
+        private void runInternal() {
           try {
             observer.onReady();
           } catch (Throwable t) {
@@ -668,13 +740,15 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT> {
                 Status.CANCELLED.withCause(t).withDescription("Failed to call onReady.");
             stream.cancel(status);
             close(status, new Metadata());
-          } finally {
-            PerfMark.taskEnd(listenerScopeId, Thread.currentThread().getName());
           }
         }
       }
 
-      callExecutor.execute(new StreamOnReady());
+      try {
+        callExecutor.execute(new StreamOnReady());
+      } finally {
+        PerfMark.stopTask("ClientStreamListener.onReady", tag);
+      }
     }
   }
 }

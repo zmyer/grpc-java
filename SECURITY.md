@@ -17,7 +17,7 @@ BoringSSL](#tls-with-netty-tcnative-on-boringssl).
 On Android we recommend the use of the [Play Services Dynamic Security
 Provider](https://www.appfoundry.be/blog/2014/11/18/Google-Play-Services-Dynamic-Security-Provider/)
 to ensure your application has an up-to-date OpenSSL library with the necessary
-ciper-suites and a reliable ALPN implementation. This requires [updating the
+cipher-suites and a reliable ALPN implementation. This requires [updating the
 security provider at
 runtime](https://developer.android.com/training/articles/security-gms-provider.html).
 
@@ -151,7 +151,7 @@ the dependency.
       <extension>
         <groupId>kr.motd.maven</groupId>
         <artifactId>os-maven-plugin</artifactId>
-        <version>1.5.0.Final</version>
+        <version>1.6.2</version>
       </extension>
     </extensions>
     <plugins>
@@ -346,6 +346,10 @@ If on Alpine Linux, try to use `grpc-netty-shaded` instead of `grpc-netty` or
 `netty-tcnative`. If those are not an option, you may consider using
 [netty-tcnative-alpine](https://github.com/pires/netty-tcnative-alpine).
 
+If on Fedora 30 or later and you see "libcrypt.so.1: cannot open shared object
+file: No such file or directory". Run `dnf -y install libxcrypt-compat` to
+install the necessary dependency.
+
 If you are running inside of an embedded Tomcat runtime (e.g., Spring Boot),
 then some versions of `netty-tcnative-boringssl-static` will have conflicts and
 won't work. You must use gRPC 1.4.0 or later.
@@ -389,7 +393,10 @@ grpc-netty version | netty-handler version | netty-tcnative-boringssl-static ver
 1.14.x-1.15.x      | 4.1.27.Final          | 2.0.12.Final
 1.16.x-1.17.x      | 4.1.30.Final          | 2.0.17.Final
 1.18.x-1.19.x      | 4.1.32.Final          | 2.0.20.Final
-1.20.x-            | 4.1.34.Final          | 2.0.22.Final
+1.20.x-1.21.x      | 4.1.34.Final          | 2.0.22.Final
+1.22.x             | 4.1.35.Final          | 2.0.25.Final
+1.23.x-1.24.x      | 4.1.38.Final          | 2.0.25.Final
+1.25.x-            | 4.1.42.Final          | 2.0.26.Final
 
 _(grpc-netty-shaded avoids issues with keeping these versions in sync.)_
 

@@ -104,6 +104,30 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
   public abstract T executor(Executor executor);
 
   /**
+   * Provides a custom executor that will be used for operations that block or are expensive.
+   *
+   * <p>It's an optional parameter. If the user has not provided an executor when the channel is
+   * built, the builder will use a static cached thread pool.
+   *
+   * <p>The channel won't take ownership of the given executor. It's caller's responsibility to shut
+   * down the executor when it's desired.
+   *
+   * @return this
+   * @throws UnsupportedOperationException if unsupported
+   * @since 1.25.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/6279")
+  public T offloadExecutor(Executor executor) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Deprecated
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/6279")
+  public T blockingExecutor(Executor executor) {
+    return offloadExecutor(executor);
+  }
+
+  /**
    * Adds interceptors that will be called before the channel performs its real work. This is
    * functionally equivalent to using {@link ClientInterceptors#intercept(Channel, List)}, but while
    * still having access to the original {@code ManagedChannel}. Interceptors run in the reverse
@@ -181,15 +205,12 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    * <p>This assumes prior knowledge that the target of this channel is using plaintext.  It will
    * not perform HTTP/1.1 upgrades.
    *
-   *
-   * @throws UnsupportedOperationException if plaintext mode is not supported.
    * @return this
+   * @throws UnsupportedOperationException if plaintext mode is not supported.
    * @since 1.11.0
    */
-  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1772")
-  @SuppressWarnings("deprecation")
   public T usePlaintext() {
-    return usePlaintext(true);
+    throw new UnsupportedOperationException();
   }
 
   /**
@@ -281,9 +302,7 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    *
    * <p>In idle mode the channel shuts down all connections, the NameResolver and the
    * LoadBalancer. A new RPC would take the channel out of idle mode. A channel starts in idle mode.
-   *
-   * <p>By default the channel will never go to idle mode after it leaves the initial idle
-   * mode.
+   * Defaults to 30 minutes.
    *
    * <p>This is an advisory option. Do not rely on any specific behavior related to this option.
    *
@@ -470,7 +489,7 @@ public abstract class ManagedChannelBuilder<T extends ManagedChannelBuilder<T>> 
    * Enables the retry and hedging mechanism provided by the gRPC library.
    *
    * <p>For the current release, this method may have a side effect that disables Census stats and
-   * tracing. Hedging support is not implemented yet.
+   * tracing.
    *
    * @return this
    * @since 1.11.0

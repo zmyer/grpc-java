@@ -35,13 +35,11 @@ import io.grpc.ChannelLogger.ChannelLogLevel;
 import io.grpc.ConnectivityState;
 import io.grpc.ConnectivityStateInfo;
 import io.grpc.EquivalentAddressGroup;
-import io.grpc.LoadBalancer.CreateSubchannelArgs;
 import io.grpc.LoadBalancer.Helper;
 import io.grpc.LoadBalancer.PickResult;
 import io.grpc.LoadBalancer.PickSubchannelArgs;
 import io.grpc.LoadBalancer.Subchannel;
 import io.grpc.LoadBalancer.SubchannelPicker;
-import io.grpc.LoadBalancer.SubchannelStateListener;
 import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
 import io.grpc.Status;
@@ -73,6 +71,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
@@ -83,7 +82,7 @@ import javax.annotation.concurrent.NotThreadSafe;
  * switches away from GRPCLB mode.
  */
 @NotThreadSafe
-final class GrpclbState implements SubchannelStateListener {
+final class GrpclbState {
   static final long FALLBACK_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(10);
   private static final Attributes LB_PROVIDED_BACKEND_ATTRS =
       Attributes.newBuilder().set(GrpcAttributes.ATTR_LB_PROVIDED_BACKEND, true).build();
@@ -105,11 +104,13 @@ final class GrpclbState implements SubchannelStateListener {
       }
     };
 
-  static enum Mode {
+  enum Mode {
     ROUND_ROBIN,
     PICK_FIRST,
   }
 
+  // backend list for pick_first will be picked from this index
+  private final int pickFirstIndex;
   private final String serviceName;
   private final Helper helper;
   private final SynchronizationContext syncContext;
@@ -159,7 +160,8 @@ final class GrpclbState implements SubchannelStateListener {
       SubchannelPool subchannelPool,
       TimeProvider time,
       Stopwatch stopwatch,
-      BackoffPolicy.Provider backoffPolicyProvider) {
+      BackoffPolicy.Provider backoffPolicyProvider,
+      int pickFirstIndex) {
     this.mode = checkNotNull(mode, "mode");
     this.helper = checkNotNull(helper, "helper");
     this.syncContext = checkNotNull(helper.getSynchronizationContext(), "syncContext");
@@ -171,14 +173,17 @@ final class GrpclbState implements SubchannelStateListener {
     this.backoffPolicyProvider = checkNotNull(backoffPolicyProvider, "backoffPolicyProvider");
     this.serviceName = checkNotNull(helper.getAuthority(), "helper returns null authority");
     this.logger = checkNotNull(helper.getChannelLogger(), "logger");
+    this.pickFirstIndex = pickFirstIndex;
   }
 
-  @Override
-  public void onSubchannelState(Subchannel subchannel, ConnectivityStateInfo newState) {
+  void handleSubchannelState(Subchannel subchannel, ConnectivityStateInfo newState) {
     if (newState.getState() == SHUTDOWN) {
       return;
     }
     if (!subchannels.values().contains(subchannel)) {
+      if (subchannelPool != null ) {
+        subchannelPool.handleSubchannelState(subchannel, newState);
+      }
       return;
     }
     if (mode == Mode.ROUND_ROBIN && newState.getState() == IDLE) {
@@ -224,6 +229,14 @@ final class GrpclbState implements SubchannelStateListener {
     maybeUpdatePicker();
   }
 
+  void requestConnection() {
+    for (RoundRobinEntry entry : currentPicker.pickList) {
+      if (entry instanceof IdleSubchannelEntry) {
+        ((IdleSubchannelEntry) entry).subchannel.requestConnection();
+      }
+    }
+  }
+
   private void maybeUseFallbackBackends() {
     if (balancerWorking) {
       return;
@@ -266,7 +279,7 @@ final class GrpclbState implements SubchannelStateListener {
 
   private void shutdownLbRpc() {
     if (lbStream != null) {
-      lbStream.close(null);
+      lbStream.close(Status.CANCELLED.withDescription("balancer shutdown").asException());
       // lbStream will be set to null in LbStream.cleanup()
     }
   }
@@ -323,13 +336,15 @@ final class GrpclbState implements SubchannelStateListener {
         // We close the subchannels through subchannelPool instead of helper just for convenience of
         // testing.
         for (Subchannel subchannel : subchannels.values()) {
-          subchannelPool.returnSubchannel(subchannel);
+          returnSubchannelToPool(subchannel);
         }
         subchannelPool.clear();
         break;
       case PICK_FIRST:
-        checkState(subchannels.size() == 1, "Excessive Subchannels: %s", subchannels);
-        subchannels.values().iterator().next().shutdown();
+        if (!subchannels.isEmpty()) {
+          checkState(subchannels.size() == 1, "Excessive Subchannels: %s", subchannels);
+          subchannels.values().iterator().next().shutdown();
+        }
         break;
       default:
         throw new AssertionError("Missing case for " + mode);
@@ -347,6 +362,10 @@ final class GrpclbState implements SubchannelStateListener {
     }
   }
 
+  private void returnSubchannelToPool(Subchannel subchannel) {
+    subchannelPool.returnSubchannel(subchannel, subchannel.getAttributes().get(STATE_INFO).get());
+  }
+
   @VisibleForTesting
   @Nullable
   GrpclbClientLoadRecorder getLoadRecorder() {
@@ -359,6 +378,7 @@ final class GrpclbState implements SubchannelStateListener {
   /**
    * Populate the round-robin lists with the given values.
    */
+  @SuppressWarnings("deprecation")
   private void useRoundRobinLists(
       List<DropEntry> newDropList, List<BackendAddressGroup> newBackendAddrList,
       @Nullable GrpclbClientLoadRecorder loadRecorder) {
@@ -377,8 +397,7 @@ final class GrpclbState implements SubchannelStateListener {
           if (subchannel == null) {
             subchannel = subchannels.get(eagAsList);
             if (subchannel == null) {
-              subchannel = subchannelPool.takeOrCreateSubchannel(
-                  eag, createSubchannelAttrs(), this);
+              subchannel = subchannelPool.takeOrCreateSubchannel(eag, createSubchannelAttrs());
               subchannel.requestConnection();
             }
             newSubchannelMap.put(eagAsList, subchannel);
@@ -396,18 +415,20 @@ final class GrpclbState implements SubchannelStateListener {
         for (Entry<List<EquivalentAddressGroup>, Subchannel> entry : subchannels.entrySet()) {
           List<EquivalentAddressGroup> eagList = entry.getKey();
           if (!newSubchannelMap.containsKey(eagList)) {
-            subchannelPool.returnSubchannel(entry.getValue());
+            returnSubchannelToPool(entry.getValue());
           }
         }
         subchannels = Collections.unmodifiableMap(newSubchannelMap);
         break;
       case PICK_FIRST:
-        List<EquivalentAddressGroup> eagList = new ArrayList<>();
+        int numOfEags = newBackendAddrList.size();
+        List<EquivalentAddressGroup> eagList = Arrays.asList(new EquivalentAddressGroup[numOfEags]);
         // Because for PICK_FIRST, we create a single Subchannel for all addresses, we have to
         // attach the tokens to the EAG attributes and use TokenAttachingLoadRecorder to put them on
         // headers.
         //
         // The PICK_FIRST code path doesn't cache Subchannels.
+        int offset = pickFirstIndex;
         for (BackendAddressGroup bag : newBackendAddrList) {
           EquivalentAddressGroup origEag = bag.getAddresses();
           Attributes eagAttrs = origEag.getAttributes();
@@ -415,20 +436,19 @@ final class GrpclbState implements SubchannelStateListener {
             eagAttrs = eagAttrs.toBuilder()
                 .set(GrpclbConstants.TOKEN_ATTRIBUTE_KEY, bag.getToken()).build();
           }
-          eagList.add(new EquivalentAddressGroup(origEag.getAddresses(), eagAttrs));
+          eagList.set(
+              offset++ % numOfEags,
+              new EquivalentAddressGroup(origEag.getAddresses(), eagAttrs));
         }
         Subchannel subchannel;
         if (subchannels.isEmpty()) {
-          subchannel =
-              helper.createSubchannel(CreateSubchannelArgs.newBuilder()
-                  .setAddresses(eagList)
-                  .setAttributes(createSubchannelAttrs())
-                  .setStateListener(this)
-                  .build());
+          // TODO(zhangkun83): remove the deprecation suppression on this method once migrated to
+          // the new createSubchannel().
+          subchannel = helper.createSubchannel(eagList, createSubchannelAttrs());
         } else {
           checkState(subchannels.size() == 1, "Unexpected Subchannel count: %s", subchannels);
           subchannel = subchannels.values().iterator().next();
-          helper.updateSubchannelAddresses(subchannel, eagList);
+          subchannel.updateAddresses(eagList);
         }
         subchannels = Collections.singletonMap(eagList, subchannel);
         newBackendList.add(
@@ -648,17 +668,13 @@ final class GrpclbState implements SubchannelStateListener {
       helper.refreshNameResolution();
     }
 
-    void close(@Nullable Exception error) {
+    void close(Exception error) {
       if (closed) {
         return;
       }
       closed = true;
       cleanUp();
-      if (error == null) {
-        lbRequestWriter.onCompleted();
-      } else {
-        lbRequestWriter.onError(error);
-      }
+      lbRequestWriter.onError(error);
     }
 
     private void cleanUp() {
@@ -732,7 +748,7 @@ final class GrpclbState implements SubchannelStateListener {
               break;
             default:
               pickList = Collections.<RoundRobinEntry>singletonList(
-                  new IdleSubchannelEntry(onlyEntry.subchannel));
+                  new IdleSubchannelEntry(onlyEntry.subchannel, syncContext));
           }
         }
         break;
@@ -915,15 +931,25 @@ final class GrpclbState implements SubchannelStateListener {
 
   @VisibleForTesting
   static final class IdleSubchannelEntry implements RoundRobinEntry {
+    private final SynchronizationContext syncContext;
     private final Subchannel subchannel;
+    private final AtomicBoolean connectionRequested = new AtomicBoolean(false);
 
-    IdleSubchannelEntry(Subchannel subchannel) {
+    IdleSubchannelEntry(Subchannel subchannel, SynchronizationContext syncContext) {
       this.subchannel = checkNotNull(subchannel, "subchannel");
+      this.syncContext = checkNotNull(syncContext, "syncContext");
     }
 
     @Override
     public PickResult picked(Metadata headers) {
-      subchannel.requestConnection();
+      if (connectionRequested.compareAndSet(false, true)) {
+        syncContext.execute(new Runnable() {
+            @Override
+            public void run() {
+              subchannel.requestConnection();
+            }
+          });
+      }
       return PickResult.withNoResult();
     }
 
@@ -935,7 +961,7 @@ final class GrpclbState implements SubchannelStateListener {
 
     @Override
     public int hashCode() {
-      return Objects.hashCode(subchannel);
+      return Objects.hashCode(subchannel, syncContext);
     }
 
     @Override
@@ -944,7 +970,8 @@ final class GrpclbState implements SubchannelStateListener {
         return false;
       }
       IdleSubchannelEntry that = (IdleSubchannelEntry) other;
-      return Objects.equal(subchannel, that.subchannel);
+      return Objects.equal(subchannel, that.subchannel)
+          && Objects.equal(syncContext, that.syncContext);
     }
   }
 
@@ -1027,13 +1054,5 @@ final class GrpclbState implements SubchannelStateListener {
       }
     }
 
-    @Override
-    public void requestConnection() {
-      for (RoundRobinEntry entry : pickList) {
-        if (entry instanceof IdleSubchannelEntry) {
-          ((IdleSubchannelEntry) entry).subchannel.requestConnection();
-        }
-      }
-    }
   }
 }

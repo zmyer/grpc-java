@@ -24,6 +24,7 @@ import static io.grpc.internal.GrpcUtil.MESSAGE_ACCEPT_ENCODING_KEY;
 import static io.grpc.internal.GrpcUtil.MESSAGE_ENCODING_KEY;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Throwables;
 import com.google.common.util.concurrent.MoreExecutors;
 import io.grpc.Attributes;
 import io.grpc.Codec;
@@ -36,8 +37,8 @@ import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
 import io.grpc.Status;
-import io.grpc.perfmark.PerfMark;
-import io.grpc.perfmark.PerfTag;
+import io.perfmark.PerfMark;
+import io.perfmark.Tag;
 import java.io.InputStream;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -53,7 +54,7 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
 
   private final ServerStream stream;
   private final MethodDescriptor<ReqT, RespT> method;
-  private final PerfTag tag;
+  private final Tag tag;
   private final Context.CancellableContext context;
   private final byte[] messageAcceptEncoding;
   private final DecompressorRegistry decompressorRegistry;
@@ -70,32 +71,35 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
   ServerCallImpl(ServerStream stream, MethodDescriptor<ReqT, RespT> method,
       Metadata inboundHeaders, Context.CancellableContext context,
       DecompressorRegistry decompressorRegistry, CompressorRegistry compressorRegistry,
-      CallTracer serverCallTracer) {
+      CallTracer serverCallTracer, Tag tag) {
     this.stream = stream;
     this.method = method;
-    // TODO(carl-mastrangelo): consider moving this to the ServerImpl to record startCall.
-    this.tag = PerfTag.create(PerfTag.allocateNumericId(), method.getFullMethodName());
     this.context = context;
     this.messageAcceptEncoding = inboundHeaders.get(MESSAGE_ACCEPT_ENCODING_KEY);
     this.decompressorRegistry = decompressorRegistry;
     this.compressorRegistry = compressorRegistry;
     this.serverCallTracer = serverCallTracer;
     this.serverCallTracer.reportCallStarted();
+    this.tag = tag;
   }
 
   @Override
   public void request(int numMessages) {
-    stream.request(numMessages);
+    PerfMark.startTask("ServerCall.request", tag);
+    try {
+      stream.request(numMessages);
+    } finally {
+      PerfMark.stopTask("ServerCall.request", tag);
+    }
   }
 
   @Override
   public void sendHeaders(Metadata headers) {
-    PerfMark.taskStart(
-        tag.getNumericTag(), Thread.currentThread().getName(), tag, "ServerCall.sendHeaders");
+    PerfMark.startTask("ServerCall.sendHeaders", tag);
     try {
       sendHeadersInternal(headers);
     } finally {
-      PerfMark.taskEnd(tag.getNumericTag(), Thread.currentThread().getName());
+      PerfMark.stopTask("ServerCall.sendHeaders", tag);
     }
   }
 
@@ -140,12 +144,11 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
 
   @Override
   public void sendMessage(RespT message) {
-    PerfMark.taskStart(
-        tag.getNumericTag(), Thread.currentThread().getName(), tag, "ServerCall.sendMessage");
+    PerfMark.startTask("ServerCall.sendMessage", tag);
     try {
       sendMessageInternal(message);
     } finally {
-      PerfMark.taskEnd(tag.getNumericTag(), Thread.currentThread().getName());
+      PerfMark.stopTask("ServerCall.sendMessage", tag);
     }
   }
 
@@ -194,12 +197,11 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
 
   @Override
   public void close(Status status, Metadata trailers) {
-    PerfMark.taskStart(
-        tag.getNumericTag(), Thread.currentThread().getName(), tag, "ServerCall.close");
+    PerfMark.startTask("ServerCall.close", tag);
     try {
       closeInternal(status, trailers);
     } finally {
-      PerfMark.taskEnd(tag.getNumericTag(), Thread.currentThread().getName());
+      PerfMark.stopTask("ServerCall.close", tag);
     }
   }
 
@@ -263,7 +265,6 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
     private final ServerCallImpl<ReqT, ?> call;
     private final ServerCall.Listener<ReqT> listener;
     private final Context.CancellableContext context;
-    private final long listenerScopeId = PerfTag.allocateNumericId();
 
     public ServerStreamListenerImpl(
         ServerCallImpl<ReqT, ?> call, ServerCall.Listener<ReqT> listener,
@@ -284,19 +285,23 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
           MoreExecutors.directExecutor());
     }
 
-    @SuppressWarnings("Finally") // The code avoids suppressing the exception thrown from try
     @Override
-    public void messagesAvailable(final MessageProducer producer) {
+    public void messagesAvailable(MessageProducer producer) {
+      PerfMark.startTask("ServerStreamListener.messagesAvailable", call.tag);
+      try {
+        messagesAvailableInternal(producer);
+      } finally {
+        PerfMark.stopTask("ServerStreamListener.messagesAvailable", call.tag);
+      }
+    }
+
+    @SuppressWarnings("Finally") // The code avoids suppressing the exception thrown from try
+    private void messagesAvailableInternal(final MessageProducer producer) {
       if (call.cancelled) {
         GrpcUtil.closeQuietly(producer);
         return;
       }
 
-      PerfMark.taskStart(
-          listenerScopeId,
-          Thread.currentThread().getName(),
-          call.tag,
-          "ServerCall.messagesAvailable");
       InputStream message;
       try {
         while ((message = producer.next()) != null) {
@@ -310,72 +315,60 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<ReqT, RespT> {
         }
       } catch (Throwable t) {
         GrpcUtil.closeQuietly(producer);
-        MoreThrowables.throwIfUnchecked(t);
+        Throwables.throwIfUnchecked(t);
         throw new RuntimeException(t);
-      } finally {
-        PerfMark.taskEnd(listenerScopeId, Thread.currentThread().getName());
       }
     }
 
     @Override
     public void halfClosed() {
-      if (call.cancelled) {
-        return;
-      }
-
-      PerfMark.taskStart(
-          listenerScopeId,
-          Thread.currentThread().getName(),
-          call.tag,
-          "ServerCall.halfClosed");
-
+      PerfMark.startTask("ServerStreamListener.halfClosed", call.tag);
       try {
+        if (call.cancelled) {
+          return;
+        }
+
         listener.onHalfClose();
       } finally {
-        PerfMark.taskEnd(listenerScopeId, Thread.currentThread().getName());
+        PerfMark.stopTask("ServerStreamListener.halfClosed", call.tag);
       }
     }
 
     @Override
     public void closed(Status status) {
-      PerfMark.taskStart(
-          listenerScopeId,
-          Thread.currentThread().getName(),
-          call.tag,
-          "ServerCall.closed");
+      PerfMark.startTask("ServerStreamListener.closed", call.tag);
       try {
-        try {
-          if (status.isOk()) {
-            listener.onComplete();
-          } else {
-            call.cancelled = true;
-            listener.onCancel();
-          }
-        } finally {
-          // Cancel context after delivering RPC closure notification to allow the application to
-          // clean up and update any state based on whether onComplete or onCancel was called.
-          context.cancel(null);
+        closedInternal(status);
+      } finally {
+        PerfMark.stopTask("ServerStreamListener.closed", call.tag);
+      }
+    }
 
+    private void closedInternal(Status status) {
+      try {
+        if (status.isOk()) {
+          listener.onComplete();
+        } else {
+          call.cancelled = true;
+          listener.onCancel();
         }
       } finally {
-        PerfMark.taskEnd(listenerScopeId, Thread.currentThread().getName());
+        // Cancel context after delivering RPC closure notification to allow the application to
+        // clean up and update any state based on whether onComplete or onCancel was called.
+        context.cancel(null);
       }
     }
 
     @Override
     public void onReady() {
-      if (call.cancelled) {
-        return;
-      }
-      PerfMark.taskStart(
-          listenerScopeId,
-          Thread.currentThread().getName(),
-          call.tag,
-          "ServerCall.closed");
+      PerfMark.startTask("ServerStreamListener.onReady", call.tag);
       try {
+        if (call.cancelled) {
+          return;
+        }
         listener.onReady();
       } finally {
-        PerfMark.taskEnd(listenerScopeId, Thread.currentThread().getName());
+        PerfMark.stopTask("ServerCall.closed", call.tag);
       }
     }
   }

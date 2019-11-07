@@ -176,6 +176,22 @@ public class InternalSubchannelTest {
         isA(TransportLogger.class));
   }
 
+  @Test public void eagAuthorityOverride_propagatesToTransport() {
+    SocketAddress addr = new SocketAddress() {};
+    String overriddenAuthority = "authority-override";
+    Attributes attr = Attributes.newBuilder()
+            .set(EquivalentAddressGroup.ATTR_AUTHORITY_OVERRIDE, overriddenAuthority).build();
+    createInternalSubchannel(new EquivalentAddressGroup(Arrays.asList(addr), attr));
+
+    // First attempt
+    assertNull(internalSubchannel.obtainActiveTransport());
+    assertEquals(CONNECTING, internalSubchannel.getState());
+    verify(mockTransportFactory).newClientTransport(
+        eq(addr),
+        eq(createClientTransportOptions().setAuthority(overriddenAuthority).setEagAttributes(attr)),
+        isA(TransportLogger.class));
+  }
+
   @Test public void singleAddressReconnect() {
     SocketAddress addr = mock(SocketAddress.class);
     createInternalSubchannel(addr);
@@ -839,6 +855,7 @@ public class InternalSubchannelTest {
     internalSubchannel.shutdown(SHUTDOWN_REASON);
     verify(transportInfo.transport).shutdown(same(SHUTDOWN_REASON));
     assertExactCallbackInvokes("onStateChange:SHUTDOWN");
+    transportInfo.listener.transportShutdown(SHUTDOWN_REASON);
 
     transportInfo.listener.transportTerminated();
     assertExactCallbackInvokes("onTerminated");
@@ -1144,7 +1161,9 @@ public class InternalSubchannelTest {
     internalSubchannel.obtainActiveTransport();
 
     MockClientTransportInfo t0 = transports.poll();
+    t0.listener.transportReady();
     assertTrue(channelz.containsClientSocket(t0.transport.getLogId()));
+    t0.listener.transportShutdown(Status.RESOURCE_EXHAUSTED);
     t0.listener.transportTerminated();
     assertFalse(channelz.containsClientSocket(t0.transport.getLogId()));
   }
@@ -1176,32 +1195,32 @@ public class InternalSubchannelTest {
         new EquivalentAddressGroup(Arrays.asList(addr1, addr2), attr1),
         new EquivalentAddressGroup(Arrays.asList(addr3), attr2),
         new EquivalentAddressGroup(Arrays.asList(addr4, addr5), attr3)));
-    assertThat(index.getCurrentAddress()).isSameAs(addr1);
-    assertThat(index.getCurrentEagAttributes()).isSameAs(attr1);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr1);
+    assertThat(index.getCurrentEagAttributes()).isSameInstanceAs(attr1);
     assertThat(index.isAtBeginning()).isTrue();
     assertThat(index.isValid()).isTrue();
 
     index.increment();
-    assertThat(index.getCurrentAddress()).isSameAs(addr2);
-    assertThat(index.getCurrentEagAttributes()).isSameAs(attr1);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr2);
+    assertThat(index.getCurrentEagAttributes()).isSameInstanceAs(attr1);
     assertThat(index.isAtBeginning()).isFalse();
     assertThat(index.isValid()).isTrue();
 
     index.increment();
-    assertThat(index.getCurrentAddress()).isSameAs(addr3);
-    assertThat(index.getCurrentEagAttributes()).isSameAs(attr2);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr3);
+    assertThat(index.getCurrentEagAttributes()).isSameInstanceAs(attr2);
     assertThat(index.isAtBeginning()).isFalse();
     assertThat(index.isValid()).isTrue();
 
     index.increment();
-    assertThat(index.getCurrentAddress()).isSameAs(addr4);
-    assertThat(index.getCurrentEagAttributes()).isSameAs(attr3);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr4);
+    assertThat(index.getCurrentEagAttributes()).isSameInstanceAs(attr3);
     assertThat(index.isAtBeginning()).isFalse();
     assertThat(index.isValid()).isTrue();
 
     index.increment();
-    assertThat(index.getCurrentAddress()).isSameAs(addr5);
-    assertThat(index.getCurrentEagAttributes()).isSameAs(attr3);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr5);
+    assertThat(index.getCurrentEagAttributes()).isSameInstanceAs(attr3);
     assertThat(index.isAtBeginning()).isFalse();
     assertThat(index.isValid()).isTrue();
 
@@ -1210,8 +1229,8 @@ public class InternalSubchannelTest {
     assertThat(index.isValid()).isFalse();
 
     index.reset();
-    assertThat(index.getCurrentAddress()).isSameAs(addr1);
-    assertThat(index.getCurrentEagAttributes()).isSameAs(attr1);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr1);
+    assertThat(index.getCurrentEagAttributes()).isSameInstanceAs(attr1);
     assertThat(index.isAtBeginning()).isTrue();
     assertThat(index.isValid()).isTrue();
 
@@ -1220,11 +1239,11 @@ public class InternalSubchannelTest {
     index.increment();
     index.increment();
     index.increment();
-    assertThat(index.getCurrentAddress()).isSameAs(addr5);
-    assertThat(index.getCurrentEagAttributes()).isSameAs(attr3);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr5);
+    assertThat(index.getCurrentEagAttributes()).isSameInstanceAs(attr3);
     index.reset();
-    assertThat(index.getCurrentAddress()).isSameAs(addr1);
-    assertThat(index.getCurrentEagAttributes()).isSameAs(attr1);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr1);
+    assertThat(index.getCurrentEagAttributes()).isSameInstanceAs(attr1);
   }
 
   @Test public void index_updateGroups_resets() {
@@ -1240,7 +1259,7 @@ public class InternalSubchannelTest {
     index.updateGroups(Arrays.asList(
         new EquivalentAddressGroup(Arrays.asList(addr1)),
         new EquivalentAddressGroup(Arrays.asList(addr2, addr3))));
-    assertThat(index.getCurrentAddress()).isSameAs(addr1);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr1);
   }
 
   @Test public void index_seekTo() {
@@ -1251,14 +1270,14 @@ public class InternalSubchannelTest {
         new EquivalentAddressGroup(Arrays.asList(addr1, addr2)),
         new EquivalentAddressGroup(Arrays.asList(addr3))));
     assertThat(index.seekTo(addr3)).isTrue();
-    assertThat(index.getCurrentAddress()).isSameAs(addr3);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr3);
     assertThat(index.seekTo(addr1)).isTrue();
-    assertThat(index.getCurrentAddress()).isSameAs(addr1);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr1);
     assertThat(index.seekTo(addr2)).isTrue();
-    assertThat(index.getCurrentAddress()).isSameAs(addr2);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr2);
     index.seekTo(new FakeSocketAddress());
     // Failed seekTo doesn't change the index
-    assertThat(index.getCurrentAddress()).isSameAs(addr2);
+    assertThat(index.getCurrentAddress()).isSameInstanceAs(addr2);
   }
 
   /** Create ClientTransportOptions. Should not be reused if it may be mutated. */
@@ -1274,13 +1293,16 @@ public class InternalSubchannelTest {
 
   private void createInternalSubchannel(EquivalentAddressGroup ... addrs) {
     List<EquivalentAddressGroup> addressGroups = Arrays.asList(addrs);
-    InternalLogId logId = InternalLogId.allocate("Subchannel", /*details=*/ null);
+    InternalLogId logId = InternalLogId.allocate("Subchannel", /*details=*/ AUTHORITY);
+    ChannelTracer subchannelTracer = new ChannelTracer(logId, 10,
+        fakeClock.getTimeProvider().currentTimeNanos(), "Subchannel");
     internalSubchannel = new InternalSubchannel(addressGroups, AUTHORITY, USER_AGENT,
         mockBackoffPolicyProvider, mockTransportFactory, fakeClock.getScheduledExecutorService(),
         fakeClock.getStopwatchSupplier(), syncContext, mockInternalSubchannelCallback,
         channelz, CallTracer.getDefaultFactory().create(),
-        new ChannelTracer(logId, 10, fakeClock.getTimeProvider().currentTimeNanos(), "Subchannel"),
-        logId, fakeClock.getTimeProvider());
+        subchannelTracer,
+        logId,
+        new ChannelLoggerImpl(subchannelTracer, fakeClock.getTimeProvider()));
   }
 
   private void assertNoCallbackInvoke() {

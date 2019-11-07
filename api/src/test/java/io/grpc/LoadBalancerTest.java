@@ -24,8 +24,8 @@ import io.grpc.LoadBalancer.CreateSubchannelArgs;
 import io.grpc.LoadBalancer.PickResult;
 import io.grpc.LoadBalancer.ResolvedAddresses;
 import io.grpc.LoadBalancer.Subchannel;
-import io.grpc.LoadBalancer.SubchannelStateListener;
 import java.net.SocketAddress;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -38,8 +38,6 @@ import org.junit.runners.JUnit4;
 public class LoadBalancerTest {
   private final Subchannel subchannel = mock(Subchannel.class);
   private final Subchannel subchannel2 = mock(Subchannel.class);
-  private final SubchannelStateListener subchannelStateListener =
-      mock(SubchannelStateListener.class);
   private final ClientStreamTracer.Factory tracerFactory = mock(ClientStreamTracer.Factory.class);
   private final Status status = Status.UNAVAILABLE.withDescription("for test");
   private final Status status2 = Status.UNAVAILABLE.withDescription("for test 2");
@@ -52,8 +50,8 @@ public class LoadBalancerTest {
   @Test
   public void pickResult_withSubchannel() {
     PickResult result = PickResult.withSubchannel(subchannel);
-    assertThat(result.getSubchannel()).isSameAs(subchannel);
-    assertThat(result.getStatus()).isSameAs(Status.OK);
+    assertThat(result.getSubchannel()).isSameInstanceAs(subchannel);
+    assertThat(result.getStatus()).isSameInstanceAs(Status.OK);
     assertThat(result.getStreamTracerFactory()).isNull();
     assertThat(result.isDrop()).isFalse();
   }
@@ -61,9 +59,9 @@ public class LoadBalancerTest {
   @Test
   public void pickResult_withSubchannelAndTracer() {
     PickResult result = PickResult.withSubchannel(subchannel, tracerFactory);
-    assertThat(result.getSubchannel()).isSameAs(subchannel);
-    assertThat(result.getStatus()).isSameAs(Status.OK);
-    assertThat(result.getStreamTracerFactory()).isSameAs(tracerFactory);
+    assertThat(result.getSubchannel()).isSameInstanceAs(subchannel);
+    assertThat(result.getStatus()).isSameInstanceAs(Status.OK);
+    assertThat(result.getStreamTracerFactory()).isSameInstanceAs(tracerFactory);
     assertThat(result.isDrop()).isFalse();
   }
 
@@ -71,7 +69,7 @@ public class LoadBalancerTest {
   public void pickResult_withNoResult() {
     PickResult result = PickResult.withNoResult();
     assertThat(result.getSubchannel()).isNull();
-    assertThat(result.getStatus()).isSameAs(Status.OK);
+    assertThat(result.getStatus()).isSameInstanceAs(Status.OK);
     assertThat(result.getStreamTracerFactory()).isNull();
     assertThat(result.isDrop()).isFalse();
   }
@@ -80,7 +78,7 @@ public class LoadBalancerTest {
   public void pickResult_withError() {
     PickResult result = PickResult.withError(status);
     assertThat(result.getSubchannel()).isNull();
-    assertThat(result.getStatus()).isSameAs(status);
+    assertThat(result.getStatus()).isSameInstanceAs(status);
     assertThat(result.getStreamTracerFactory()).isNull();
     assertThat(result.isDrop()).isFalse();
   }
@@ -89,7 +87,7 @@ public class LoadBalancerTest {
   public void pickResult_withDrop() {
     PickResult result = PickResult.withDrop(status);
     assertThat(result.getSubchannel()).isNull();
-    assertThat(result.getStatus()).isSameAs(status);
+    assertThat(result.getStatus()).isSameInstanceAs(status);
     assertThat(result.getStreamTracerFactory()).isNull();
     assertThat(result.isDrop()).isTrue();
   }
@@ -134,15 +132,15 @@ public class LoadBalancerTest {
       @Override
       public Subchannel createSubchannel(List<EquivalentAddressGroup> addrsIn, Attributes attrsIn) {
         assertThat(addrsIn).hasSize(1);
-        assertThat(addrsIn.get(0)).isSameAs(eag);
-        assertThat(attrsIn).isSameAs(attrs);
+        assertThat(addrsIn.get(0)).isSameInstanceAs(eag);
+        assertThat(attrsIn).isSameInstanceAs(attrs);
         ran = true;
         return subchannel;
       }
     }
 
     OverrideCreateSubchannel helper = new OverrideCreateSubchannel();
-    assertThat(helper.createSubchannel(eag, attrs)).isSameAs(subchannel);
+    assertThat(helper.createSubchannel(eag, attrs)).isSameInstanceAs(subchannel);
     assertThat(helper.ran).isTrue();
   }
 
@@ -163,7 +161,6 @@ public class LoadBalancerTest {
       new NoopHelper().createSubchannel(CreateSubchannelArgs.newBuilder()
           .setAddresses(eag)
           .setAttributes(attrs)
-          .setStateListener(subchannelStateListener)
           .build());
       fail("Should throw");
     } catch (UnsupportedOperationException e) {
@@ -171,6 +168,7 @@ public class LoadBalancerTest {
     }
   }
 
+  @Deprecated
   @Test
   public void helper_updateSubchannelAddresses_delegates() {
     class OverrideUpdateSubchannel extends NoopHelper {
@@ -179,9 +177,9 @@ public class LoadBalancerTest {
       @Override
       public void updateSubchannelAddresses(
           Subchannel subchannelIn, List<EquivalentAddressGroup> addrsIn) {
-        assertThat(subchannelIn).isSameAs(emptySubchannel);
+        assertThat(subchannelIn).isSameInstanceAs(emptySubchannel);
         assertThat(addrsIn).hasSize(1);
-        assertThat(addrsIn.get(0)).isSameAs(eag);
+        assertThat(addrsIn.get(0)).isSameInstanceAs(eag);
         ran = true;
       }
     }
@@ -191,6 +189,7 @@ public class LoadBalancerTest {
     assertThat(helper.ran).isTrue();
   }
 
+  @Deprecated
   @Test(expected = UnsupportedOperationException.class)
   public void helper_updateSubchannelAddressesList_throws() {
     new NoopHelper().updateSubchannelAddresses(null, Arrays.asList(eag));
@@ -223,6 +222,75 @@ public class LoadBalancerTest {
         return Arrays.asList(eag, eag);
       }
     }.getAddresses();
+  }
+
+  @Test
+  public void createSubchannelArgs_option_keyOps() {
+    CreateSubchannelArgs.Key<String> testKey = CreateSubchannelArgs.Key.create("test-key");
+    String testValue = "test-value";
+    CreateSubchannelArgs.Key<String> testWithDefaultKey = CreateSubchannelArgs.Key
+        .createWithDefault("test-key", testValue);
+    CreateSubchannelArgs args = CreateSubchannelArgs.newBuilder()
+        .setAddresses(eag)
+        .setAttributes(attrs)
+        .build();
+    assertThat(args.getOption(testKey)).isNull();
+    assertThat(args.getOption(testWithDefaultKey)).isSameInstanceAs(testValue);
+  }
+
+  @Test
+  public void createSubchannelArgs_option_addGet() {
+    String testValue = "test-value";
+    CreateSubchannelArgs.Key<String> testKey = CreateSubchannelArgs.Key.create("test-key");
+    CreateSubchannelArgs args = CreateSubchannelArgs.newBuilder()
+        .setAddresses(eag)
+        .setAttributes(attrs)
+        .addOption(testKey, testValue)
+        .build();
+    assertThat(args.getOption(testKey)).isEqualTo(testValue);
+  }
+
+  @Test
+  public void createSubchannelArgs_option_lastOneWins() {
+    String testValue1 = "test-value-1";
+    String testValue2 = "test-value-2";
+    CreateSubchannelArgs.Key<String> testKey = CreateSubchannelArgs.Key.create("test-key");
+    CreateSubchannelArgs args = CreateSubchannelArgs.newBuilder()
+        .setAddresses(eag)
+        .setAttributes(attrs)
+        .addOption(testKey, testValue1)
+        .addOption(testKey, testValue2)
+        .build();
+    assertThat(args.getOption(testKey)).isEqualTo(testValue2);
+  }
+
+  @Test
+  public void createSubchannelArgs_build() {
+    CreateSubchannelArgs.Key<Object> testKey = CreateSubchannelArgs.Key.create("test-key");
+    Object testValue = new Object();
+    CreateSubchannelArgs args = CreateSubchannelArgs.newBuilder()
+        .setAddresses(eag)
+        .setAttributes(attrs)
+        .addOption(testKey, testValue)
+        .build();
+    CreateSubchannelArgs rebuildedArgs = args.toBuilder().build();
+    assertThat(rebuildedArgs.getAddresses()).containsExactly(eag);
+    assertThat(rebuildedArgs.getAttributes()).isSameInstanceAs(attrs);
+    assertThat(rebuildedArgs.getOption(testKey)).isSameInstanceAs(testValue);
+  }
+
+  @Test
+  public void createSubchannelArgs_toString() {
+    CreateSubchannelArgs.Key<String> testKey = CreateSubchannelArgs.Key.create("test-key");
+    CreateSubchannelArgs args = CreateSubchannelArgs.newBuilder()
+        .setAddresses(eag)
+        .setAttributes(attrs)
+        .addOption(testKey, "test-value")
+        .build();
+    String str = args.toString();
+    assertThat(str).contains("addrs=");
+    assertThat(str).contains("attrs=");
+    assertThat(str).contains("customOptions=");
   }
 
   @Deprecated
@@ -291,6 +359,41 @@ public class LoadBalancerTest {
         ResolvedAddresses.newBuilder().setAddresses(servers).setAttributes(attrs).build());
     assertThat(serversCapture.get()).isEqualTo(servers);
     assertThat(attrsCapture.get()).isEqualTo(attrs);
+  }
+
+  @Deprecated
+  @Test
+  public void handleResolvedAddresses_noInfiniteLoop() {
+    final List<List<EquivalentAddressGroup>> serversCapture = new ArrayList<>();
+    final List<Attributes> attrsCapture = new ArrayList<>();
+
+    LoadBalancer balancer = new LoadBalancer() {
+      @Override
+      public void handleResolvedAddressGroups(
+          List<EquivalentAddressGroup> servers, Attributes attrs) {
+        serversCapture.add(servers);
+        attrsCapture.add(attrs);
+        super.handleResolvedAddressGroups(servers, attrs);
+      }
+
+      @Override
+      public void handleNameResolutionError(Status error) {
+      }
+
+      @Override
+      public void shutdown() {
+      }
+    };
+
+    List<EquivalentAddressGroup> servers = Arrays.asList(
+        new EquivalentAddressGroup(new SocketAddress(){}),
+        new EquivalentAddressGroup(new SocketAddress(){}));
+    balancer.handleResolvedAddresses(
+        ResolvedAddresses.newBuilder().setAddresses(servers).setAttributes(attrs).build());
+    assertThat(serversCapture).hasSize(1);
+    assertThat(attrsCapture).hasSize(1);
+    assertThat(serversCapture.get(0)).isEqualTo(servers);
+    assertThat(attrsCapture.get(0)).isEqualTo(attrs);
   }
 
   private static class NoopHelper extends LoadBalancer.Helper {

@@ -18,7 +18,7 @@ package io.grpc.cronet;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -78,7 +78,9 @@ public final class CronetClientTransportTest {
             executor,
             5000,
             false,
-            TransportTracer.getDefaultFactory().create());
+            TransportTracer.getDefaultFactory().create(),
+            false,
+            false);
     Runnable callback = transport.start(clientTransportListener);
     assertTrue(callback != null);
     callback.run();

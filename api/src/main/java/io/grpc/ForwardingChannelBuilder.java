@@ -72,6 +72,19 @@ public abstract class ForwardingChannelBuilder<T extends ForwardingChannelBuilde
   }
 
   @Override
+  public T offloadExecutor(Executor executor) {
+    delegate().offloadExecutor(executor);
+    return thisT();
+  }
+
+  @Deprecated
+  @Override
+  public T blockingExecutor(Executor executor) {
+    delegate().blockingExecutor(executor);
+    return thisT();
+  }
+
+  @Override
   public T intercept(List<ClientInterceptor> interceptors) {
     delegate().intercept(interceptors);
     return thisT();

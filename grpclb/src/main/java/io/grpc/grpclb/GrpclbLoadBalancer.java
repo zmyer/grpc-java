@@ -24,6 +24,7 @@ import com.google.common.base.Stopwatch;
 import io.grpc.Attributes;
 import io.grpc.ChannelLogger;
 import io.grpc.ChannelLogger.ChannelLogLevel;
+import io.grpc.ConnectivityStateInfo;
 import io.grpc.EquivalentAddressGroup;
 import io.grpc.LoadBalancer;
 import io.grpc.Status;
@@ -37,6 +38,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.annotation.Nullable;
@@ -50,7 +52,11 @@ import javax.annotation.Nullable;
 class GrpclbLoadBalancer extends LoadBalancer {
   private static final Mode DEFAULT_MODE = Mode.ROUND_ROBIN;
   private static final Logger logger = Logger.getLogger(GrpclbLoadBalancer.class.getName());
+  private static final AtomicInteger pickFirstGlobalIndex = new AtomicInteger();
 
+  /** Backend list for pick_first will be picked from this index. */
+  // & 0xFFFFFF to avoid overflow
+  private final int pickFirstIndex = pickFirstGlobalIndex.getAndIncrement() & 0xFFFFFF;
   private final Helper helper;
   private final TimeProvider time;
   private final Stopwatch stopwatch;
@@ -74,9 +80,17 @@ class GrpclbLoadBalancer extends LoadBalancer {
     this.stopwatch = checkNotNull(stopwatch, "stopwatch");
     this.backoffPolicyProvider = checkNotNull(backoffPolicyProvider, "backoffPolicyProvider");
     this.subchannelPool = checkNotNull(subchannelPool, "subchannelPool");
-    this.subchannelPool.init(helper);
+    this.subchannelPool.init(helper, this);
     recreateStates();
     checkNotNull(grpclbState, "grpclbState");
+  }
+
+  @Deprecated
+  @Override
+  public void handleSubchannelState(Subchannel subchannel, ConnectivityStateInfo newState) {
+    // grpclbState should never be null here since handleSubchannelState cannot be called while the
+    // lb is shutdown.
+    grpclbState.handleSubchannelState(subchannel, newState);
   }
 
   @Override
@@ -105,6 +119,13 @@ class GrpclbLoadBalancer extends LoadBalancer {
       recreateStates();
     }
     grpclbState.handleAddresses(newLbAddressGroups, newBackendServers);
+  }
+
+  @Override
+  public void requestConnection() {
+    if (grpclbState != null) {
+      grpclbState.requestConnection();
+    }
   }
 
   @VisibleForTesting
@@ -151,8 +172,8 @@ class GrpclbLoadBalancer extends LoadBalancer {
   private void recreateStates() {
     resetStates();
     checkState(grpclbState == null, "Should've been cleared");
-    grpclbState = new GrpclbState(mode, helper, subchannelPool, time, stopwatch,
-        backoffPolicyProvider);
+    grpclbState = new GrpclbState(
+        mode, helper, subchannelPool, time, stopwatch, backoffPolicyProvider, pickFirstIndex);
   }
 
   @Override

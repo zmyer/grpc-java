@@ -17,6 +17,7 @@
 package io.grpc.internal;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static io.grpc.LoadBalancer.ATTR_LOAD_BALANCING_CONFIG;
 
 import com.google.common.annotations.VisibleForTesting;
 import io.grpc.Attributes;
@@ -28,6 +29,8 @@ import io.grpc.LoadBalancer;
 import io.grpc.LoadBalancer.Helper;
 import io.grpc.LoadBalancer.PickResult;
 import io.grpc.LoadBalancer.PickSubchannelArgs;
+import io.grpc.LoadBalancer.ResolvedAddresses;
+import io.grpc.LoadBalancer.Subchannel;
 import io.grpc.LoadBalancer.SubchannelPicker;
 import io.grpc.LoadBalancerProvider;
 import io.grpc.LoadBalancerRegistry;
@@ -42,7 +45,7 @@ import java.util.Map;
 import java.util.logging.Logger;
 import javax.annotation.Nullable;
 
-public final class AutoConfiguredLoadBalancerFactory extends LoadBalancer.Factory {
+public final class AutoConfiguredLoadBalancerFactory {
   private static final Logger logger =
       Logger.getLogger(AutoConfiguredLoadBalancerFactory.class.getName());
   private static final String GRPCLB_POLICY_NAME = "grpclb";
@@ -60,8 +63,7 @@ public final class AutoConfiguredLoadBalancerFactory extends LoadBalancer.Factor
     this.defaultPolicy = checkNotNull(defaultPolicy, "defaultPolicy");
   }
 
-  @Override
-  public LoadBalancer newLoadBalancer(Helper helper) {
+  public AutoConfiguredLoadBalancer newLoadBalancer(Helper helper) {
     return new AutoConfiguredLoadBalancer(helper);
   }
 
@@ -82,7 +84,7 @@ public final class AutoConfiguredLoadBalancerFactory extends LoadBalancer.Factor
   }
 
   @VisibleForTesting
-  public final class AutoConfiguredLoadBalancer extends LoadBalancer {
+  public final class AutoConfiguredLoadBalancer {
     private final Helper helper;
     private LoadBalancer delegate;
     private LoadBalancerProvider delegateProvider;
@@ -99,9 +101,15 @@ public final class AutoConfiguredLoadBalancerFactory extends LoadBalancer.Factor
       delegate = delegateProvider.newLoadBalancer(helper);
     }
 
-    //  Must be run inside ChannelExecutor.
-    @Override
     public void handleResolvedAddresses(ResolvedAddresses resolvedAddresses) {
+      tryHandleResolvedAddresses(resolvedAddresses);
+    }
+
+    /**
+     * Returns non-OK status if resolvedAddresses is rejected and should be considered as a
+     * name-resolution error.
+     */
+    Status tryHandleResolvedAddresses(ResolvedAddresses resolvedAddresses) {
       List<EquivalentAddressGroup> servers = resolvedAddresses.getAddresses();
       Attributes attributes = resolvedAddresses.getAttributes();
       if (attributes.get(ATTR_LOAD_BALANCING_CONFIG) != null) {
@@ -119,7 +127,7 @@ public final class AutoConfiguredLoadBalancerFactory extends LoadBalancer.Factor
         delegate.shutdown();
         delegateProvider = null;
         delegate = new NoopLoadBalancer();
-        return;
+        return Status.OK;
       }
 
       if (delegateProvider == null
@@ -144,37 +152,32 @@ public final class AutoConfiguredLoadBalancerFactory extends LoadBalancer.Factor
       LoadBalancer delegate = getDelegate();
       if (selection.serverList.isEmpty()
           && !delegate.canHandleEmptyAddressListFromNameResolution()) {
-        delegate.handleNameResolutionError(
-            Status.UNAVAILABLE.withDescription(
-                "Name resolver returned no usable address. addrs="
-                + servers + ", attrs=" + attributes));
+        return Status.UNAVAILABLE.withDescription(
+            "NameResolver returned no usable address. addrs=" + servers + ", attrs=" + attributes);
       } else {
         delegate.handleResolvedAddresses(
             ResolvedAddresses.newBuilder()
                 .setAddresses(selection.serverList)
                 .setAttributes(attributes)
                 .build());
+        return Status.OK;
       }
     }
 
-    @Override
-    public void handleNameResolutionError(Status error) {
+    void handleNameResolutionError(Status error) {
       getDelegate().handleNameResolutionError(error);
     }
 
     @Deprecated
-    @Override
-    public void handleSubchannelState(Subchannel subchannel, ConnectivityStateInfo stateInfo) {
+    void handleSubchannelState(Subchannel subchannel, ConnectivityStateInfo stateInfo) {
       getDelegate().handleSubchannelState(subchannel, stateInfo);
     }
 
-    @Override
-    public boolean canHandleEmptyAddressListFromNameResolution() {
-      return true;
+    void requestConnection() {
+      getDelegate().requestConnection();
     }
 
-    @Override
-    public void shutdown() {
+    void shutdown() {
       delegate.shutdown();
       delegate = null;
     }
@@ -270,7 +273,7 @@ public final class AutoConfiguredLoadBalancerFactory extends LoadBalancer.Factor
             // We don't log the warning every time we have an update.
             roundRobinDueToGrpclbDepMissing = true;
             String errorMsg = "Found balancer addresses but grpclb runtime is missing."
-                + " Will use round_robin. Please include grpc-grpclb in your runtime depedencies.";
+                + " Will use round_robin. Please include grpc-grpclb in your runtime dependencies.";
             helper.getChannelLogger().log(ChannelLogLevel.ERROR, errorMsg);
             logger.warning(errorMsg);
           }

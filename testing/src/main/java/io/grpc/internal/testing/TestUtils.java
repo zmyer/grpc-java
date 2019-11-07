@@ -16,6 +16,8 @@
 
 package io.grpc.internal.testing;
 
+import com.google.common.base.Throwables;
+import io.grpc.internal.ConscryptLoader;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -24,8 +26,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
@@ -156,26 +156,28 @@ public class TestUtils {
     if (conscryptInstallAttempted) {
       return;
     }
-    Class<?> conscrypt;
-    try {
-      conscrypt = Class.forName("org.conscrypt.Conscrypt");
-    } catch (ClassNotFoundException ex) {
+    // Conscrypt-based I/O (like used in OkHttp) breaks on Windows.
+    // https://github.com/google/conscrypt/issues/444
+    if (System.mapLibraryName("test").endsWith(".dll")) {
       conscryptInstallAttempted = true;
       return;
     }
-    Method newProvider;
-    try {
-      newProvider = conscrypt.getMethod("newProvider");
-    } catch (NoSuchMethodException ex) {
-      throw new RuntimeException("Could not find newProvider method on Conscrypt", ex);
+    if (!ConscryptLoader.isPresent()) {
+      conscryptInstallAttempted = true;
+      return;
     }
     Provider provider;
     try {
-      provider = (Provider) newProvider.invoke(null);
-    } catch (IllegalAccessException ex) {
-      throw new RuntimeException("Could not invoke Conscrypt.newProvider", ex);
-    } catch (InvocationTargetException ex) {
-      throw new RuntimeException("Could not invoke Conscrypt.newProvider", ex);
+      provider = ConscryptLoader.newProvider();
+    } catch (Throwable t) {
+      Throwable root = Throwables.getRootCause(t);
+      // Conscrypt uses a newer version of glibc than available on RHEL 6
+      if (root instanceof UnsatisfiedLinkError && root.getMessage() != null
+          && root.getMessage().contains("GLIBC_2.14")) {
+        conscryptInstallAttempted = true;
+        return;
+      }
+      throw new RuntimeException("Could not create Conscrypt provider", t);
     }
     Security.addProvider(provider);
     conscryptInstallAttempted = true;
@@ -189,10 +191,14 @@ public class TestUtils {
     KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
     ks.load(null, null);
     CertificateFactory cf = CertificateFactory.getInstance("X.509");
-    X509Certificate cert = (X509Certificate) cf.generateCertificate(
-        new BufferedInputStream(new FileInputStream(certChainFile)));
-    X500Principal principal = cert.getSubjectX500Principal();
-    ks.setCertificateEntry(principal.getName("RFC2253"), cert);
+    BufferedInputStream in = new BufferedInputStream(new FileInputStream(certChainFile));
+    try {
+      X509Certificate cert = (X509Certificate) cf.generateCertificate(in);
+      X500Principal principal = cert.getSubjectX500Principal();
+      ks.setCertificateEntry(principal.getName("RFC2253"), cert);
+    } finally {
+      in.close();
+    }
 
     // Set up trust manager factory to use our key store.
     TrustManagerFactory trustManagerFactory =

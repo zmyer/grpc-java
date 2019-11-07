@@ -20,12 +20,12 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.MoreObjects;
 import com.google.common.collect.ImmutableList;
 import io.grpc.LoadBalancer.PickResult;
 import io.grpc.LoadBalancer.PickSubchannelArgs;
 import io.grpc.LoadBalancer.SubchannelPicker;
 import java.util.List;
-import java.util.concurrent.ThreadLocalRandom;
 
 final class InterLocalityPicker extends SubchannelPicker {
 
@@ -52,23 +52,18 @@ final class InterLocalityPicker extends SubchannelPicker {
     SubchannelPicker getPicker() {
       return childPicker;
     }
-  }
-
-  interface ThreadSafeRandom {
-    int nextInt(int bound);
-  }
-
-  private static final class ThreadSafeRadomImpl implements ThreadSafeRandom {
-    static final ThreadSafeRandom instance = new ThreadSafeRadomImpl();
 
     @Override
-    public int nextInt(int bound) {
-      return ThreadLocalRandom.current().nextInt(bound);
+    public String toString() {
+      return MoreObjects.toStringHelper(this)
+          .add("weight", weight)
+          .add("childPicker", childPicker)
+          .toString();
     }
   }
 
   InterLocalityPicker(List<WeightedChildPicker> weightedChildPickers) {
-    this(weightedChildPickers, ThreadSafeRadomImpl.instance);
+    this(weightedChildPickers, ThreadSafeRandom.ThreadSafeRandomImpl.instance);
   }
 
   @VisibleForTesting
@@ -112,5 +107,13 @@ final class InterLocalityPicker extends SubchannelPicker {
     }
 
     return childPicker.pickSubchannel(args);
+  }
+
+  @Override
+  public String toString() {
+    return MoreObjects.toStringHelper(this)
+        .add("weightedChildPickers", weightedChildPickers)
+        .add("totalWeight", totalWeight)
+        .toString();
   }
 }
